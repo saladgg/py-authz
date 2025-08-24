@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.env
+.code_sample.md
+archived/
+
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+
+# IDE
+.vscode/
+.idea/
+.qodo
+
+
+# Django
+*.sqlite3
+/static/
+/media/
+
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/

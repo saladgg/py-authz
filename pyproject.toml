@@ -1,0 +1,95 @@
+[project]
+name = "drf-authz"
+version = "0.1.0"
+description = "Seamless Keycloak + OpenFGA integration for Django REST Framework"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+license = { text = "MIT" }
+keywords = ["django", "drf", "keycloak", "oidc", "jwt", "openfga", "authorization", "authentication"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Framework :: Django",
+  "Framework :: Django :: 4",
+  "Framework :: Django :: 5",
+  "Topic :: Security :: Authentication",
+]
+
+dependencies = [
+  "Django>=4.2",
+  "djangorestframework>=3.14",
+  "djangorestframework-simplejwt>=5.3",
+  "mozilla-django-oidc>=4.0",
+  "python-keycloak>=4.1.0",
+  "openfga-sdk>=0.4.0",
+  "requests>=2.31",
+  "attrs>=23.0",
+  "PyJWT>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5",
+  "black>=24.4",
+  "isort>=5.13",
+  "pytest",
+  "pytest-django",
+  "httpx",
+  "types-requests",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourorg/drf-authz"
+Changelog = "https://github.com/yourorg/drf-authz/releases"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+DJANGO_SETTINGS_MODULE = "tests.settings"
+python_files = "test_*.py"
+addopts = "-ra -q --cov=drf_authz --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["src/drf_authz"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-django",
+    "pytest-cov",
+    "factory_boy",
+    "faker",
+    "requests-mock",
+    "tox",
+    "black",
+    "mypy",
+    "ruff",
+]
