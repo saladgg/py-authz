@@ -4,9 +4,9 @@ __pycache__/
 *.so
 .venv/
 .env
+.env.*
+!.env.example
 .code_sample.md
-archived/
-
 
 # Packaging
 build/
@@ -30,3 +30,9 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# New
+.claude
+.mypy_cache/
+.ruff_cache/
+todos.md

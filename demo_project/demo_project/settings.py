@@ -1,3 +1,12 @@
+"""Django settings for the django-authz demo project.
+
+This is for local development and demonstration only. Do NOT use these
+settings (especially SECRET_KEY, DEBUG=True) in production.
+
+Quick-start: set real values via environment variables prefixed with
+DJANGO_AUTHZ_ (e.g. DJANGO_AUTHZ_OPENFGA_API_URL).
+"""
+
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -13,7 +22,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
-    "drf-authz",
+    "django_authz",
     "api",
 ]
 
@@ -25,10 +34,12 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "drf-authz.middleware.request_context.RequestContextMiddleware", # Add to middleware
+    # Ensures request.user, request.context, and request.request_id are always set.
+    "django_authz.middleware.request_context.RequestContextMiddleware",
 ]
 
 ROOT_URLCONF = "demo_project.urls"
+
 TEMPLATES = [{
     "BACKEND": "django.template.backends.django.DjangoTemplates",
     "DIRS": [],
@@ -40,58 +51,57 @@ TEMPLATES = [{
         "django.contrib.messages.context_processors.messages",
     ]},
 }]
+
 WSGI_APPLICATION = "demo_project.wsgi.application"
 
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+}
 
 STATIC_URL = "static/"
 
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+# JWTAuthenticationBackend is a standard Django auth backend.
+# It decodes Bearer tokens and populates request.jwt_principal.
+AUTHENTICATION_BACKENDS = [
+    "django_authz.authentication.jwt.JWTAuthenticationBackend",
+    "django.contrib.auth.backends.ModelBackend",  # fallback for admin/session
+]
+
+# ---------------------------------------------------------------------------
+# Django REST Framework
+# ---------------------------------------------------------------------------
+
 REST_FRAMEWORK = {
+    # DRF uses its own auth pipeline. By default it checks SessionAuthentication
+    # and BasicAuthentication. For production JWT-only APIs, implement a custom
+    # DRF BaseAuthentication subclass that calls JWTAuthenticationBackend.
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "drf-authz.authentication.jwt.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
 }
 
-DRF-AUTHz = {
-    # Override via env in real deployments
+# ---------------------------------------------------------------------------
+# django-authz
+# ---------------------------------------------------------------------------
+
+DJANGO_AUTHZ = {
+    # Override with real values in production via environment variables:
+    #   DJANGO_AUTHZ_KEYCLOAK_URL, DJANGO_AUTHZ_KEYCLOAK_REALM, etc.
+    "VERIFY_JWT": False,  # disable signature verification in local dev
     "KEYCLOAK_URL": "https://keycloak.example.com",
     "KEYCLOAK_REALM": "myrealm",
     "KEYCLOAK_CLIENT_ID": "backend",
     "KEYCLOAK_CLIENT_SECRET": "***",
-    "OPENFGA_API_URL": "https://api.openfga.example.com",
-    "OPENFGA_STORE_ID": "01H...",
-}
-
-
-## ======================================================
-## Clean-up based on
-## ======================================================
-
-# Django settings.py
-
-INSTALLED_APPS = [
-    ...
-    "rest_framework",
-    "drf-authz",  # our library
-]
-
-REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        "drf-authz.authentication.jwt.JWTAuthentication",
-    ],
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-    ],
-}
-
-# Example DRF2Auth settings (optional)
-DRF2AUTH = {
-    "AUTHZ_BACKEND": "rest",  # or "sdk"
     "OPENFGA_API_URL": "http://localhost:8080",
-    "OPENFGA_STORE_ID": "store123",
-    "OIDC_ISSUER": "https://keycloak.example.com/realms/myrealm",
-    "OIDC_AUDIENCE": "my-backend-client",
+    "OPENFGA_STORE_ID": "01H...",
 }

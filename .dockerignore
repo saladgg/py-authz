@@ -1,0 +1,68 @@
+# ==========================================================
+# django-authz — .dockerignore
+# ==========================================================
+# Prevents unnecessary files from being sent to the Docker
+# build context, keeping builds fast and images lean.
+# ==========================================================
+
+# Version control
+.git/
+.gitignore
+
+# Virtual environments
+.venv/
+
+# Python byte-code caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Linter / type-checker caches
+.ruff_cache/
+.mypy_cache/
+
+# Build / distribution artefacts
+*.egg-info/
+dist/
+build/
+
+# Django local database
+*.sqlite3
+
+# IDE configuration
+.idea/
+.vscode/
+.qodo/
+
+# Documentation (not needed at runtime)
+docs/
+
+# Test suite (not needed at runtime)
+tests/
+
+# Archived / experimental code
+archived/
+
+# Environment files (use docker-compose env_file or --env-file instead)
+.env
+.env.*
+!.env.example
+
+# CI configuration
+tox.ini
+.pre-commit-config.yaml
+
+# Editor config
+.editorconfig
+
+# Memory / Claude artefacts
+.claude/
+
+# Misc
+*.md
+Makefile

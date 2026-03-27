@@ -1,23 +1,32 @@
-from rest_framework.decorators import api_view
+"""Example: Function-based views with the @fga_requires decorator.
+
+This file shows an alternative pattern to ``view_1.py``: using the
+``@fga_requires`` decorator directly on a CBV method instead of listing
+a permission class.
+
+``@fga_requires`` reads the object ID from the URL kwargs, builds the FGA
+tuple (``user:{request.user.pk}``), and raises ``PermissionDenied`` if the
+relation check fails. The OpenFGA client is configured from DJANGO_AUTHZ
+settings automatically.
+"""
+
 from rest_framework.response import Response
-from drf2auth.decorators import fga_requires
-from drf2auth.authorization.openfga import OpenFGAClient
+from rest_framework.views import APIView
 
-# Initialize FGA client
-fga_client = OpenFGAClient(
-    api_url="http://localhost:8080",
-    store_id="store123",
-)
-
-@api_view(["GET"])
-@fga_requires(client=fga_client, relation="reader")
-def get_document(request, doc_id):
-    """Example: Only 'reader' relation can access this endpoint."""
-    return Response({"doc_id": doc_id, "content": "Hello World"})
+from django_authz.authorization.decorators import fga_requires
 
 
-@api_view(["POST"])
-@fga_requires(client=fga_client, relation="editor")
-def edit_document(request, doc_id):
-    """Example: Only 'editor' relation can edit documents."""
-    return Response({"doc_id": doc_id, "status": "edited"})
+class DocumentView(APIView):
+    """Retrieve a document. Requires the ``reader`` FGA relation on ``doc:<doc_id>``."""
+
+    @fga_requires(object_type="doc", relation="reader", object_id_kwarg="doc_id")
+    def get(self, request, doc_id):
+        return Response({"doc_id": doc_id, "content": "Hello World"})
+
+
+class DocumentEditView(APIView):
+    """Edit a document. Requires the ``editor`` FGA relation on ``doc:<doc_id>``."""
+
+    @fga_requires(object_type="doc", relation="editor", object_id_kwarg="doc_id")
+    def post(self, request, doc_id):
+        return Response({"doc_id": doc_id, "status": "edited"})

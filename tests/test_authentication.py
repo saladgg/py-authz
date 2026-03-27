@@ -1,25 +1,39 @@
 import pytest
-import jwt
-from drf2auth.authentication.jwt import JWTValidator
+import jwt as pyjwt
+from django_authz.authentication.jwt import JWTAuthenticationBackend
 
-def test_decode_valid_token(monkeypatch):
-    """JWTValidator should decode a valid token with a known secret."""
+
+@pytest.mark.django_db
+def test_decode_unverified_token():
+    """JWTAuthenticationBackend.decode should decode a token when VERIFY_JWT=False."""
     secret = "mysecret"
-    payload = {"sub": "user123"}
-    token = jwt.encode(payload, secret, algorithm="HS256")
+    payload = {"sub": "user123", "email": "user@example.com"}
+    token = pyjwt.encode(payload, secret, algorithm="HS256")
 
-    validator = JWTValidator(jwks_url=None, algorithms=["HS256"])
-    # monkeypatch decode to bypass jwks fetch
-    monkeypatch.setattr(jwt, "decode", lambda *a, **kw: payload)
-
-    decoded = validator.decode(token)
+    backend = JWTAuthenticationBackend()
+    decoded = backend.decode(token)
     assert decoded["sub"] == "user123"
 
 
-def test_decode_invalid_token(monkeypatch):
-    """JWTValidator should raise error for invalid token."""
-    validator = JWTValidator(jwks_url=None)
-    monkeypatch.setattr(jwt, "decode", lambda *a, **kw: (_ for _ in ()).throw(Exception("Invalid")))
+@pytest.mark.django_db
+def test_authenticate_returns_none_without_token(rf):
+    """authenticate() returns None when no Bearer token is present."""
+    backend = JWTAuthenticationBackend()
+    request = rf.get("/")
+    assert backend.authenticate(request) is None
 
-    with pytest.raises(Exception):
-        validator.decode("bad.token.here")
+
+@pytest.mark.django_db
+def test_authenticate_with_valid_token(rf):
+    """authenticate() returns a user and sets request.jwt_principal."""
+    secret = "mysecret"
+    payload = {"sub": "u1", "preferred_username": "alice", "email": "alice@example.com"}
+    token = pyjwt.encode(payload, secret, algorithm="HS256")
+
+    request = rf.get("/", HTTP_AUTHORIZATION=f"Bearer {token}")
+    backend = JWTAuthenticationBackend()
+    user = backend.authenticate(request)
+
+    assert user is not None
+    assert user.username == "alice"
+    assert request.jwt_principal.subject == "u1"
