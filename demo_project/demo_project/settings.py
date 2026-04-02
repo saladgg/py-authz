@@ -96,7 +96,7 @@ REST_FRAMEWORK = {
 
 DJANGO_AUTHZ = {
     # Override with real values in production via environment variables:
-    #   DJANGO_AUTHZ_KEYCLOAK_URL, DJANGO_AUTHZ_KEYCLOAK_REALM, etc.
+    # DJANGO_AUTHZ_KEYCLOAK_URL, DJANGO_AUTHZ_KEYCLOAK_REALM, etc.
     "VERIFY_JWT": False,  # disable signature verification in local dev
     "KEYCLOAK_URL": "https://keycloak.example.com",
     "KEYCLOAK_REALM": "myrealm",

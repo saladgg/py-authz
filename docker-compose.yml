@@ -1,25 +1,13 @@
 # ==========================================================
 # django-authz — Docker Compose (development stack)
 # ==========================================================
-# Brings up three services for local end-to-end development:
-#
-#   demo      Django demo application (port 8000)
-#   keycloak  Identity provider used for JWT issuance (port 8080)
-#   openfga   Fine-grained authorisation server (port 8081)
-#
-# Usage:
-#   docker compose up --build     start the stack
-#   docker compose down -v        stop and remove volumes
-#
-# Configuration:
-#   Copy .env.example → .env and adjust values before starting.
-# ==========================================================
 
 services:
 
   # ── Django demo application ────────────────────────────
   demo:
     build: .
+    image: django-authz-demo:latest
     container_name: django-authz-demo
     ports:
       - "8000:8000"
@@ -33,41 +21,38 @@ services:
       OPENFGA_API_URL: http://openfga:8080
       OPENFGA_STORE_ID: ${OPENFGA_STORE_ID:-}
     depends_on:
-      keycloak:
-        condition: service_healthy
       openfga:
         condition: service_started
     volumes:
-      # Mount source for live reloading during development
       - ./demo_project:/app/demo_project
       - ./django_authz:/app/django_authz
+      - ./data/db:/app/demo_project/db   
 
   # ── Keycloak identity provider ─────────────────────────
   keycloak:
     image: quay.io/keycloak/keycloak:26.1
     container_name: keycloak
-    # start-dev uses an embedded H2 database — suitable for local use only
     command: start-dev
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USER:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
       KC_HEALTH_ENABLED: "true"
     ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '\"status\": \"UP\"'"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 45s
+      - "8081:8080" # Host port 8081 → Keycloak internal 8080
 
   # ── OpenFGA authorisation server ───────────────────────
   openfga:
     image: openfga/openfga:latest
     container_name: openfga
-    # Runs with an in-memory store by default — data is lost on restart
     command: run
     ports:
-      - "8081:8080"   # HTTP API
-      - "8082:8081"   # gRPC API
-      - "3000:3000"   # Playground UI
+      - "8082:8080" # Host: 8082 → OpenFGA HTTP API (8080 inside container)
+      - "8083:8081" # Host: 8083 → gRPC API
+      - "3000:3000" # Host: 3000 → PlaygroundUI use (https://play.fga.dev/sandbox/?fga_api_host=127.0.0.1:8082&fga_api_scheme=http)
+    environment:
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+      OPENFGA_HTTP_CORS_ENABLED: "true"
+      OPENFGA_HTTP_CORS_ALLOWED_ORIGINS: "https://play.fga.dev,http://localhost:3000,http://127.0.0.1:3000,http://localhost"
+      OPENFGA_HTTP_CORS_ALLOWED_HEADERS: "*"
+      OPENFGA_HTTP_CORS_ALLOWED_METHODS: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      OPENFGA_HTTP_CORS_ALLOW_PRIVATE_NETWORK: "true"

@@ -37,8 +37,8 @@ reusable Django library:
 
 ## Requirements
 
-- Python ≥ 3.10
-- Django ≥ 4.2
+- Python ≥ 3.13
+- Django ≥ 6.0
 - A running [Keycloak](https://www.keycloak.org/) instance (authentication)
 - A running [OpenFGA](https://openfga.dev/) instance (authorization)
 
@@ -323,6 +323,10 @@ All settings live under the `DJANGO_AUTHZ` dict in Django settings, or as
 | `OPENFGA_AUTH_TOKEN` | `None` | Bearer token for the OpenFGA API (optional) |
 
 ---
+
+
+
+
 
 ## Contributing
 

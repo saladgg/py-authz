@@ -88,20 +88,17 @@ all: format-check lint fix test
 # ----------------------------------------------------------
 # Docker
 # ----------------------------------------------------------
-# Manages the local development stack defined in docker-compose.yml.
-#
 # Services started by `docker-up`:
 #   demo      Django demo application   → http://localhost:8000
-#   keycloak  Identity provider (JWT)   → http://localhost:8080
-#   openfga   Fine-grained authz server → http://localhost:8081
-#             OpenFGA playground UI     → http://localhost:3000
-#
+#   keycloak  Identity provider (JWT)   → http://localhost:8081
+#   openfga   Fine-grained authz server → http://localhost:8082
+#             OpenFGA playground UI     → http://localhost:3000 (Known CORS issues)
+#   Access OpenFGA playground UI at:
+#   https://play.fga.dev/sandbox/?fga_api_host=127.0.0.1:8082&fga_api_scheme=http
+
 # Prerequisites: copy .env.example → .env before first run.
 
-.PHONY: docker-build docker-up docker-down docker-logs docker-shell
-
-docker-build:
-	docker build -t django-authz-demo .
+.PHONY: docker-up docker-down all-logs demo-app-logs demo-app-restart docker-shell docker-clean
 
 docker-up:
 	docker compose up --build
@@ -109,12 +106,21 @@ docker-up:
 docker-down:
 	docker compose down -v
 
-docker-logs:
-	docker compose logs -f
+all-logs:
+	docker compose logs -f --tail 500
+
+demo-app-logs:
+	docker compose logs demo -f --tail 500
+
+demo-app-restart:
+	docker compose restart demo
 
 docker-shell:
 	docker compose exec demo /bin/sh
 
+docker-clean:
+	docker compose down -v --remove-orphans
+	docker builder prune -f
 
 # ----------------------------------------------------------
 # Clean

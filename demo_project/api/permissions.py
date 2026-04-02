@@ -17,6 +17,7 @@ Example usage in a view::
 """
 
 from rest_framework.permissions import BasePermission
+# from django.contrib.auth.models import Permission
 
 from django_authz.authorization.openfga import OpenFGAClient
 
