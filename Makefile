@@ -1,141 +1,82 @@
 # ==========================================================
-# django-authz - Makefile
+# py-authz - Makefile
+# ----------------------------------------------------------
+# Unified interface for development, testing, and Docker
+# workflows. Run `make help` to see available targets.
 # ==========================================================
 
 .DEFAULT_GOAL := help
 
+# ----------------------------------------------------------
+# Variables
+# ----------------------------------------------------------
+
+SOURCE       := py_authz
+VENV_PYTHON  := .venv/bin/python
+
+# ----------------------------------------------------------
+# Help
+# ----------------------------------------------------------
+
 .PHONY: help
-help:
-	@echo "Available commands:"
-	@echo "  make install        Install production dependencies"
-	@echo "  make install-dev    Install dev dependencies"
-	@echo "  make install-test   Install test dependencies"
-	@echo "  make run            Run development server"
-	@echo "  make prod           Run production server"
-	@echo "  make lint           Run ruff"
-	@echo "  make format         Format code"
-	@echo "  make check          CI formatting checks"
-	@echo "  make test           Run tests"
+help: ## Show this help message
 	@echo ""
-	@echo "Docker (dev stack: demo:8000  keycloak:8080  openfga:8081):"
-	@echo "  make docker-build   Build the demo image"
-	@echo "  make docker-up      Start the full dev stack"
-	@echo "  make docker-down    Stop and remove volumes"
-	@echo "  make docker-logs    Tail logs for all services"
-	@echo "  make docker-shell   Open a shell in the demo container"
-
-
+	@echo "  py-authz"
+	@echo "  ===================="
+	@echo ""
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@echo ""
 
 # ----------------------------------------------------------
-# Dependency Management
+# Environment Setup
 # ----------------------------------------------------------
-# Use `only-managed` to bypass sudo installed system python
 
-VENV_PYTHON := .venv/bin/python
+.PHONY: venv
+venv: ## Create a virtual environment with Python 3.13
+	uv venv --python 3.13 --python-preference only-managed
 
-.PHONY: venv_setup
-venv_setup:
-	uv venv --python 3.14 --python-preference only-managed &
-	source .venv/bin/activate
-
-.PHONY: install install-dev install-test update
-
-# Main install (production / default dependencies)
-install:
+.PHONY: install
+install: ## Install production dependencies
 	uv sync
 
-# Development dependencies (main + dev group)
-install-dev:
+.PHONY: install-dev
+install-dev: ## Install dev + test dependencies
 	uv sync --group dev
 
-# Test/CI dependencies (main + test group, no dev)
-install-test:
+.PHONY: install-test
+install-test: ## Install test dependencies only
 	uv sync --group test
 
-# Update dependencies (upgrade versions in lockfile)
-update:
+.PHONY: update
+update: ## Upgrade all dependency versions in the lockfile
 	uv lock --upgrade
 
 # ----------------------------------------------------------
-# Linting & Formatting
+# Code Quality (target dirs configured in pyproject.toml)
 # ----------------------------------------------------------
 
-SOURCE = django_authz
+.PHONY: format
+format: ## Auto-format code
+	uv run ruff format
 
-.PHONY: format format-check lint fix test
+.PHONY: format-check
+format-check: ## Check formatting without changes
+	uv run ruff format --check
 
+.PHONY: lint
+lint: ## Run linter and type checker
+	uv run ruff check
+	uv run mypy
 
-format:
-	uv run ruff format $(SOURCE) 
-
-format-check:
-	uv run ruff format --check $(SOURCE)
-
-lint:
-	uv run ruff check $(SOURCE) 
-	uv run mypy $(SOURCE) 
-
-fix:
-	uv run ruff check $(SOURCE) --fix 
-
-test:
-	uv run pytest --cov=$(SOURCE) --cov-report=term-missing
-
-.PHONY: all
-all: format-check lint fix test
-
+.PHONY: fix
+fix: ## Auto-fix lint issues
+	uv run ruff check --fix
 
 # ----------------------------------------------------------
-# Docker
-# ----------------------------------------------------------
-# Services started by `docker-up`:
-#   demo      Django demo application   → http://localhost:8000
-#   keycloak  Identity provider (JWT)   → http://localhost:8081
-#   openfga   Fine-grained authz server → http://localhost:8082
-#             OpenFGA playground UI     → http://localhost:3000 (Known CORS issues)
-#   Access OpenFGA playground UI at:
-#   https://play.fga.dev/sandbox/?fga_api_host=127.0.0.1:8082&fga_api_scheme=http
-
-# Prerequisites: copy .env.example → .env before first run.
-
-.PHONY: docker-up docker-down all-logs demo-app-logs demo-app-restart docker-shell docker-clean
-
-docker-up:
-	docker compose up --build
-
-docker-down:
-	docker compose down -v
-
-all-logs:
-	docker compose logs -f --tail 500
-
-demo-app-logs:
-	docker compose logs demo -f --tail 500
-
-demo-app-restart:
-	docker compose restart demo
-
-docker-shell:
-	docker compose exec demo /bin/sh
-
-docker-clean:
-	docker compose down -v --remove-orphans
-	docker builder prune -f
-
-# ----------------------------------------------------------
-# Clean
+# Testing
 # ----------------------------------------------------------
 
-.PHONY: clean
-clean:
-	# Remove all Python cache directories
-	find . -type d -name "__pycache__" -exec rm -rf {} +
-	find . -type d -name "*.pyc" -delete
-	find . -type d -name ".pytest_cache" -exec rm -rf {} +
-	find . -type d -name ".ruff_cache" -exec rm -rf {} +
-	find . -type d -name ".mypy_cache" -exec rm -rf {} +
-	find . -type d -name ".coverage" -delete
-	find . -type d -name "htmlcov" -exec rm -rf {} +
-	find . -type d -name ".tox" -exec rm -rf {} +
-	find . -type d -name ".eggs" -exec rm -rf {} +
-	find . -type d -name "*.egg-info" -exec rm -rf {} +
+.PHONY: test
+test: ## Run test suite with coverage
+	uv run pytest 
