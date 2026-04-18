@@ -1,12 +1,10 @@
-from typing import Optional
-
-from py_authz.core.types import AuthzRequest
 from py_authz.cache.base import BaseCache
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.exceptions import (
     AuthorizationDenied,
     InvalidAuthzRequest,
 )
+from py_authz.core.types import AuthzRequest
 
 
 class AuthzEngine:
@@ -24,7 +22,7 @@ class AuthzEngine:
     def __init__(
         self,
         fga_client: OpenFGAClient,
-        cache: Optional[BaseCache] = None,
+        cache: BaseCache | None = None,
         *,
         raise_on_denied: bool = False,
     ):

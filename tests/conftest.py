@@ -1,10 +1,9 @@
 import pytest
-import asyncio
 
-from py_authz.core.types import Identity, Resource, AuthzRequest
+from py_authz.api import Authz
 from py_authz.cache.memory import InMemoryCache
 from py_authz.core.enforcement import AuthzEngine
-from py_authz.api import Authz
+from py_authz.core.types import AuthzRequest, Identity, Resource
 
 
 class MockOpenFGAClient:

@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Optional
 
 
 class BaseCache(ABC):
@@ -16,7 +15,7 @@ class BaseCache(ABC):
     """
 
     @abstractmethod
-    async def get(self, key: str) -> Optional[bool]:
+    async def get(self, key: str) -> bool | None:
         """
         Retrieve a value from the cache.
 

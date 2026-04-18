@@ -1,0 +1,13 @@
+# ==========================================================
+# py-authz — Docker Compose 
+# ==========================================================
+
+
+
+services:
+  openfga:
+    image: openfga/openfga:latest
+    container_name: openfga
+    ports:
+      - "8080:8080"
+    command: run

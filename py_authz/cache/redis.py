@@ -1,5 +1,3 @@
-from typing import Optional
-
 import redis.asyncio as redis
 
 from py_authz.cache.base import BaseCache
@@ -49,7 +47,7 @@ class RedisCache(BaseCache):
         """
         return f"{self._prefix}{key}"
 
-    async def get(self, key: str) -> Optional[bool]:
+    async def get(self, key: str) -> bool | None:
         """
         Retrieve a value from Redis.
 

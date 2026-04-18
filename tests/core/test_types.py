@@ -1,4 +1,5 @@
-from py_authz.core.types import Identity, Resource, AuthzRequest
+from py_authz.core.types import AuthzRequest, Identity, Resource
+
 
 def test_cache_key():
     user = Identity(id="user:1")

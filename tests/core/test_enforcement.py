@@ -1,4 +1,5 @@
 import pytest
+
 from py_authz.core.exceptions import AuthorizationDenied, InvalidAuthzRequest
 
 
@@ -10,15 +11,15 @@ async def test_enforce_allows_access(engine, authz_request):
 
 @pytest.mark.asyncio
 async def test_enforce_denies_access():
-    from tests.conftest import MockOpenFGAClient
     from py_authz.core.enforcement import AuthzEngine
+    from tests.conftest import MockOpenFGAClient
 
     engine = AuthzEngine(
         fga_client=MockOpenFGAClient(allowed=False),
         cache=None,
     )
 
-    from py_authz.core.types import Identity, Resource, AuthzRequest
+    from py_authz.core.types import AuthzRequest, Identity, Resource
 
     request = AuthzRequest(
         identity=Identity(id="user:1"),
@@ -32,8 +33,8 @@ async def test_enforce_denies_access():
 
 @pytest.mark.asyncio
 async def test_enforce_raise_on_denied():
-    from tests.conftest import MockOpenFGAClient
     from py_authz.core.enforcement import AuthzEngine
+    from tests.conftest import MockOpenFGAClient
 
     engine = AuthzEngine(
         fga_client=MockOpenFGAClient(allowed=False),
@@ -41,7 +42,7 @@ async def test_enforce_raise_on_denied():
         raise_on_denied=True,
     )
 
-    from py_authz.core.types import Identity, Resource, AuthzRequest
+    from py_authz.core.types import AuthzRequest, Identity, Resource
 
     request = AuthzRequest(
         identity=Identity(id="user:1"),

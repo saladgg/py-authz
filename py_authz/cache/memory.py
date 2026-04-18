@@ -1,6 +1,5 @@
-import time
 import asyncio
-from typing import Optional, Dict, Tuple
+import time
 
 from .base import BaseCache
 
@@ -34,12 +33,12 @@ class InMemoryCache(BaseCache):
         """
         # Store format:
         # key -> (value, expiry_timestamp)
-        self._store: Dict[str, Tuple[bool, float]] = {}
+        self._store: dict[str, tuple[bool, float]] = {}
 
         # Optional lock for safer concurrent access
         self._lock = asyncio.Lock()
 
-    async def get(self, key: str) -> Optional[bool]:
+    async def get(self, key: str) -> bool | None:
         """
         Retrieve a value from the cache.
 

@@ -14,11 +14,11 @@ async def test_authz_require_success(authz, identity, resource):
 
 @pytest.mark.asyncio
 async def test_authz_require_failure():
-    from tests.conftest import MockOpenFGAClient
-    from py_authz.core.enforcement import AuthzEngine
     from py_authz.api import Authz
-    from py_authz.core.types import Identity, Resource
+    from py_authz.core.enforcement import AuthzEngine
     from py_authz.core.exceptions import AuthorizationDenied
+    from py_authz.core.types import Identity, Resource
+    from tests.conftest import MockOpenFGAClient
 
     engine = AuthzEngine(
         fga_client=MockOpenFGAClient(allowed=False),

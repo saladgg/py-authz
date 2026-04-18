@@ -1,5 +1,6 @@
 from py_authz.core.exceptions import ExternalServiceError
 
+
 def test_external_error():
     try:
         raise ExternalServiceError("Failure", service="openfga")

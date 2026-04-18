@@ -1,6 +1,10 @@
-from typing import Optional
+from py_authz.core.enforcement import AuthzEngine
+from py_authz.core.types import AuthzRequest, Identity, Resource
+from py_authz.modeling.base import Relation, ResourceModel
+from py_authz.core.model_sync import ModelSync
 
-from py_authz.core.types import Identity, Resource, AuthzRequest
+from py_authz.core.tenant_resolver import TenantResolver
+from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.enforcement import AuthzEngine
 
 
@@ -37,7 +41,7 @@ class Authz:
         user: Identity,
         resource: Resource,
         *,
-        context: Optional[dict] = None,
+        context: dict | None = None,
     ) -> bool:
         """
         Enforce an authorization decision.
@@ -74,28 +78,39 @@ class Authz:
 
     async def can(
         self,
-        action: str,
-        user: Identity,
-        resource: Resource,
-    ) -> bool:
+        action,
+        user,
+        resource,
+    ):
         """
-        Convenience method for checking permissions.
-
-        Alias for `enforce`, designed for readability.
-
-        Example:
-            if await authz.can("view", user, document):
-                ...
-
-        Args:
-            action (str)
-            user (Identity)
-            resource (Resource)
-
-        Returns:
-            bool
+        Supports both:
+            - string actions ("viewer")
+            - Relation objects (Document.view)
         """
-        return await self.enforce(action, user, resource)
+
+        # -------------------------------------------------
+        # Relation-based API
+        # -------------------------------------------------
+        if isinstance(action, Relation):
+            relation = action.name
+
+            if isinstance(resource, ResourceModel):
+                resource_obj = resource.to_resource()
+            else:
+                raise TypeError("Resource must be a ResourceModel instance")
+
+        # -------------------------------------------------
+        # String-based API (backward compatibility)
+        # -------------------------------------------------
+        else:
+            relation = action
+            resource_obj = resource
+
+        return await self.enforce(
+            action=relation,
+            user=user,
+            resource=resource_obj,
+        )
 
     async def require(
         self,
@@ -124,3 +139,66 @@ class Authz:
         finally:
             # Restore original behavior
             self._engine.raise_on_denied = original
+
+    async def sync_model(self) -> str:
+        """
+        Generate and sync model with OpenFGA.
+
+        Returns:
+            str: new model_id
+        """
+        if not self.engine.fga_client:
+            raise RuntimeError("FGA client not configured")
+
+        syncer = ModelSync(self.engine.fga_client)
+        return await syncer.sync()
+
+
+class MultiTenantAuthz:
+    """
+    Multi-tenant wrapper around Authz.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        model_id: str | None,
+        tenant_resolver,
+        tenant_manager=None,
+    ):
+        self.api_url = api_url
+        self.model_id = model_id
+        self.tenant_resolver = tenant_resolver
+        self.tenant_manager = tenant_manager
+
+        self._cache = {}
+
+    async def for_tenant(self, tenant_id: str):
+        if tenant_id in self._cache:
+            return self._cache[tenant_id]
+
+        try:
+            store_id = await self.tenant_resolver.resolve(tenant_id)
+        except Exception:
+            if not self.tenant_manager:
+                raise
+
+            # Auto-provision tenant
+            store_id = await self.tenant_manager.provision(tenant_id)
+
+        client = OpenFGAClient(
+            api_url=self.api_url,
+            store_id=store_id,
+            model_id=self.model_id,
+        )
+
+        engine = AuthzEngine(fga_client=client)
+
+        from py_authz.api import Authz
+
+        authz = Authz(engine)
+
+        self._cache[tenant_id] = authz
+
+        return authz

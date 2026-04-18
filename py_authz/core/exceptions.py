@@ -1,6 +1,3 @@
-from typing import Optional
-
-
 class AuthzError(Exception):
     """
     Base exception for all py-authz errors.
@@ -15,7 +12,7 @@ class AuthzError(Exception):
             handle_error()
     """
 
-    def __init__(self, message: str, *, cause: Optional[Exception] = None):
+    def __init__(self, message: str, *, cause: Exception | None = None):
         """
         Initialize the base AuthzError.
 
@@ -84,8 +81,8 @@ class ExternalServiceError(AuthzError):
         self,
         message: str,
         *,
-        service: Optional[str] = None,
-        cause: Optional[Exception] = None,
+        service: str | None = None,
+        cause: Exception | None = None,
     ):
         """
         Args:

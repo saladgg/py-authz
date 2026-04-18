@@ -1,6 +1,6 @@
-from typing import Optional
-import httpx
 import asyncio
+
+import httpx
 
 from py_authz.core.exceptions import (
     ExternalServiceError,
@@ -30,12 +30,12 @@ class OpenFGAClient:
     def __init__(
         self,
         api_url: str,
-        store_id: str,
-        model_id: str,
+        store_id: str | None,
+        model_id: str | None,
         *,
         timeout: float = 2.0,
         max_retries: int = 2,
-        http_client: Optional[httpx.AsyncClient] = None,
+        http_client: httpx.AsyncClient | None = None,
     ):
         """
         Initialize the OpenFGA client.
@@ -156,4 +156,68 @@ class OpenFGAClient:
 
             # Retry logic (simple exponential backoff)
             attempt += 1
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
+
+    async def _request(self, method: str, path: str, json: dict | None = None) -> dict:
+        try:
+            response = await self._client.request(method, path, json=json)
+            response.raise_for_status()
+            return response.json()
+        except httpx.TimeoutException as exc:
+            raise ServiceTimeout(
+                f"OpenFGA {method} {path} timed out",
+                service="openfga",
+                cause=exc,
+            ) from exc
+        except httpx.ConnectError as exc:
+            raise ServiceUnavailable(
+                f"Unable to connect to OpenFGA for {method} {path}",
+                service="openfga",
+                cause=exc,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ExternalServiceError(
+                f"OpenFGA API error: {exc.response.status_code}",
+                service="openfga",
+                cause=exc,
+            ) from exc
+
+    async def _get(self, path: str) -> dict:
+        return await self._request("GET", path)
+
+    async def _post(self, path: str, json: dict) -> dict:
+        return await self._request("POST", path, json=json)
+
+    async def get_latest_model(self) -> dict | None:
+        """
+        Fetch latest authorization model from OpenFGA.
+
+        Returns:
+            dict or None
+        """
+        res = await self._get(f"/stores/{self.store_id}/authorization-models")
+
+        models = res.get("authorization_models", [])
+
+        if not models:
+            return None
+
+        # Latest is first (OpenFGA returns descending)
+        return models[0]
+
+    async def create_store(self, name: str) -> str:
+        """
+        Create a new OpenFGA store.
+
+        Returns:
+            str: store_id
+        """
+        res = await self._post(
+            "/stores",
+            json={"name": name},
+        )
+
+        return res["id"]
+
+    async def aclose(self) -> None:
+        await self._client.aclose()

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class Identity:
     """
 
     id: str
-    attributes: Optional[Dict[str, Any]] = field(default=None)
+    attributes: dict[str, Any] | None = field(default=None)
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,7 @@ class AuthzRequest:
     identity: Identity
     action: str
     resource: Resource
-    context: Optional[Dict[str, Any]] = field(default=None)
+    context: dict[str, Any] | None = field(default=None)
 
     def cache_key(self) -> str:
         """

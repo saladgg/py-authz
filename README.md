@@ -3,6 +3,7 @@
 A lightweight, extensible authorization library for Python.
 
 
+```
 py-authz/
 ├── py_authz/                     # Main package
 │
@@ -65,3 +66,5 @@ py-authz/
 ├── README.md
 ├── .gitignore
 ├── LICENSE
+
+```

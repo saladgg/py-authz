@@ -32,7 +32,9 @@ dist/
 htmlcov/
 
 # New
+example/
 .claude
 .mypy_cache/
 .ruff_cache/
+examples/
 todos.md
