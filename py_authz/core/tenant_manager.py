@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from py_authz.clients.openfga import OpenFGAClient
+from py_authz.core.logging import logger
 from py_authz.core.model_sync import ModelSync
 from py_authz.core.tenant_store import TenantStore
 
@@ -37,6 +38,7 @@ class TenantManager:
         Returns:
             str: store_id
         """
+        logger.info(f"provision_start tenant={tenant_id}")
         existing = await self.tenant_store.get(tenant_id)
         if existing:
             return existing
@@ -64,6 +66,7 @@ class TenantManager:
 
                 return store_id
             finally:
+                logger.info(f"provision_success tenant={tenant_id} store_id={store_id}")
                 await client.aclose()
 
     @asynccontextmanager

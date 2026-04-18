@@ -1,4 +1,4 @@
-from py_authz.modeling import ResourceModel, Relation, registry
+from py_authz.modeling import Relation, ResourceModel, registry
 from py_authz.modeling.generator import generate_model
 
 

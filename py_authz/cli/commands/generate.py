@@ -1,10 +1,9 @@
 import json
-from typing import Optional
 
 from py_authz.modeling.generator import generate_model
 
 
-def generate_command(output: Optional[str] = None):
+def generate_command(output: str | None = None):
     """
     Generate OpenFGA model JSON.
     """

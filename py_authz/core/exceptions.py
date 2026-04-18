@@ -29,6 +29,24 @@ class AuthzError(Exception):
 
 
 # ---------------------------------------------------------------------
+# Authentication Errors
+# ---------------------------------------------------------------------
+
+
+class AuthenticationError(AuthzError):
+    """
+    Raised when authentication fails.
+
+    Example cases:
+        - Invalid or expired JWT
+        - Missing required claims
+        - Unknown signing key
+    """
+
+    pass
+
+
+# ---------------------------------------------------------------------
 # Authorization Errors
 # ---------------------------------------------------------------------
 

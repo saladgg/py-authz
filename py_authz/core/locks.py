@@ -1,8 +1,14 @@
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
-import redis.asyncio as redis
+from py_authz.utils.deps import require_redis
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+else:
+    require_redis()
 
 
 class RedisLock:
@@ -13,7 +19,7 @@ class RedisLock:
         SET key value NX EX ttl
     """
 
-    def __init__(self, client: redis.Redis):
+    def __init__(self, client: "Redis"):
         self.client = client
 
     async def acquire(
@@ -63,11 +69,11 @@ class RedisLock:
         end
         """
 
-        await self.client.eval(script, 1, key, lock_id)
+        await self.client.eval(script, 1, key, lock_id)  # type: ignore[misc]
 
 
 class RedisLockManager:
-    def __init__(self, client: redis.Redis):
+    def __init__(self, client: "Redis"):
         self._lock = RedisLock(client)
 
     @asynccontextmanager

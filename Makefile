@@ -56,9 +56,11 @@ update: ## Upgrade all dependency versions in the lockfile
 # Code Quality (target dirs configured in pyproject.toml)
 # ----------------------------------------------------------
 
+
 .PHONY: format
-format: ## Auto-format code
+format: ## Format and fix
 	uv run ruff format
+	uv run ruff check --fix
 
 .PHONY: format-check
 format-check: ## Check formatting without changes
@@ -66,12 +68,7 @@ format-check: ## Check formatting without changes
 
 .PHONY: lint
 lint: ## Run linter and type checker
-	uv run ruff check
 	uv run mypy
-
-.PHONY: fix
-fix: ## Auto-fix lint issues
-	uv run ruff check --fix
 
 # ----------------------------------------------------------
 # Testing

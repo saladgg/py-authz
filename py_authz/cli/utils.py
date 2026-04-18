@@ -12,4 +12,4 @@ def load_module(module_path: str) -> None:
     try:
         importlib.import_module(module_path)
     except ModuleNotFoundError as e:
-        raise RuntimeError(f"Failed to import module '{module_path}': {e}")
+        raise RuntimeError(f"Failed to import module '{module_path}': {e}") from e

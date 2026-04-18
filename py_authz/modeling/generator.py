@@ -1,8 +1,7 @@
-from typing import Dict, Any, List, Type
+from typing import Any
 
-from py_authz.modeling.base import ResourceModel, Relation
+from py_authz.modeling.base import Relation, ResourceModel
 from py_authz.modeling.registry import registry
-
 
 # -------------------------------------------------------------------
 # Core Generator
@@ -25,7 +24,7 @@ class OpenFGAModelGenerator:
     # Public API
     # -------------------------------------------------------------------
 
-    def generate(self) -> Dict[str, Any]:
+    def generate(self) -> dict[str, Any]:
         """
         Generate full OpenFGA model.
 
@@ -41,8 +40,8 @@ class OpenFGAModelGenerator:
     # Type generation
     # -------------------------------------------------------------------
 
-    def _generate_types(self) -> List[Dict[str, Any]]:
-        types: List[Dict[str, Any]] = []
+    def _generate_types(self) -> list[dict[str, Any]]:
+        types: list[dict[str, Any]] = []
 
         # Always include base user type
         types.append({"type": "user"})
@@ -52,7 +51,7 @@ class OpenFGAModelGenerator:
 
         return types
 
-    def _generate_type(self, model: Type[ResourceModel]) -> Dict[str, Any]:
+    def _generate_type(self, model: type[ResourceModel]) -> dict[str, Any]:
         relation_map = self._relation_map(model)
 
         relations = {name: self._build_relation(rel) for name, rel in relation_map.items()}
@@ -78,11 +77,11 @@ class OpenFGAModelGenerator:
     # Relation helpers
     # -------------------------------------------------------------------
 
-    def _relation_map(self, model: Type[ResourceModel]) -> Dict[str, Relation]:
+    def _relation_map(self, model: type[ResourceModel]) -> dict[str, Relation]:
         """
         Extract Relation objects from a ResourceModel.
         """
-        mapping: Dict[str, Relation] = {}
+        mapping: dict[str, Relation] = {}
 
         for attr in dir(model):
             value = getattr(model, attr)
@@ -92,7 +91,7 @@ class OpenFGAModelGenerator:
 
         return mapping
 
-    def _build_relation(self, rel: Relation) -> Dict[str, Any]:
+    def _build_relation(self, rel: Relation) -> dict[str, Any]:
         """
         Build OpenFGA relation definition.
 
@@ -101,7 +100,7 @@ class OpenFGAModelGenerator:
             - unions
             - inherited/computed relations
         """
-        parts: List[Dict[str, Any]] = []
+        parts: list[dict[str, Any]] = []
 
         # -------------------------------------------------
         # Direct assignment (this)
@@ -149,7 +148,7 @@ class OpenFGAModelGenerator:
 # -------------------------------------------------------------------
 
 
-def generate_model() -> Dict[str, Any]:
+def generate_model() -> dict[str, Any]:
     """
     Generate OpenFGA model from all registered ResourceModels.
 

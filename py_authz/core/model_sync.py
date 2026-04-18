@@ -3,6 +3,7 @@ from typing import Any
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.model_diff import ModelDiffer
 from py_authz.modeling.generator import generate_model
+from py_authz.validation.default import DefaultModelValidator
 
 
 class ModelSync:
@@ -14,8 +15,9 @@ class ModelSync:
         - idempotent sync
     """
 
-    def __init__(self, fga_client: OpenFGAClient):
+    def __init__(self, fga_client: OpenFGAClient, validator: DefaultModelValidator | None = None):
         self.fga_client = fga_client
+        self.validator = validator
 
     # -------------------------------------------------------------------
     # Public API
@@ -33,6 +35,8 @@ class ModelSync:
             str: active model_id
         """
         new_model = generate_model()
+        if self.validator:
+            self.validator.validate(new_model)
 
         current_model = await self._get_current_model()
 

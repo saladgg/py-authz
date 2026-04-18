@@ -1,6 +1,7 @@
+from py_authz.cli.config import get_env
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.model_sync import ModelSync
-from py_authz.cli.config import get_env
+from py_authz.validation.default import DefaultModelValidator
 
 
 async def sync_command(
@@ -21,8 +22,9 @@ async def sync_command(
         model_id=model_id,
     )
 
-    syncer = ModelSync(client)
+    validator = DefaultModelValidator()
 
+    syncer = ModelSync(client, validator=validator)
     new_model_id = await syncer.sync(force=force)
 
     print(f"Active model: {new_model_id}")

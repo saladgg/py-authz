@@ -1,12 +1,9 @@
 # Configuration management
 
-from pydantic import BaseSettings
+from pydantic import BaseModel
 
 
-class Settings(BaseSettings):
+class Settings(BaseModel):
     """py-authz configuration."""
 
     openfga_url: str = "http://localhost:8080"
-
-    class Config:
-        env_prefix = "AUTHZ_"

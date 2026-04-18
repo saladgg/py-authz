@@ -1,11 +1,8 @@
-from py_authz.core.enforcement import AuthzEngine
-from py_authz.core.types import AuthzRequest, Identity, Resource
-from py_authz.modeling.base import Relation, ResourceModel
-from py_authz.core.model_sync import ModelSync
-
-from py_authz.core.tenant_resolver import TenantResolver
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.enforcement import AuthzEngine
+from py_authz.core.model_sync import ModelSync
+from py_authz.core.types import AuthzRequest, Identity, Resource
+from py_authz.modeling.base import Relation, ResourceModel
 
 
 class Authz:
@@ -147,10 +144,10 @@ class Authz:
         Returns:
             str: new model_id
         """
-        if not self.engine.fga_client:
+        if not self._engine.fga_client:
             raise RuntimeError("FGA client not configured")
 
-        syncer = ModelSync(self.engine.fga_client)
+        syncer = ModelSync(self._engine.fga_client)
         return await syncer.sync()
 
 

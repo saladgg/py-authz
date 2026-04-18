@@ -1,6 +1,4 @@
 import asyncpg
-from typing import Optional
-
 
 """
 
@@ -29,7 +27,7 @@ class PostgresTenantStore:
     async def connect(self):
         self._pool = await asyncpg.create_pool(self.dsn)
 
-    async def get(self, tenant_id: str) -> Optional[str]:
+    async def get(self, tenant_id: str) -> str | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT store_id FROM tenants WHERE tenant_id = $1",
@@ -59,7 +57,7 @@ class PostgresModelRegistry:
     async def connect(self):
         self._pool = await asyncpg.create_pool(self.dsn)
 
-    async def get(self, tenant_id: str) -> Optional[str]:
+    async def get(self, tenant_id: str) -> str | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT model_id FROM tenant_models WHERE tenant_id = $1",

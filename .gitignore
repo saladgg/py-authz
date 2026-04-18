@@ -38,3 +38,5 @@ example/
 .ruff_cache/
 examples/
 todos.md
+pypr_archived.toml
+CLAUDE.md

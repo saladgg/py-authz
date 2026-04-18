@@ -1,8 +1,10 @@
 import argparse
+
 import anyio
-from py_authz.cli.utils import load_module
+
 from py_authz.cli.commands.generate import generate_command
 from py_authz.cli.commands.sync import sync_command
+from py_authz.cli.utils import load_module
 
 
 def main():

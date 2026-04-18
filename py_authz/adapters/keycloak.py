@@ -1,10 +1,10 @@
-from typing import Optional, Dict, Any
+from typing import Any
 
-import jwt
 import httpx
+import jwt  # type: ignore[import-not-found]
 
-from py_authz.core.types import Identity
 from py_authz.core.exceptions import AuthenticationError
+from py_authz.core.types import Identity
 
 
 class KeycloakJWTValidator:
@@ -35,19 +35,19 @@ class KeycloakJWTValidator:
         self.audience = audience
         self.jwks_url = f"{self.issuer}/protocol/openid-connect/certs"
 
-        self._jwks: Optional[Dict[str, Any]] = None
+        self._jwks: dict[str, Any] | None = None
 
     # -------------------------------------------------------------------
     # JWKS Fetching
     # -------------------------------------------------------------------
 
-    async def _fetch_jwks(self) -> Dict[str, Any]:
+    async def _fetch_jwks(self) -> dict[str, Any]:
         async with httpx.AsyncClient() as client:
             res = await client.get(self.jwks_url)
             res.raise_for_status()
             return res.json()
 
-    async def _get_jwks(self) -> Dict[str, Any]:
+    async def _get_jwks(self) -> dict[str, Any]:
         if self._jwks is None:
             self._jwks = await self._fetch_jwks()
         return self._jwks
@@ -56,7 +56,7 @@ class KeycloakJWTValidator:
     # Token Validation
     # -------------------------------------------------------------------
 
-    async def validate(self, token: str) -> Dict[str, Any]:
+    async def validate(self, token: str) -> dict[str, Any]:
         """
         Validate JWT and return decoded payload.
         """
@@ -86,17 +86,17 @@ class KeycloakJWTValidator:
 
             return payload
 
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationError("Token expired")
+        except jwt.ExpiredSignatureError as e:
+            raise AuthenticationError("Token expired") from e
 
         except jwt.InvalidTokenError as e:
-            raise AuthenticationError(f"Invalid token: {str(e)}")
+            raise AuthenticationError(f"Invalid token: {str(e)}") from e
 
     # -------------------------------------------------------------------
     # Identity Extraction
     # -------------------------------------------------------------------
 
-    def to_identity(self, payload: Dict[str, Any]) -> Identity:
+    def to_identity(self, payload: dict[str, Any]) -> Identity:
         """
         Convert JWT payload → Identity
         """

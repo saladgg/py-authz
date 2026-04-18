@@ -1,6 +1,7 @@
-import redis.asyncio as redis
-
 from py_authz.cache.base import BaseCache
+from py_authz.utils.deps import require_redis
+
+redis = require_redis()
 
 
 class RedisCache(BaseCache):

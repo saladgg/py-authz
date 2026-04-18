@@ -1,7 +1,4 @@
-from typing import List, Optional, TYPE_CHECKING, Type
-
-if TYPE_CHECKING:
-    from py_authz.modeling.base import ResourceModel
+from __future__ import annotations
 
 
 class Relation:
@@ -19,18 +16,18 @@ class Relation:
         self,
         name: str,
         *,
-        union: Optional[List[str]] = None,
-        inherits: Optional[List[str]] = None,
-        subjects: Optional[List[str]] = None,
+        union: list[str] | None = None,
+        inherits: list[str] | None = None,
+        subjects: list[str] | None = None,
     ):
         self.name = name
         self.union = union or []
         self.inherits = inherits or []
         self.subjects = subjects or ["user"]
 
-        self.resource_cls: Optional[Type["ResourceModel"]] = None
+        self.resource_cls: type[ResourceModel] | None = None
 
-    def bind(self, resource_cls: Type["ResourceModel"]) -> "Relation":
+    def bind(self, resource_cls: type[ResourceModel]) -> Relation:
         self.resource_cls = resource_cls
         return self
 
@@ -47,7 +44,7 @@ class ResourceModelMeta(type):
     def __new__(mcls, name, bases, namespace):
         cls = super().__new__(mcls, name, bases, namespace)
 
-        for attr_name, attr_value in namespace.items():
+        for _, attr_value in namespace.items():
             if isinstance(attr_value, Relation):
                 attr_value.bind(cls)
 

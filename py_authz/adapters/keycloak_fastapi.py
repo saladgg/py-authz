@@ -1,9 +1,11 @@
-from starlette.requests import Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from fastapi import HTTPException, status
+from starlette.requests import Request
 
 from py_authz.adapters.keycloak import KeycloakJWTValidator
 from py_authz.core.exceptions import AuthenticationError
+from py_authz.utils.deps import require_fast_api
+
+_, HTTPException, status = require_fast_api()
 
 
 class KeycloakAuthMiddleware(BaseHTTPMiddleware):
@@ -18,7 +20,7 @@ class KeycloakAuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.validator = validator
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next):  # type: ignore
         auth_header = request.headers.get("Authorization")
 
         if not auth_header or not auth_header.startswith("Bearer "):
@@ -32,10 +34,10 @@ class KeycloakAuthMiddleware(BaseHTTPMiddleware):
 
             request.state.user = identity
 
-        except AuthenticationError:
+        except AuthenticationError as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication",
-            )
+            ) from e
 
         return await call_next(request)

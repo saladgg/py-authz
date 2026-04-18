@@ -1,16 +1,24 @@
+import uuid
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from fastapi import HTTPException, Request, status
-
+from py_authz.core.context import set_request_id
 from py_authz.core.types import Identity
 from py_authz.modeling.base import Relation, ResourceModel
+from py_authz.utils.deps import require_fast_api
+
+if TYPE_CHECKING:
+    from fastapi import HTTPException, Request, status
+else:
+    Request, HTTPException, status = require_fast_api()
+
 
 # -------------------------------------------------------------------
 # Helper: Default extractors
 # -------------------------------------------------------------------
 
 
-def default_user_getter(request: Request) -> Identity:
+def default_user_getter(request: "Request") -> Identity:
     """
     Default way to extract user from FastAPI request.
 
@@ -38,7 +46,7 @@ def require_dependency(
     relation: Relation,
     *,
     resource_getter: Callable[..., ResourceModel],
-    user_getter: Callable[[Request], Identity] = default_user_getter,
+    user_getter: Callable[["Request"], Identity] = default_user_getter,
 ):
     """
     FastAPI dependency for enforcing authorization.
@@ -58,7 +66,7 @@ def require_dependency(
             ...
     """
 
-    async def dependency(request: Request, **kwargs):
+    async def dependency(request: "Request", **kwargs):
         user = user_getter(request)
         resource = resource_getter(request, **kwargs)
 
@@ -83,7 +91,7 @@ def require_fastapi(
     relation: Relation,
     *,
     resource_getter: Callable[..., ResourceModel],
-    user_getter: Callable[[Request], Identity] = default_user_getter,
+    user_getter: Callable[["Request"], Identity] = default_user_getter,
 ):
     """
     Decorator for FastAPI route handlers.
@@ -143,7 +151,7 @@ def require_fastapi(
     return decorator
 
 
-def tenant_from_request(request: Request) -> str:
+def tenant_from_request(request: "Request") -> str:
     """
     Extract tenant from request.
 
@@ -158,3 +166,14 @@ def tenant_from_request(request: Request) -> str:
         raise HTTPException(status_code=400, detail="Missing tenant")
 
     return tenant
+
+
+async def request_context_middleware(request: "Request", call_next):
+    request_id = str(uuid.uuid4())
+
+    set_request_id(request_id)
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+
+    return response

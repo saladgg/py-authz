@@ -1,9 +1,8 @@
-from typing import List
-
+from py_authz.clients.openfga import OpenFGAClient
+from py_authz.core.logging import logger
+from py_authz.core.model_registry import ModelRegistry
 from py_authz.core.model_sync import ModelSync
 from py_authz.core.tenant_store import TenantStore
-from py_authz.core.model_registry import ModelRegistry
-from py_authz.clients.openfga import OpenFGAClient
 
 
 class MigrationManager:
@@ -26,13 +25,14 @@ class MigrationManager:
     # Public API
     # -------------------------------------------------------------------
 
-    async def migrate_all(self, tenant_ids: List[str]) -> dict[str, str]:
+    async def migrate_all(self, tenant_ids: list[str]) -> dict[str, str]:
         """
         Migrate all tenants to latest model.
 
         Returns:
             dict: tenant_id → model_id
         """
+
         results = {}
 
         for tenant_id in tenant_ids:
@@ -45,14 +45,14 @@ class MigrationManager:
         """
         Migrate a single tenant safely.
         """
-        store_id = await self.tenant_store.get(tenant_id)
 
+        logger.info(f"migration_start tenant={tenant_id}")
+
+        store_id = await self.tenant_store.get(tenant_id)
         if not store_id:
             raise ValueError(f"Tenant not found: {tenant_id}")
 
         current_model = await self.model_registry.get(tenant_id)
-        if current_model == new_model_id:
-            return current_model
 
         client = OpenFGAClient(
             api_url=self.api_url,
@@ -65,7 +65,13 @@ class MigrationManager:
         # Sync (will diff automatically)
         new_model_id = await syncer.sync()
 
+        # If no change, skip update
+        if current_model == new_model_id:
+            logger.info(f"migration_noop tenant={tenant_id} model_id={current_model}")
+            return current_model
+
         # Track version
         await self.model_registry.set(tenant_id, new_model_id)
 
+        logger.info(f"migration_success tenant={tenant_id} model_id={new_model_id}")
         return new_model_id
