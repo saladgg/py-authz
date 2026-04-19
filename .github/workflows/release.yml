@@ -28,7 +28,7 @@ jobs:
       - name: Semantic Release
         env:
           GH_TOKEN: ${{ secrets.AUTHZ_CI_TOKEN }}
-        run: semantic-release publish
+        run: semantic-release version --skip-build
 
       # Build package AFTER version bump
       - name: Build package
