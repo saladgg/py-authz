@@ -1,6 +1,6 @@
 [project]
 name = "py-authz"
-version = "0.1.0"
+version = "v1.0.0"
 description = "Authz based on Keycloak and OpenFGA"
 readme = "README.md"
 requires-python = ">=3.13"
