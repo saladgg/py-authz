@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # required
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install python-semantic-release build
+
+      # Semantic release (version + changelog + tag + GitHub release)
+      - name: Semantic Release
+        env:
+          GH_TOKEN: ${{ secrets.AUTHZ_CI_TOKEN }}
+        run: semantic-release publish
+
+      # Build package AFTER version bump
+      - name: Build package
+        run: python -m build
+
+      # Attach dist files to GitHub release
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

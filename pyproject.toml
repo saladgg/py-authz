@@ -64,8 +64,6 @@ test = [
 
 dev = [
   {include-group = "test"},
-  "build>=1.4.3",
-  "twine>=6.2.0",
   "ruff>=0.15.10",               
   "mypy>=1.20.1",               
   "pre-commit>=4.5.1",
@@ -100,7 +98,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 python_files = "test_*.py"
 asyncio_mode = "auto"
-addopts = "-ra -q --cov=py_authz --cov-report=term-missing -vv"
+addopts = "-ra -q --cov=py_authz --cov-report=term-missing -v"
 
 [tool.coverage.run]
 branch = true
@@ -118,3 +116,15 @@ disable_error_code = [
   "var-annotated", "import-untyped",
   "annotation-unchecked", "union-attr", "arg-type"
 ]
+
+[tool.semantic_release]
+version_toml = [
+    "pyproject.toml:project.version:tf"
+]
+branch = "main"
+upload_to_pypi = false   
+upload_to_release = true
+build_command = "python -m build"
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["feat", "fix", "perf", "refactor", "docs", "chore"]

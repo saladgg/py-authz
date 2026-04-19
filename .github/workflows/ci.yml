@@ -1,10 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-    tags:
-      - "v*.*.*"   # trigger publish on version tags
+  push:          # runs on push to ANY branch
   pull_request:
     branches: [main]
 
@@ -21,7 +18,7 @@ jobs:
           enable-cache: true
 
       - name: Install dev dependencies
-        run: uv sync --group test
+        run: make install-dev
 
       - name: Format check
         run: make format
@@ -31,54 +28,3 @@ jobs:
 
       - name: Test
         run: make test
-
-  build:
-    name: Build Package
-    runs-on: ubuntu-latest
-    needs: lint-test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build package
-        run: python -m build
-
-      - name: Check distribution
-        run: pip install twine && twine check dist/*
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  publish:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')   # only on tags
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download built package
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Install Twine
-        run: pip install twine
-
-      # - name: Publish
-      #   run: twine upload dist/*
-      #   env:
-      #     TWINE_USERNAME: __token__
-      #     TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
