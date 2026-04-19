@@ -14,7 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # required
+          fetch-depth: 0  
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
