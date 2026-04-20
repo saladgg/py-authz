@@ -118,6 +118,7 @@ disable_error_code = [
 ]
 
 [tool.semantic_release]
+commit_parser = "conventional"
 version_toml = [
     "pyproject.toml:project.version:tf"
 ]
@@ -127,5 +128,13 @@ build_command = "python -m build"
 [tool.semantic_release.publish]
 upload_to_vcs_release = true
 
+[tool.semantic_release.changelog]
+changelog_file = "CHANGELOG.md"
+
+[tool.semantic_release.changelog.default_templates]
+mask_initial_release = false # Override default behavior of suppressing detailed changelog on first version
+
 [tool.semantic_release.commit_parser_options]
-allowed_tags = ["feat", "fix", "perf", "refactor", "docs", "chore"]
+allowed_tags = ["feat", "fix", "perf", "refactor", "docs", "chore", "build", "ci", "test", "style"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf", "refactor"]   # refactor is often patch, but some teams treat it as minor
