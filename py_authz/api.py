@@ -150,6 +150,83 @@ class Authz:
         syncer = ModelSync(self._engine.fga_client)
         return await syncer.sync()
 
+    async def grant(
+        self,
+        identity,
+        relation: str,
+        resource,
+    ) -> None:
+        """
+        Grant a relation between a user and resource.
+        """
+        await self._engine.fga_client.write_tuples(
+            writes=[
+                {
+                    "user": identity.id,
+                    "relation": relation,
+                    "object": resource.to_fga_object(),
+                }
+            ]
+        )
+
+    async def revoke(
+        self,
+        identity,
+        relation: str,
+        resource,
+    ) -> None:
+        """
+        Revoke a relation.
+        """
+        await self._engine.fga_client.write_tuples(
+            writes=[],
+            deletes=[
+                {
+                    "user": identity.id,
+                    "relation": relation,
+                    "object": resource.to_fga_object(),
+                }
+            ],
+        )
+
+    async def grant_many(
+        self,
+        tuples: list[tuple],
+    ) -> None:
+        """
+        Grant many.
+        tuples: [(identity, relation, resource)]
+        """
+        writes = [
+            {
+                "user": i.id,
+                "relation": r,
+                "object": res.to_fga_object(),
+            }
+            for i, r, res in tuples
+        ]
+
+        await self._engine.fga_client.write_tuples(writes=writes)
+
+    async def revoke_many(
+        self,
+        tuples: list[tuple],
+    ) -> None:
+        """
+        Revoke many.
+        tuples: [(identity, relation, resource)]
+        """
+        deletes = [
+            {
+                "user": i.id,
+                "relation": r,
+                "object": res.to_fga_object(),
+            }
+            for i, r, res in tuples
+        ]
+
+        await self._engine.fga_client.write_tuples(writes=[], deletes=deletes)
+
 
 class MultiTenantAuthz:
     """

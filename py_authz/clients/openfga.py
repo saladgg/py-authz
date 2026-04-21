@@ -221,3 +221,35 @@ class OpenFGAClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    def _tuple(self, user: str, relation: str, object: str) -> dict:
+        return {
+            "user": user,
+            "relation": relation,
+            "object": object,
+        }
+
+    async def write_tuples(
+        self,
+        writes: list[dict],
+        deletes: list[dict] | None = None,
+    ) -> None:
+        """
+        Write and/or delete tuples in OpenFGA.
+
+        Args:
+            writes: list of tuple dicts
+            deletes: optional list of tuple dicts
+        """
+        payload = {}
+
+        if writes:
+            payload["writes"] = {"tuple_keys": writes}
+
+        if deletes:
+            payload["deletes"] = {"tuple_keys": deletes}
+
+        await self._post(
+            f"/stores/{self.store_id}/write",
+            json=payload,
+        )
