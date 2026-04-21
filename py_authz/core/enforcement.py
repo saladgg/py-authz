@@ -2,6 +2,8 @@ import json
 import time
 from datetime import datetime
 
+import anyio
+
 from py_authz.audit.types import AuditEvent
 from py_authz.cache.base import BaseCache
 from py_authz.clients.openfga import OpenFGAClient
@@ -11,7 +13,7 @@ from py_authz.core.exceptions import (
     InvalidAuthzRequest,
 )
 from py_authz.core.logging import logger
-from py_authz.core.types import AuthzRequest
+from py_authz.core.types import AuthzExplanation, AuthzRequest, BulkAuthzResult
 
 
 class AuthzEngine:
@@ -54,6 +56,24 @@ class AuthzEngine:
         self.cache = cache
         self.raise_on_denied = raise_on_denied
         self.audit_logger = audit_logger
+
+    def _extract_path(self, explanation_data) -> list[str] | None:
+        """
+        Extract readable path from OpenFGA explanation.
+        """
+        if not explanation_data:
+            return None
+
+        # depends on OpenFGA response structure
+        # keep generic/fallback for now
+        try:
+            return [str(explanation_data)]
+        except Exception:
+            return None
+
+    async def invalidate(self, request: AuthzRequest):
+        if self.cache:
+            await self.cache.delete(request.cache_key())
 
     async def enforce(self, request: AuthzRequest) -> bool:
         """
@@ -237,3 +257,68 @@ class AuthzEngine:
             return f"allowed via relation '{request.action}'"
 
         return f"no matching relation '{request.action}'"
+
+    async def explain(self, request: AuthzRequest) -> AuthzExplanation:
+        """
+        Explain an authorization decision.
+
+        Returns:
+            AuthzExplanation
+        """
+        self._validate_request(request)
+
+        # Basic check
+        allowed = await self.fga_client.check(
+            user=request.identity.id,
+            relation=request.action,
+            object=request.resource.to_fga_object(),
+        )
+
+        # Try advanced explanation (if supported)
+        explanation_data = None
+
+        if hasattr(self.fga_client, "explain"):
+            try:
+                explanation_data = await self.fga_client.explain(
+                    user=request.identity.id,
+                    relation=request.action,
+                    object=request.resource.to_fga_object(),
+                )
+            except Exception:
+                # fallback silently
+                explanation_data = None
+
+        # Build human-readable reason
+        if allowed:
+            reason = f"User has '{request.action}' on {request.resource.to_fga_object()}"
+        else:
+            reason = f"No '{request.action}' relation found"
+
+        path = self._extract_path(explanation_data)
+
+        return AuthzExplanation(
+            allowed=allowed,
+            reason=reason,
+            path=path,
+            details=explanation_data,
+        )
+
+    async def bulk_enforce(
+        self,
+        requests: list[AuthzRequest],
+        *,
+        concurrency: int = 10,
+    ) -> list[BulkAuthzResult]:
+        semaphore = anyio.Semaphore(concurrency)
+        results: list[BulkAuthzResult] = []
+
+        async def worker(req: AuthzRequest):
+            async with semaphore:
+                allowed = await self.enforce(req)
+                results.append(BulkAuthzResult(req, allowed))
+
+        async with anyio.create_task_group() as tg:
+            for req in requests:
+                tg.start_soon(worker, req)
+
+        return results

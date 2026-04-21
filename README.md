@@ -14,7 +14,7 @@
 [![Package manager: uv](https://img.shields.io/badge/pkg%20manager-uv-de5f7c.svg)](https://github.com/astral-sh/uv)
 [![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-fe5196.svg)](https://www.conventionalcommits.org)
 
-**py-authz** is a framework-agnostic, async-first authorization library for Python built on [OpenFGA](https://openfga.dev). It provides a clean public API, a declarative modeling layer, pluggable caching and storage, optional adapters for FastAPI and Keycloak, audit logging, and first-class multi-tenant support.
+**py-authz** is a framework-agnostic, async-first authorization library for Python powered by [OpenFGA](https://openfga.dev), with optional identity provider integrations (e.g., Keycloak). It provides a clean public API, a declarative modeling layer, pluggable caching and storage, optional adapters for FastAPI and Keycloak, audit logging, and first-class multi-tenant support.
 
 > "Is this user allowed to do X on Y?" — in one line, anywhere in your stack.
 

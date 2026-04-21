@@ -108,3 +108,21 @@ class AuthzRequest:
             "user:123:viewer:document:456"
         """
         return f"{self.identity.id}:{self.action}:{self.resource.type}:{self.resource.id}"
+
+
+@dataclass
+class AuthzExplanation:
+    """
+    Result of an authorization explanation.
+    """
+
+    allowed: bool
+    reason: str
+    path: list[str] | None = None
+    details: Any | None = None
+
+
+@dataclass
+class BulkAuthzResult:
+    request: AuthzRequest
+    allowed: bool
