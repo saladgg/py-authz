@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-04-21)
+
+### Documentation
+
+- **FX-00011**: Improve tehnical documentation. ([#4](https://github.com/saladgg/py-authz/pull/4),
+  [`0c45cbc`](https://github.com/saladgg/py-authz/commit/0c45cbc215fd939bc1994b88386d2209e344ce22))
+
+### Features
+
+- **FX-00012**: Add explain API, bulk enforcement and relationship API
+  ([#5](https://github.com/saladgg/py-authz/pull/5),
+  [`e8561e8`](https://github.com/saladgg/py-authz/commit/e8561e81243e716dbc9d0634e82d50d91221687e))
+
+
 ## v1.0.0 (2026-04-20)
 
 ### Bug Fixes
