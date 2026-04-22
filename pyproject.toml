@@ -73,8 +73,12 @@ dev = [
 py-authz = "py_authz.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/saladgg/py-authz"
+Homepage = "https://github.com/saladgg/py-authz" # todo
+Repository = "https://github.com/saladgg/py-authz"
+Documentation = "https://github.com/saladgg/py-authz/docs"
 Changelog = "https://github.com/saladgg/py-authz/releases"
+
+
 
 [build-system]
 requires = ["setuptools>=82", "wheel"]
@@ -127,6 +131,7 @@ build_command = "python -m build"
 
 [tool.semantic_release.publish]
 upload_to_vcs_release = true
+dist_glob_patterns = ["dist/*"]
 
 [tool.semantic_release.changelog.default_templates]
 changelog_file = "CHANGELOG.md"
