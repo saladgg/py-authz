@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.1.1 (2026-04-22)
+
+### Bug Fixes
+
+- **FX-00013**: Update semantic-release configs to pick dist contents for assets
+  ([#6](https://github.com/saladgg/py-authz/pull/6),
+  [`11d6fa4`](https://github.com/saladgg/py-authz/commit/11d6fa4262e829c4b258edbc5ab26cf4a09d7936))
+
+
 ## v1.1.0 (2026-04-21)
 
 ### Documentation
