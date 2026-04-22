@@ -5,17 +5,17 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: write   # required to create tags & releases
 
 jobs:
   release:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0  
-          persist-credentials: true
+          fetch-depth: 0   # REQUIRED for semantic-release
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,18 +25,7 @@ jobs:
       - name: Install dependencies
         run: pip install python-semantic-release build
 
-      # Semantic release (version + changelog + tag + GitHub release)
       - name: Semantic Release
         env:
           GH_TOKEN: ${{ secrets.AUTHZ_CI_TOKEN }}
-        run: semantic-release version --skip-build
-
-      # Build package AFTER version bump
-      - name: Build package
-        run: python -m build
-
-      # Attach dist files to GitHub release
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
+        run: semantic-release publish
