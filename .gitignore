@@ -36,7 +36,6 @@ example/
 .claude
 .mypy_cache/
 .ruff_cache/
-examples/
 todos.md
 pypr_archived.toml
 .claude
