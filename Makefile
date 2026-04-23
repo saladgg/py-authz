@@ -77,3 +77,46 @@ lint: ## Run linter and type checker
 .PHONY: test
 test: ## Run test suite with coverage
 	uv run pytest 
+
+
+# ----------------------------------------------------------
+# py-authz installation options
+# ----------------------------------------------------------
+
+.PHONY: install-core install-extras install-all
+
+install-core: ## Install py-authz (core only, no extras)
+	pip install py-authz
+
+install-extras: ## Install py-authz with fastapi + redis + postgres + cli + keycloak
+	pip install "py-authz[fastapi,redis,postgres,cli,keycloak]"
+
+install-all: ## Install py-authz with every extra
+	pip install "py-authz[all]"
+
+# ----------------------------------------------------------
+# Docker
+# ----------------------------------------------------------
+# Services started by `make docker-up`:
+#   openfga   Fine-grained authz server → http://localhost:8082
+#             Playground UI             → http://localhost:3000
+#             Hosted playground         → https://play.fga.dev/sandbox/?fga_api_host=127.0.0.1:8082&fga_api_scheme=http
+#   keycloak  Identity provider (JWT)   → http://localhost:8081
+#             Admin console             → http://localhost:8081/admin  (admin / admin)
+#             Seeded realm              → py-authz  (user: alice / alice, client: py-authz-demo)
+#
+# Prerequisites: copy .env.example → .env before first run.
+
+.PHONY: docker-up docker-down docker-clean
+
+docker-up: ## Start OpenFGA + Keycloak in the foreground
+	docker compose up
+
+docker-down: ## Stop services and remove volumes
+	docker compose down -v
+
+docker-clean: ## Stop, remove orphans, and prune the builder cache
+	docker compose down -v --remove-orphans
+	docker builder prune -f
+
+

@@ -21,6 +21,11 @@ Requires: pip install py-authz[fastapi]
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request

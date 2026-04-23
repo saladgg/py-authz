@@ -1,7 +1,7 @@
 [project]
 name = "py-authz"
 version = "v1.1.1"
-description = "Authz based on Keycloak and OpenFGA"
+description = "Authz library based on OpenFGA"
 readme = "README.md"
 requires-python = ">=3.13"
 authors = [{ name = "Salad Guyo", email = "saladguyo60@gmail.com" }]
@@ -45,12 +45,17 @@ cli = [
   "anyio>=4.13"
 ]
 
+keycloak = [
+  "pyjwt[crypto]>=2.12.1"
+]
+
 all = [
   "fastapi>=0.135",
   "starlette>=1.0",
   "redis>=7.4",
   "asyncpg>=0.31",
-  "anyio>=4.13"
+  "anyio>=4.13",
+  "pyjwt[crypto]>=2.12.1"
 ]
 
 test = [

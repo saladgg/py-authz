@@ -22,6 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from examples import models  # noqa: F401 — register models
 from examples.models import Document

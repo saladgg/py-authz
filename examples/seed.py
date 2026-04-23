@@ -11,16 +11,23 @@ What it does:
     4. Prints `FGA_STORE_ID` / `FGA_MODEL_ID` env exports for you to copy
 
 Everything is done through `OpenFGAClient` — no raw HTTP.
+
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from pathlib import Path
 
-from examples import models  # noqa: F401  — register models via import side-effect
-from py_authz.clients.openfga import OpenFGAClient
-from py_authz.core.model_sync import ModelSync
+# Ensure the project root is importable so `from examples import models` works
+# whether the script is run as `python examples/seed.py` or `python -m examples.seed`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from examples import models  # noqa: E402, F401  — register models via import side-effect
+from py_authz.clients.openfga import OpenFGAClient  # noqa: E402
+from py_authz.core.model_sync import ModelSync  # noqa: E402
 
 OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8080")
 STORE_NAME = "py-authz-examples"
@@ -55,9 +62,7 @@ async def main() -> None:
         print(f"Synced model: {model_id}")
 
         await bootstrap.write_tuples(
-            writes=[
-                {"user": u, "relation": r, "object": o} for u, r, o in SEED_TUPLES
-            ]
+            writes=[{"user": u, "relation": r, "object": o} for u, r, o in SEED_TUPLES]
         )
         print(f"Wrote {len(SEED_TUPLES)} tuples")
     finally:

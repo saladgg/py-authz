@@ -1,4 +1,5 @@
 """
+
 01 — Quickstart: a single authorization check.
 
 The smallest useful program: wire an `OpenFGAClient` + `AuthzEngine` behind
@@ -11,6 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 from py_authz import Authz, Identity, Resource
 from py_authz.clients.openfga import OpenFGAClient

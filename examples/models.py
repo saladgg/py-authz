@@ -11,6 +11,11 @@ type) and must be registered with the global `registry` so the model
 generator emits it.
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from py_authz.modeling.base import Relation, ResourceModel
 from py_authz.modeling.registry import registry
 

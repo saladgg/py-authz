@@ -1,13 +1,37 @@
 # ==========================================================
-# py-authz — Docker Compose 
+# Local dev stack: OpenFGA + Keycloak
 # ==========================================================
-
-
+# OpenFGA host port is 8082 to avoid colliding with Keycloak
+# (which defaults to 8080 inside the container → 8081 on host).
+# Keycloak boots in dev mode and imports docker/keycloak/realm.json
+# so examples/05_keycloak_fastapi.py works out of the box.
 
 services:
   openfga:
     image: openfga/openfga:latest
     container_name: openfga
-    ports:
-      - "8080:8080"
     command: run
+    ports:
+      - "8082:8080" # Host: 8082 → OpenFGA HTTP API
+      - "8083:8081" # Host: 8083 → gRPC API
+      - "3000:3000" # Host: 3000 → Playground UI
+    environment:
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+      OPENFGA_HTTP_CORS_ENABLED: "true"
+      OPENFGA_HTTP_CORS_ALLOWED_ORIGINS: "https://play.fga.dev,http://localhost:3000,http://127.0.0.1:3000,http://localhost"
+      OPENFGA_HTTP_CORS_ALLOWED_HEADERS: "*"
+      OPENFGA_HTTP_CORS_ALLOWED_METHODS: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      OPENFGA_HTTP_CORS_ALLOW_PRIVATE_NETWORK: "true"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8081:8080" # Host: 8081 → Keycloak admin + OIDC endpoints
+    volumes:
+      - ./docker/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro

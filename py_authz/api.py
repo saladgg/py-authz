@@ -70,7 +70,6 @@ class Authz:
             resource=resource,
             context=context,
         )
-
         return await self._engine.enforce(request)
 
     async def can(

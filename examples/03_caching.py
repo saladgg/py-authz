@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from py_authz import Authz, Identity, Resource
 from py_authz.cache.memory import InMemoryCache
