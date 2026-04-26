@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-04-26)
+
+### Bug Fixes
+
+- **FX-00013**: Update semantic-release configs to pick dist contents for assets
+  ([#6](https://github.com/saladgg/py-authz/pull/6),
+  [`11d6fa4`](https://github.com/saladgg/py-authz/commit/11d6fa4262e829c4b258edbc5ab26cf4a09d7936))
+
+- **FX-00014**: Complete local dev stack for Keycloak adapter and runnable examples
+  ([`3127c52`](https://github.com/saladgg/py-authz/commit/3127c5240900fe95a52c02db148c08d4ffd863ae))
+
+### Documentation
+
+- **AC-00017**: Expand architecture and getting-started guides add runnable examples
+  ([#7](https://github.com/saladgg/py-authz/pull/7),
+  [`d25bf54`](https://github.com/saladgg/py-authz/commit/d25bf540d087f3b63b520ab25d1e0c478304fcc3))
+
+### Features
+
+- **BE-0009**: Add list_objects, contextual tuples, and testkit fake
+  ([`27d0254`](https://github.com/saladgg/py-authz/commit/27d0254da71fa00904fe27418e3ec0b5229a783e))
+
+
 ## v1.1.1 (2026-04-22)
 
 ### Bug Fixes
