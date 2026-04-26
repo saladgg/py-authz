@@ -1,7 +1,7 @@
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.model_sync import ModelSync
-from py_authz.core.types import AuthzRequest, Identity, Resource
+from py_authz.core.types import AuthzRequest, ContextualTuple, Identity, Resource
 from py_authz.modeling.base import Relation, ResourceModel
 
 
@@ -39,6 +39,7 @@ class Authz:
         resource: Resource,
         *,
         context: dict | None = None,
+        contextual_tuples: list[ContextualTuple] | None = None,
     ) -> bool:
         """
         Enforce an authorization decision.
@@ -54,7 +55,12 @@ class Authz:
                 The target resource.
 
             context (Optional[dict]):
-                Optional contextual data (future use).
+                ABAC context forwarded to OpenFGA conditions (e.g., current
+                time, IP, request metadata).
+
+            contextual_tuples (Optional[list[ContextualTuple]]):
+                Per-request relationship tuples that participate in this
+                check but are not persisted.
 
         Returns:
             bool:
@@ -69,6 +75,7 @@ class Authz:
             action=action,
             resource=resource,
             context=context,
+            contextual_tuples=tuple(contextual_tuples) if contextual_tuples else None,
         )
         return await self._engine.enforce(request)
 
@@ -135,6 +142,50 @@ class Authz:
         finally:
             # Restore original behavior
             self._engine.raise_on_denied = original
+
+    async def list_objects(
+        self,
+        relation,
+        user: Identity,
+        resource_type: str | None = None,
+        *,
+        context: dict | None = None,
+        contextual_tuples: list[ContextualTuple] | None = None,
+    ) -> list[str]:
+        """
+        Return all object IDs of a given type the user has `relation` on.
+
+        Accepts either a string relation (in which case `resource_type` is
+        required) or a `Relation` bound to a `ResourceModel` (type is derived).
+
+        Returns:
+            list[str]: object strings in "<type>:<id>" form, as returned by
+            OpenFGA.
+
+        Example:
+            allowed_docs = await authz.list_objects(Document.viewer, alice)
+            # ["document:roadmap", "document:design"]
+
+            allowed_docs = await authz.list_objects("viewer", alice, "document")
+        """
+        if isinstance(relation, Relation):
+            relation_name = relation.name
+            if relation.resource_cls is None and resource_type is None:
+                raise TypeError("Relation is unbound; pass resource_type explicitly.")
+            type_name = resource_type or relation.resource_cls.type
+        else:
+            if not resource_type:
+                raise TypeError("resource_type is required when relation is a string.")
+            relation_name = relation
+            type_name = resource_type
+
+        return await self._engine.list_objects(
+            user=user,
+            relation=relation_name,
+            resource_type=type_name,
+            context=context,
+            contextual_tuples=contextual_tuples,
+        )
 
     async def sync_model(self) -> str:
         """

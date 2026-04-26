@@ -34,7 +34,7 @@ from py_authz.api import MultiTenantAuthz
 from py_authz.core.tenant_manager import TenantManager
 from py_authz.core.tenant_store import InMemoryTenantStore
 
-OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8080")
+OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8082")
 
 
 async def main() -> None:

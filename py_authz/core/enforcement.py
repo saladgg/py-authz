@@ -13,7 +13,13 @@ from py_authz.core.exceptions import (
     InvalidAuthzRequest,
 )
 from py_authz.core.logging import logger
-from py_authz.core.types import AuthzExplanation, AuthzRequest, BulkAuthzResult
+from py_authz.core.types import (
+    AuthzExplanation,
+    AuthzRequest,
+    BulkAuthzResult,
+    ContextualTuple,
+    Identity,
+)
 
 
 class AuthzEngine:
@@ -99,13 +105,14 @@ class AuthzEngine:
 
         start = time.time()
         cache_key = request.cache_key()
+        cacheable = request.is_cacheable()
 
         # -------------------------------------------------
-        # 1. Check cache
+        # 1. Check cache (skipped when per-request state is present)
         # -------------------------------------------------
         cache_hit = False
 
-        if self.cache:
+        if self.cache and cacheable:
             cached = await self.cache.get(cache_key)
             if cached is not None:
                 cache_hit = True
@@ -132,16 +139,21 @@ class AuthzEngine:
         # -------------------------------------------------
         # 2. Call OpenFGA
         # -------------------------------------------------
+        contextual = (
+            [t.to_fga() for t in request.contextual_tuples] if request.contextual_tuples else None
+        )
         allowed = await self.fga_client.check(
             user=request.identity.id,
             relation=request.action,
             object=request.resource.to_fga_object(),
+            contextual_tuples=contextual,
+            context=request.context,
         )
 
         # -------------------------------------------------
-        # 3. Cache result
+        # 3. Cache result (only when request is cacheable)
         # -------------------------------------------------
-        if self.cache:
+        if self.cache and cacheable:
             await self.cache.set(cache_key, allowed)
 
         duration = (time.time() - start) * 1000
@@ -302,6 +314,63 @@ class AuthzEngine:
             path=path,
             details=explanation_data,
         )
+
+    async def list_objects(
+        self,
+        user: Identity,
+        relation: str,
+        resource_type: str,
+        *,
+        context: dict | None = None,
+        contextual_tuples: list[ContextualTuple] | None = None,
+    ) -> list[str]:
+        """
+        Return all objects of `resource_type` that `user` has `relation` on.
+
+        This is the inverse of `enforce`: instead of checking one object,
+        OpenFGA returns the full set the user has access to. Required for
+        list/index pages where checking each row would be O(n) round-trips.
+
+        Returns:
+            list[str]: object strings in "<type>:<id>" form.
+        """
+        if not user or not user.id:
+            raise InvalidAuthzRequest("Missing or invalid identity")
+        if not relation:
+            raise InvalidAuthzRequest("Relation must be provided")
+        if not resource_type:
+            raise InvalidAuthzRequest("resource_type must be provided")
+
+        start = time.time()
+
+        contextual = [t.to_fga() for t in contextual_tuples] if contextual_tuples else None
+
+        objects = await self.fga_client.list_objects(
+            user=user.id,
+            relation=relation,
+            type=resource_type,
+            contextual_tuples=contextual,
+            context=context,
+        )
+
+        duration = (time.time() - start) * 1000
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "authz_list_objects",
+                    "request_id": get_request_id(),
+                    "tenant": getattr(self.fga_client, "store_id", None),
+                    "user": user.id,
+                    "relation": relation,
+                    "type": resource_type,
+                    "count": len(objects),
+                    "latency_ms": round(duration, 2),
+                }
+            )
+        )
+
+        return objects
 
     async def bulk_enforce(
         self,

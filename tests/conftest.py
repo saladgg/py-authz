@@ -41,8 +41,18 @@ class MockOpenFGAClient:
         self._explain_data = explain_data
         self._explain_raises = explain_raises
 
-    async def check(self, user: str, relation: str, object: str) -> bool:
+    async def check(
+        self,
+        user: str,
+        relation: str,
+        object: str,
+        *,
+        contextual_tuples: list[dict] | None = None,
+        context: dict | None = None,
+    ) -> bool:
         self.calls.append((user, relation, object))
+        self.last_contextual_tuples = contextual_tuples
+        self.last_context = context
         return self.allowed
 
     async def write_tuples(

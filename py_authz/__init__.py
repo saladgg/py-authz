@@ -9,10 +9,11 @@ Public API:
 """
 
 from py_authz.api import Authz
-from py_authz.core.types import Identity, Resource
+from py_authz.core.types import ContextualTuple, Identity, Resource
 
 __all__ = [
     "Authz",
+    "ContextualTuple",
     "Identity",
     "Resource",
 ]

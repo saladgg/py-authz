@@ -7,13 +7,12 @@ example fakes authentication with an `X-User-Id` header and attaches an
 replaces that with real Keycloak JWT validation.
 
 Run:
-    uv run uvicorn examples.04_fastapi_app:app --reload
+    `uv run uvicorn examples.04_fastapi_app:app --reload`
 
 Try:
     curl -H "X-User-Id: alice" http://localhost:8000/documents/roadmap
     curl -H "X-User-Id: alice" -X PATCH http://localhost:8000/documents/roadmap
-    curl -H "X-User-Id: carol" -X PATCH http://localhost:8000/documents/roadmap
-    # → 403
+    curl -H "X-User-Id: carol" -X PATCH http://localhost:8000/documents/roadmap # → 403
 
 Requires: pip install py-authz[fastapi]
 """

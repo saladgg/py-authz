@@ -29,7 +29,7 @@ from examples import models  # noqa: E402, F401  — register models via import 
 from py_authz.clients.openfga import OpenFGAClient  # noqa: E402
 from py_authz.core.model_sync import ModelSync  # noqa: E402
 
-OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8080")
+OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8082")
 STORE_NAME = "py-authz-examples"
 
 # Tuples that seed realistic permissions.

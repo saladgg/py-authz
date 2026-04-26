@@ -18,6 +18,9 @@ them without rebuilding context.
 | `05_keycloak_fastapi.py`  | Real Keycloak JWT validation via `KeycloakAuthMiddleware`   |
 | `06_multitenant.py`       | `MultiTenantAuthz` with auto-provisioning per tenant        |
 | `07_explain_and_bulk.py`  | `engine.explain`, `engine.bulk_enforce`, `authz.grant/revoke` |
+| `08_list_objects.py`      | Inverse query — "which documents can alice view?"           |
+| `09_contextual_and_abac.py` | Per-request `contextual_tuples` and ABAC `context`        |
+| `10_unit_testing.py`      | `make_fake_authz()` — unit-test authz without OpenFGA       |
 
 ## Prerequisites
 
@@ -62,7 +65,7 @@ It prints three env vars — **export them in the shell you run the examples
 from**:
 
 ```bash
-export FGA_API_URL=http://localhost:8080
+export FGA_API_URL=http://localhost:8082
 export FGA_STORE_ID=01HXYZ...
 export FGA_MODEL_ID=01HXYZ...
 ```
@@ -95,6 +98,15 @@ uv run python examples/06_multitenant.py
 
 # Explain a decision, run bulk checks, grant/revoke via the high-level API
 uv run python examples/07_explain_and_bulk.py
+
+# List all objects a user has a given relation on (inverse query)
+uv run python examples/08_list_objects.py
+
+# Per-request contextual tuples + ABAC context (cache-bypassing)
+uv run python examples/09_contextual_and_abac.py
+
+# In-memory fake — no OpenFGA needed (env vars not required)
+uv run python examples/10_unit_testing.py
 ```
 
 ## How the pieces fit

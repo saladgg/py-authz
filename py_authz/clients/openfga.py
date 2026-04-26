@@ -71,7 +71,15 @@ class OpenFGAClient:
             timeout=self.timeout,
         )
 
-    async def check(self, user: str, relation: str, object: str) -> bool:
+    async def check(
+        self,
+        user: str,
+        relation: str,
+        object: str,
+        *,
+        contextual_tuples: list[dict] | None = None,
+        context: dict | None = None,
+    ) -> bool:
         """
         Perform an authorization check via OpenFGA.
 
@@ -84,6 +92,14 @@ class OpenFGAClient:
 
             object (str):
                 Object identifier (e.g., "document:456")
+
+            contextual_tuples (Optional[list[dict]]):
+                Per-request tuples that participate in evaluation but are
+                not persisted. Each dict has keys: user, relation, object.
+
+            context (Optional[dict]):
+                Context values for OpenFGA conditions (ABAC). Forwarded
+                to the model's condition expressions verbatim.
 
         Returns:
             bool:
@@ -101,7 +117,7 @@ class OpenFGAClient:
         """
         endpoint = f"/stores/{self.store_id}/check"
 
-        payload = {
+        payload: dict = {
             "tuple_key": {
                 "user": user,
                 "relation": relation,
@@ -109,6 +125,12 @@ class OpenFGAClient:
             },
             "authorization_model_id": self.model_id,
         }
+
+        if contextual_tuples:
+            payload["contextual_tuples"] = {"tuple_keys": contextual_tuples}
+
+        if context:
+            payload["context"] = context
 
         attempt = 0
 
@@ -228,6 +250,51 @@ class OpenFGAClient:
             "relation": relation,
             "object": object,
         }
+
+    async def list_objects(
+        self,
+        user: str,
+        relation: str,
+        type: str,
+        *,
+        contextual_tuples: list[dict] | None = None,
+        context: dict | None = None,
+    ) -> list[str]:
+        """
+        Return all objects of a given type the user has the relation on.
+
+        This is the inverse of `check`: instead of asking "can user X do Y on
+        object Z?", it asks "which objects of type T can user X do Y on?".
+
+        Args:
+            user: User identifier (e.g., "user:123").
+            relation: Relation/action (e.g., "viewer").
+            type: Resource type to enumerate (e.g., "document").
+            contextual_tuples: Optional per-request tuples.
+            context: Optional ABAC context for conditions.
+
+        Returns:
+            list[str]: Object strings in the form "<type>:<id>".
+        """
+        payload: dict = {
+            "type": type,
+            "relation": relation,
+            "user": user,
+            "authorization_model_id": self.model_id,
+        }
+
+        if contextual_tuples:
+            payload["contextual_tuples"] = {"tuple_keys": contextual_tuples}
+
+        if context:
+            payload["context"] = context
+
+        res = await self._post(
+            f"/stores/{self.store_id}/list-objects",
+            json=payload,
+        )
+
+        return list(res.get("objects", []))
 
     async def write_tuples(
         self,
