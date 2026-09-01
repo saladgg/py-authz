@@ -5,7 +5,7 @@ import pytest
 from py_authz.core.exceptions import AuthorizationDenied
 from py_authz.core.types import Identity
 from py_authz.modeling import Relation, ResourceModel
-from py_authz.modeling.decorators import require
+from py_authz.modeling.decorators import authorize
 
 
 class Doc(ResourceModel):
@@ -24,7 +24,7 @@ class DenyAuthz:
 
 
 def test_async_decorator_allows():
-    @require(
+    @authorize(
         AllowAuthz(),
         Doc.view,
         user_getter=lambda u, d: u,
@@ -39,7 +39,7 @@ def test_async_decorator_allows():
 
 
 def test_async_decorator_raises_when_denied():
-    @require(
+    @authorize(
         DenyAuthz(),
         Doc.view,
         user_getter=lambda u, d: u,
@@ -53,7 +53,7 @@ def test_async_decorator_raises_when_denied():
 
 
 def test_sync_decorator_raises_when_denied():
-    @require(
+    @authorize(
         DenyAuthz(),
         Doc.view,
         user_getter=lambda u, d: u,

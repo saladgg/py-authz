@@ -65,7 +65,7 @@ class Document(ResourceModel):
     type = "document"
 
     owner = Relation("owner")
-    editor = Relation("editor", union=["owner"])   # owner implies editor
+    editor = Relation("editor", union=["owner"])  # owner implies editor
     viewer = Relation("viewer", union=["editor"])  # editor implies viewer
 
 
@@ -98,8 +98,8 @@ from myapp.authz import models  # noqa: F401 — registers models
 
 async def bootstrap():
     client = OpenFGAClient(
-        api_url=os.environ["FGA_API_URL"],   # http://localhost:8080
-        store_id=None,                       # we'll create one
+        api_url=os.environ["FGA_API_URL"],  # http://localhost:8080
+        store_id=None,  # we'll create one
         model_id=None,
     )
     try:

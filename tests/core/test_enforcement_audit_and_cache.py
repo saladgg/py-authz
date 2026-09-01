@@ -55,6 +55,7 @@ async def test_audit_logger_called_with_allowed_event():
     )
 
     await engine.enforce(_request())
+    await engine.flush_audit_logs()  # audit writes are dispatched in the background
 
     assert len(audit.events) == 1
     event = audit.events[0]
@@ -76,9 +77,64 @@ async def test_audit_logger_called_with_denied_event():
     )
 
     await engine.enforce(_request())
+    await engine.flush_audit_logs()
 
     assert audit.events[0].allowed is False
     assert "no matching relation" in audit.events[0].reason
+
+
+@pytest.mark.asyncio
+async def test_enforce_survives_audit_logger_failure():
+    """
+    Regression test for SEC-3: an unhealthy audit sink must never affect
+    the enforcement decision, and must never propagate out of `enforce()`.
+    """
+
+    class FailingAuditLogger:
+        def __init__(self):
+            self.call_count = 0
+
+        async def log(self, event):
+            self.call_count += 1
+            raise RuntimeError("audit sink is down")
+
+    audit = FailingAuditLogger()
+    engine = AuthzEngine(
+        fga_client=MockOpenFGAClient(allowed=True),
+        cache=None,
+        audit_logger=audit,
+    )
+
+    result = await engine.enforce(_request())
+    assert result is True
+
+    # The background audit task runs (and fails) once flushed; the
+    # decision above must already have been unaffected either way.
+    await engine.flush_audit_logs()
+    assert audit.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_enforce_denied_survives_audit_logger_failure():
+    """Same as above, but for a denied decision with raise_on_denied."""
+
+    class FailingAuditLogger:
+        async def log(self, event):
+            raise RuntimeError("audit sink is down")
+
+    engine = AuthzEngine(
+        fga_client=MockOpenFGAClient(allowed=False),
+        cache=None,
+        audit_logger=FailingAuditLogger(),
+        raise_on_denied=True,
+    )
+
+    from py_authz.core.exceptions import AuthorizationDenied
+
+    with pytest.raises(AuthorizationDenied):
+        await engine.enforce(_request())
+
+    await engine.flush_audit_logs()
 
 
 @pytest.mark.asyncio

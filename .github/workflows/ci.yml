@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   lint-test:
@@ -27,3 +29,24 @@ jobs:
 
       - name: Test
         run: make test
+
+  integration-test:
+    name: Live Integration Tests (OpenFGA + Keycloak + Redis + Postgres)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: make install-dev
+
+      - name: Run live integration tests
+        run: make test-integration
+
+      - name: Tear down services
+        if: always()
+        run: docker compose down -v

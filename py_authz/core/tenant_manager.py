@@ -55,6 +55,11 @@ class TenantManager:
                 store_id=None,
                 model_id=None,
             )
+            # Assigned only once `create_store()` succeeds. Referencing an
+            # unassigned `store_id` in the log line below used to raise
+            # `UnboundLocalError` when `create_store()` itself failed,
+            # masking the real (and far more actionable) exception.
+            store_id: str | None = None
             try:
                 store_id = await client.create_store(name=tenant_id)
                 client.store_id = store_id
@@ -64,9 +69,12 @@ class TenantManager:
 
                 await self.tenant_store.set(tenant_id, store_id)
 
-                return store_id
-            finally:
                 logger.info(f"provision_success tenant={tenant_id} store_id={store_id}")
+                return store_id
+            except Exception:
+                logger.exception(f"provision_failed tenant={tenant_id} store_id={store_id}")
+                raise
+            finally:
                 await client.aclose()
 
     @asynccontextmanager

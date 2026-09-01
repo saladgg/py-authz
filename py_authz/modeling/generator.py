@@ -98,7 +98,8 @@ class OpenFGAModelGenerator:
         Handles:
             - direct relations (this)
             - unions
-            - inherited/computed relations
+            - inherited/computed relations (alias of union)
+            - parent-relation inheritance (tupleToUserset)
         """
         parts: list[dict[str, Any]] = []
 
@@ -123,6 +124,20 @@ class OpenFGAModelGenerator:
                 {
                     "computedUserset": {
                         "relation": name,
+                    }
+                }
+            )
+
+        # -------------------------------------------------
+        # Parent-relation inheritance (tupleToUserset)
+        # -------------------------------------------------
+        if rel.from_parent:
+            tupleset_relation, computed_relation = rel.from_parent
+            parts.append(
+                {
+                    "tupleToUserset": {
+                        "tupleset": {"relation": tupleset_relation},
+                        "computedUserset": {"relation": computed_relation},
                     }
                 }
             )

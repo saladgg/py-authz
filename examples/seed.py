@@ -42,6 +42,11 @@ SEED_TUPLES: list[tuple[str, str, str]] = [
     ("user:bob", "editor", "document:roadmap"),
     ("user:carol", "viewer", "document:roadmap"),
     ("user:dave", "viewer", "document:public-announcement"),
+    # "document:budget" lives inside "folder:engineering" (a `parent`
+    # tuple, not a direct grant) and has NO direct grants of its own —
+    # see examples/11_hierarchical_permissions.py. carol can view it
+    # purely because she's a viewer of the folder it's parented to.
+    ("folder:engineering", "parent", "document:budget"),
 ]
 
 

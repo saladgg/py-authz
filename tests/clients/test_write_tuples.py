@@ -187,6 +187,83 @@ async def test_write_tuples_maps_connect_error():
         await client.write_tuples(writes=[_tuple()])
 
 
+@pytest.mark.asyncio
+async def test_write_tuples_chunks_over_100_combined_operations():
+    """
+    Regression test for REL-8: OpenFGA caps a single Write request at 100
+    combined tuple operations (writes + deletes together). Previously, a
+    caller granting permissions in bulk over that limit got an opaque
+    `ExternalServiceError` from OpenFGA's 400 response with no chunking.
+    """
+    http = RecordingWriteClient()
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s1",
+        model_id=None,
+        http_client=http,
+    )
+
+    writes = [_tuple(user=f"user:{i}") for i in range(70)]
+    deletes = [_tuple(user=f"user:d{i}") for i in range(50)]
+
+    await client.write_tuples(writes=writes, deletes=deletes)
+
+    # 120 combined operations, chunk size 100 -> two requests.
+    assert len(http.calls) == 2
+    total_writes = sum(
+        len(json.get("writes", {}).get("tuple_keys", [])) for _, _, json in http.calls
+    )
+    total_deletes = sum(
+        len(json.get("deletes", {}).get("tuple_keys", [])) for _, _, json in http.calls
+    )
+    assert total_writes == 70
+    assert total_deletes == 50
+    # Every chunk stays within the combined 100-item cap.
+    for _, _, json in http.calls:
+        combined = len(json.get("writes", {}).get("tuple_keys", [])) + len(
+            json.get("deletes", {}).get("tuple_keys", [])
+        )
+        assert combined <= 100
+
+
+@pytest.mark.asyncio
+async def test_write_tuples_exactly_100_combined_operations_is_one_request():
+    http = RecordingWriteClient()
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s1",
+        model_id=None,
+        http_client=http,
+    )
+
+    writes = [_tuple(user=f"user:{i}") for i in range(100)]
+
+    await client.write_tuples(writes=writes)
+
+    assert len(http.calls) == 1
+    assert len(http.calls[0][2]["writes"]["tuple_keys"]) == 100
+
+
+@pytest.mark.asyncio
+async def test_write_tuples_101_combined_operations_is_two_requests():
+    http = RecordingWriteClient()
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s1",
+        model_id=None,
+        http_client=http,
+    )
+
+    writes = [_tuple(user=f"user:{i}") for i in range(101)]
+
+    await client.write_tuples(writes=writes)
+
+    assert len(http.calls) == 2
+    sizes = [len(call[2].get("writes", {}).get("tuple_keys", [])) for call in http.calls]
+    assert sum(sizes) == 101
+    assert all(size <= 100 for size in sizes)
+
+
 def test_tuple_helper_shape():
     client = OpenFGAClient(
         api_url="http://fake",

@@ -1,6 +1,13 @@
 import pytest
 
-from py_authz.core.types import Identity, Resource
+from py_authz.api import Authz
+from py_authz.core.enforcement import AuthzEngine
+from py_authz.core.types import AuthzRequest, Identity, Resource
+from py_authz.modeling.base import ResourceModel
+
+
+class GrantRevokeDoc(ResourceModel):
+    type = "document"
 
 
 @pytest.mark.asyncio
@@ -100,3 +107,145 @@ async def test_grant_uses_resource_to_fga_object(authz, mock_fga_client, identit
     await authz.grant(identity, "owner", res)
 
     assert mock_fga_client.writes[0]["object"] == "project:alpha"
+
+
+# ----------------------------------------------------------------------
+# Regression coverage: `grant`/`revoke`/`grant_many`/`revoke_many` must
+# also accept a `ResourceModel` instance directly, not just a raw
+# `Resource` — the README and `examples/06_multitenant.py` both document
+# and use exactly that (`await authz.grant(alice, "owner", report)` where
+# `report = Document(id="report")`), but `ResourceModel` has no
+# `to_fga_object()` of its own (only `Resource` does), so this used to
+# raise `AttributeError` for the documented usage.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grant_accepts_a_resource_model_instance(authz, mock_fga_client, identity):
+    doc = GrantRevokeDoc(id="roadmap")
+
+    await authz.grant(identity, "owner", doc)
+
+    assert mock_fga_client.writes[0]["object"] == "document:roadmap"
+
+
+@pytest.mark.asyncio
+async def test_revoke_accepts_a_resource_model_instance(authz, mock_fga_client, identity):
+    doc = GrantRevokeDoc(id="roadmap")
+
+    await authz.revoke(identity, "owner", doc)
+
+    assert mock_fga_client.deletes[0]["object"] == "document:roadmap"
+
+
+@pytest.mark.asyncio
+async def test_grant_many_accepts_resource_model_instances(authz, mock_fga_client, identity):
+    doc = GrantRevokeDoc(id="roadmap")
+
+    await authz.grant_many([(identity, "viewer", doc)])
+
+    assert mock_fga_client.writes[0]["object"] == "document:roadmap"
+
+
+@pytest.mark.asyncio
+async def test_revoke_many_accepts_resource_model_instances(authz, mock_fga_client, identity):
+    doc = GrantRevokeDoc(id="roadmap")
+
+    await authz.revoke_many([(identity, "viewer", doc)])
+
+    assert mock_fga_client.deletes[0]["object"] == "document:roadmap"
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for DX-2: grant/revoke must invalidate the cache
+# entry for the exact relation being granted/revoked, so an immediately-
+# following check doesn't return a stale cached result.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grant_invalidates_cached_denied_result(authz, identity, resource, cache):
+    request = AuthzRequest(identity=identity, action="viewer", resource=resource)
+    await cache.set(request.cache_key(), False)  # prime a stale "denied"
+
+    await authz.grant(identity, "viewer", resource)
+
+    assert await cache.get(request.cache_key()) is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_invalidates_cached_allowed_result(authz, identity, resource, cache):
+    request = AuthzRequest(identity=identity, action="viewer", resource=resource)
+    await cache.set(request.cache_key(), True)  # prime a stale "allowed"
+
+    await authz.revoke(identity, "viewer", resource)
+
+    assert await cache.get(request.cache_key()) is None
+
+
+@pytest.mark.asyncio
+async def test_grant_invalidation_uses_resource_model_type_and_id(authz, identity, cache):
+    """The cache key must be computed from the resource's actual type/id
+    even when a ResourceModel (not a raw Resource) is passed."""
+    doc = GrantRevokeDoc(id="roadmap")
+    request = AuthzRequest(identity=identity, action="owner", resource=doc.to_resource())
+    await cache.set(request.cache_key(), False)
+
+    await authz.grant(identity, "owner", doc)
+
+    assert await cache.get(request.cache_key()) is None
+
+
+@pytest.mark.asyncio
+async def test_grant_many_invalidates_each_entry(authz, cache):
+    users = [Identity(id=f"user:{i}") for i in range(2)]
+    res = Resource(type="document", id="42")
+    requests = [AuthzRequest(identity=u, action="viewer", resource=res) for u in users]
+
+    for req in requests:
+        await cache.set(req.cache_key(), False)
+
+    await authz.grant_many([(u, "viewer", res) for u in users])
+
+    for req in requests:
+        assert await cache.get(req.cache_key()) is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_many_invalidates_each_entry(authz, cache):
+    users = [Identity(id=f"user:{i}") for i in range(2)]
+    res = Resource(type="document", id="99")
+    requests = [AuthzRequest(identity=u, action="editor", resource=res) for u in users]
+
+    for req in requests:
+        await cache.set(req.cache_key(), True)
+
+    await authz.revoke_many([(u, "editor", res) for u in users])
+
+    for req in requests:
+        assert await cache.get(req.cache_key()) is None
+
+
+@pytest.mark.asyncio
+async def test_grant_does_not_invalidate_other_relations(authz, identity, resource, cache):
+    """
+    Documented scope: only the exact granted relation's cache entry is
+    invalidated — a different (implied) relation on the same resource is
+    untouched.
+    """
+    editor_request = AuthzRequest(identity=identity, action="editor", resource=resource)
+    await cache.set(editor_request.cache_key(), False)
+
+    await authz.grant(identity, "owner", resource)  # a different relation
+
+    assert await cache.get(editor_request.cache_key()) is False
+
+
+@pytest.mark.asyncio
+async def test_grant_without_cache_configured_does_not_raise(mock_fga_client, identity, resource):
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None)
+    authz = Authz(engine)
+
+    # Should not raise even though there's no cache to invalidate.
+    await authz.grant(identity, "viewer", resource)
+    await authz.revoke(identity, "viewer", resource)

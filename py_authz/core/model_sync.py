@@ -44,8 +44,15 @@ class ModelSync:
         # Diff check
         # -------------------------------------------------
         if not force and current_model and ModelDiffer.is_equal(new_model, current_model):
-            # No change → reuse existing model
-            return current_model["authorization_model_id"]
+            # No change → reuse existing model.
+            #
+            # NOTE: `current_model` comes from OpenFGA's list-models
+            # response (`get_latest_model()`), where each item is keyed
+            # "id" — NOT "authorization_model_id" (that key only appears
+            # on the *write* endpoint's response, see `_upload_model`
+            # below). Reading the wrong key here silently defeated this
+            # whole no-op path against a real OpenFGA server.
+            return current_model["id"]
 
         # -------------------------------------------------
         # Upload new model

@@ -3,14 +3,19 @@ Test helpers for py-authz consumers.
 
 Lets users unit-test authz code without booting OpenFGA. The fake honors:
     - direct (user, relation, object) tuples written via grant/revoke
-    - union edges declared on registered ResourceModel classes
-      (e.g. ``editor = Relation("editor", union=["owner"])``)
+    - union/inherits edges declared on registered ResourceModel classes
+      (e.g. ``editor = Relation("editor", union=["owner"])`` — ``inherits``
+      is accepted identically, matching the real generator: see
+      ``modeling/base.py``'s ``Relation`` docstring)
+    - parent-relation inheritance declared via ``Relation(from_parent=...)``
+      (e.g. ``viewer = Relation("viewer", from_parent=("parent", "viewer"))``)
     - per-request contextual tuples on check / list_objects
 
 It does NOT implement the full OpenFGA evaluation engine (no userset rewrites
-beyond simple unions, no conditions/ABAC, no tuple-to-userset). For those,
-spin up a real OpenFGA instance — this fake covers the common RBAC patterns
-that dominate unit-test surface area.
+beyond unions and `from_parent`-style tuple-to-userset, no conditions/ABAC).
+For those, spin up a real OpenFGA instance — this fake covers the common
+RBAC (+ single-level hierarchy) patterns that dominate unit-test surface
+area.
 """
 
 from __future__ import annotations
@@ -113,8 +118,13 @@ class InMemoryFGAClient:
         if key in self._tuples or key in extra:
             return True
 
-        # Walk union edges from the model registry: if `relation` is the
-        # union of {a, b}, holding any of those on `obj` implies `relation`.
+        # Walk union/inherits edges from the model registry: if `relation`
+        # is the union of {a, b}, holding any of those on `obj` implies
+        # `relation`. `inherits` is walked identically to `union` — the
+        # real generator (`modeling/generator.py`) compiles both to the
+        # exact same `computedUserset` rewrite, so the fake must too, or
+        # a model using `inherits=` would behave correctly against real
+        # OpenFGA but incorrectly (falsely denied) here.
         obj_type = obj.split(":", 1)[0]
         model = self._lookup_model(obj_type)
         if model is None:
@@ -124,7 +134,22 @@ class InMemoryFGAClient:
         if rel is None:
             return False
 
-        return any(self._check(user, parent, obj, extra, seen) for parent in rel.union)
+        same_object_parents = (*rel.union, *rel.inherits)
+        if any(self._check(user, parent, obj, extra, seen) for parent in same_object_parents):
+            return True
+
+        # Walk parent-relation inheritance (tupleToUserset): if `obj`'s
+        # `tupleset_relation` points at some parent object(s), the user
+        # holds `relation` on `obj` if they hold `computed_relation` on
+        # any of those parents.
+        if rel.from_parent:
+            tupleset_relation, computed_relation = rel.from_parent
+            all_tuples = self._tuples | extra
+            parents = {u for u, r, o in all_tuples if r == tupleset_relation and o == obj}
+            if any(self._check(user, computed_relation, parent, extra, seen) for parent in parents):
+                return True
+
+        return False
 
     def _lookup_model(self, type_name: str) -> type[ResourceModel] | None:
         try:

@@ -152,3 +152,28 @@ class ConfigurationError(AuthzError):
     """
 
     pass
+
+
+# ---------------------------------------------------------------------
+# Multi-Tenancy Errors
+# ---------------------------------------------------------------------
+
+
+class TenantNotFoundError(AuthzError):
+    """
+    Raised by a `TenantResolver` to signal that a tenant has no store
+    mapping yet — the one, specific condition under which
+    `MultiTenantAuthz.for_tenant()` is allowed to fall back to
+    auto-provisioning via a configured `TenantManager`.
+
+    `TenantResolver` implementations MUST raise this (not a bare
+    `ValueError`/`KeyError`/etc.) to signal "no such tenant yet". Any other
+    exception — a database timeout, a network error, a bug — must be
+    allowed to propagate as a hard failure instead of being silently
+    reinterpreted as "this tenant doesn't exist", which could otherwise
+    cause a transient resolver failure for an *existing* tenant to trigger
+    provisioning a brand-new, empty store and overwriting that tenant's
+    mapping.
+    """
+
+    pass

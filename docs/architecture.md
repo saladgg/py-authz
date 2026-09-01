@@ -18,7 +18,13 @@ diagram; this doc is for readers who want to understand or extend the library.
    guarded by `utils/deps.py`.
 4. **Explicit over implicit.** No globals for the engine, no thread-locals for
    the user. Pass the `Authz` instance around; carry `Identity` on
-   `request.state` for HTTP.
+   `request.state` for HTTP. Configuration is code-first, too: there's no
+   library-wide settings object or env-var-driven construction path —
+   you build `OpenFGAClient`/`AuthzEngine`/etc. explicitly with whatever
+   values you resolve yourself. The one exception is the CLI
+   (`cli/config.py:get_env`), which is a standalone process, not a
+   library import into a host app that already owns its own
+   configuration story.
 5. **Safe defaults, pluggable everything.** The cache, the tenant store, the
    JWT validator, the user getter — all swappable.
 
@@ -74,7 +80,9 @@ Authz.enforce(action, user, resource)
             ├─ structured log (request_id, tenant, user, relation, resource,
             │                  allowed, cache_hit, latency_ms)
             │
-            ├─ audit_logger.log(event)                    ← optional
+            ├─ dispatch audit_logger.log(event) as a          ← optional,
+            │  background task (fire-and-forget; failures         backgrounded
+            │  are caught and logged, never affect the result)
             │
             └─ raise AuthorizationDenied if !allowed and raise_on_denied
                 else return allowed
@@ -196,10 +204,15 @@ own auth middleware) and build the resource from path/query params.
 ### Audit logging
 
 Pass an `audit_logger` to `AuthzEngine`. It must expose an async `log(event)`
-method receiving an `AuditEvent` (see `audit/types.py`). The engine calls it
-after every decision. The bundled Postgres logger is in `audit/`; for
-low-latency needs, wrap it in a queue/worker so the authz hot path isn't
-blocked by DB writes.
+method receiving an `AuditEvent` (see `audit/types.py`). The engine dispatches
+it as a background task after every decision — the write is never awaited
+inline, so a slow or unhealthy audit sink adds no latency to (and cannot
+fail) the authorization decision itself; failures inside `log()` are caught
+and logged, never raised back to the caller. Call
+`AuthzEngine.flush_audit_logs()` if you need to await any in-flight writes
+(e.g. in tests, or before process shutdown) — a process that exits
+immediately after its last `enforce()` call may otherwise drop the final
+write(s). The bundled Postgres logger is in `audit/`.
 
 ---
 
@@ -235,7 +248,11 @@ AuthzError
 ├── ExternalServiceError     — catch-all for OpenFGA API failures
 │   ├── ServiceUnavailable   — cannot connect
 │   └── ServiceTimeout       — request timed out
-└── ConfigurationError       — missing/invalid configuration
+├── ConfigurationError       — missing/invalid configuration
+└── TenantNotFoundError      — raised by a TenantResolver for "no such
+                               tenant yet"; the only exception
+                               MultiTenantAuthz.for_tenant() treats as
+                               license to auto-provision
 ```
 
 Catch `AuthzError` at framework boundaries if you want one net for every
@@ -254,8 +271,15 @@ behavior per failure mode (e.g. 401 vs 403 vs 503).
   `event`, `request_id`, `tenant`, `user`, `relation`, `resource`, `allowed`,
   `cache_hit`, `latency_ms`. Parse it with whatever log pipeline you already
   use.
-- **Metrics.** `core/metrics.py` holds counter/histogram helpers; wire them
-  to your metrics backend if you want allow/deny rates and p99 latency.
+- **Metrics.** Pass `metrics=` to `AuthzEngine` (e.g. the module-level
+  `core/metrics.py:metrics` singleton, or your own object implementing
+  `incr(name, amount=1)`/`observe(name, value)`) and `enforce()` records
+  `authz_check_total`/`authz_allowed_total`/`authz_denied_total`/
+  `authz_cache_hit_total` counters plus an `authz_check_duration_ms`
+  observation per call. Like `cache`/`audit_logger`, this is an optional,
+  explicitly-injected dependency — nothing is recorded unless you pass it
+  in. Export `counters`/`durations` to your real metrics backend on
+  whatever schedule suits it.
 
 ---
 
@@ -263,10 +287,49 @@ behavior per failure mode (e.g. 401 vs 403 vs 503).
 
 - **`store_id` and `model_id` are mutable on `OpenFGAClient`.** Convenient
   (the tenant manager relies on it) but don't share a client between tenants.
-- **Cache invalidation is caller's responsibility.** Permission changes made
-  outside `Authz.grant/revoke` (e.g. another service) will not invalidate the
-  local cache. Use short TTLs for eventual consistency.
+- **Cache invalidation covers only the exact relation just written.**
+  `Authz.grant`/`revoke`/`grant_many`/`revoke_many` invalidate the cache
+  entry for the exact (identity, relation, resource) triple they just
+  wrote — but not other relations implied by it through the model's
+  union graph (e.g. granting `"owner"` doesn't proactively invalidate a
+  cached `"editor"`/`"viewer"` check for the same resource), and not
+  permission changes made outside these methods (e.g. another service
+  writing tuples directly). Use short TTLs for eventual consistency on
+  either case.
 - **`InMemoryTenantStore` is process-local.** Only for tests / single-box
   dev. Multi-instance deployments need a persistent store.
 - **`bulk_enforce` returns results out of input order.** Pair each result
   with `result.request` rather than zipping with the input list.
+- **`list_objects` has no result-size guard, pagination, or a documented
+  ceiling of its own — it inherits OpenFGA's.** `Authz.list_objects()` /
+  `OpenFGAClient.list_objects()` wrap OpenFGA's `POST /list-objects`
+  endpoint directly and return the entire response in one call. OpenFGA
+  itself does not paginate this endpoint — it evaluates the model against
+  every candidate object of the given type and returns all matches (or
+  errors past its own configured limits: `--listObjectsMaxResults`, 0 =
+  unlimited by default, and `--listObjectsDeadline`, 3s by default, which
+  can make the endpoint return a *partial*, non-deterministic result if
+  evaluation takes too long, without any signal in the response
+  distinguishing "these are all the results" from "we ran out of time").
+  Practically: this call is appropriate for "which of my org's ~dozens of
+  projects can this user see" kinds of relations, not for "which of the
+  10 million rows in this multi-tenant table can this admin see" —
+  fan-out at that scale needs either OpenFGA's `--listObjectsMaxResults`
+  tuned deliberately (and the resulting truncation handled), or (better,
+  for genuinely large result sets) inverting the query: page through your
+  own resource table and `check()`/`batch_check()` each page, or model
+  the boundary you actually want to paginate (e.g. by tenant/folder) so a
+  single `list_objects` call never needs to enumerate more than a bounded
+  set. This library adds no `limit`/pagination parameter of its own,
+  since OpenFGA's `list-objects` API doesn't expose a cursor to build one
+  on top of — if/when it does, that's the natural place to add one here.
+- **The library doesn't rate-limit its own outbound calls.** Nothing
+  throttles calls into OpenFGA's `check`/`list-objects` endpoints or a
+  JWKS endpoint on the library side — that's your host app's job (a
+  reverse proxy, an API gateway, or a request-level limiter in front of
+  routes that trigger authz checks). The one piece of rate-limiting the
+  library does own is narrow and specific: `KeycloakJWTValidator`/
+  `OIDCJWTValidator`'s `jwks_refresh_cooldown` caps how often an
+  unrecognized `kid` can force a JWKS refetch (see SEC-1) — that's a
+  self-protection mechanism for one internal code path, not a general
+  rate-limiting feature.

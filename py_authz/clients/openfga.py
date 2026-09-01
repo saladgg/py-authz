@@ -1,5 +1,3 @@
-import asyncio
-
 import httpx
 
 from py_authz.core.exceptions import (
@@ -7,6 +5,38 @@ from py_authz.core.exceptions import (
     ServiceTimeout,
     ServiceUnavailable,
 )
+from py_authz.utils.retry import retry_async
+
+#: OpenFGA's own cap on combined tuple operations (writes + deletes
+#: together) in a single Write request.
+_MAX_TUPLES_PER_WRITE = 100
+
+
+def _chunk_tuple_operations(
+    writes: list[dict],
+    deletes: list[dict],
+    chunk_size: int,
+):
+    """
+    Yield `(write_batch, delete_batch)` pairs, each with a combined size
+    of at most `chunk_size`.
+
+    When `writes`/`deletes` together already fit in one chunk (the common
+    case — including the "both empty" case), yields exactly the original
+    two lists once, unchanged, so callers observe the same single-request
+    behavior as before this existed.
+    """
+    if len(writes) + len(deletes) <= chunk_size:
+        yield (writes, deletes)
+        return
+
+    tagged = [("w", t) for t in writes] + [("d", t) for t in deletes]
+    for i in range(0, len(tagged), chunk_size):
+        batch = tagged[i : i + chunk_size]
+        yield (
+            [t for kind, t in batch if kind == "w"],
+            [t for kind, t in batch if kind == "d"],
+        )
 
 
 class OpenFGAClient:
@@ -132,53 +162,48 @@ class OpenFGAClient:
         if context:
             payload["context"] = context
 
-        attempt = 0
+        try:
+            response = await retry_async(
+                lambda: self._client.post(endpoint, json=payload),
+                retryable=(httpx.TimeoutException, httpx.ConnectError),
+                max_retries=self.max_retries,
+            )
 
-        while True:
-            try:
-                response = await self._client.post(endpoint, json=payload)
+            # Raise for non-2xx responses
+            response.raise_for_status()
 
-                # Raise for non-2xx responses
-                response.raise_for_status()
+            data = response.json()
 
-                data = response.json()
+            return data.get("allowed", False)
 
-                return data.get("allowed", False)
+        except httpx.TimeoutException as exc:
+            raise ServiceTimeout(
+                "OpenFGA request timed out",
+                service="openfga",
+                cause=exc,
+            ) from exc
 
-            except httpx.TimeoutException as exc:
-                if attempt >= self.max_retries:
-                    raise ServiceTimeout(
-                        "OpenFGA request timed out",
-                        service="openfga",
-                        cause=exc,
-                    ) from exc
+        except httpx.ConnectError as exc:
+            raise ServiceUnavailable(
+                "Unable to connect to OpenFGA",
+                service="openfga",
+                cause=exc,
+            ) from exc
 
-            except httpx.ConnectError as exc:
-                if attempt >= self.max_retries:
-                    raise ServiceUnavailable(
-                        "Unable to connect to OpenFGA",
-                        service="openfga",
-                        cause=exc,
-                    ) from exc
+        except httpx.HTTPStatusError as exc:
+            # Non-2xx responses (4xx, 5xx)
+            raise ExternalServiceError(
+                f"OpenFGA API error: {exc.response.status_code}",
+                service="openfga",
+                cause=exc,
+            ) from exc
 
-            except httpx.HTTPStatusError as exc:
-                # Non-2xx responses (4xx, 5xx)
-                raise ExternalServiceError(
-                    f"OpenFGA API error: {exc.response.status_code}",
-                    service="openfga",
-                    cause=exc,
-                ) from exc
-
-            except Exception as exc:
-                raise ExternalServiceError(
-                    "Unexpected error during OpenFGA request",
-                    service="openfga",
-                    cause=exc,
-                ) from exc
-
-            # Retry logic (simple exponential backoff)
-            attempt += 1
-            await asyncio.sleep(0.1 * (2**attempt))
+        except Exception as exc:
+            raise ExternalServiceError(
+                "Unexpected error during OpenFGA request",
+                service="openfga",
+                cause=exc,
+            ) from exc
 
     async def _request(self, method: str, path: str, json: dict | None = None) -> dict:
         try:
@@ -307,16 +332,33 @@ class OpenFGAClient:
         Args:
             writes: list of tuple dicts
             deletes: optional list of tuple dicts
+
+        OpenFGA caps a single Write request at `_MAX_TUPLES_PER_WRITE`
+        combined tuple operations (writes + deletes together) — a bulk
+        grant/revoke over that (seeding a new tenant, an org-wide role
+        change) is chunked into multiple sequential Write requests instead
+        of hitting an opaque 400 from OpenFGA. Each chunk is its own
+        atomic Write call, but the operation as a whole is NOT atomic
+        across chunks — if a later chunk fails, earlier chunks have
+        already been applied. Callers needing all-or-nothing semantics
+        over more than `_MAX_TUPLES_PER_WRITE` tuples must handle that
+        themselves (e.g. retry/compensate); OpenFGA itself offers no
+        larger-than-one-request transaction to fall back on either.
         """
-        payload = {}
+        deletes = deletes or []
 
-        if writes:
-            payload["writes"] = {"tuple_keys": writes}
+        for write_batch, delete_batch in _chunk_tuple_operations(
+            writes, deletes, _MAX_TUPLES_PER_WRITE
+        ):
+            payload: dict = {}
 
-        if deletes:
-            payload["deletes"] = {"tuple_keys": deletes}
+            if write_batch:
+                payload["writes"] = {"tuple_keys": write_batch}
 
-        await self._post(
-            f"/stores/{self.store_id}/write",
-            json=payload,
-        )
+            if delete_batch:
+                payload["deletes"] = {"tuple_keys": delete_batch}
+
+            await self._post(
+                f"/stores/{self.store_id}/write",
+                json=payload,
+            )

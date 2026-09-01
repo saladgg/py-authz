@@ -13,7 +13,11 @@ class FakeOpenFGAClient:
         self.api_url = api_url
         self.store_id = store_id
         self.model_id = model_id
+        self.aclose_called = False
         FakeOpenFGAClient.instances.append(self)
+
+    async def aclose(self):
+        self.aclose_called = True
 
 
 class FakeModelSync:
@@ -95,6 +99,8 @@ async def test_migrate_tenant_updates_registry_on_change():
     assert result == "model-new"
     assert await registry.get("t1") == "model-new"
     assert FakeOpenFGAClient.instances[0].store_id == "store-1"
+    # Regression guard: each tenant's client must be closed, not leaked.
+    assert FakeOpenFGAClient.instances[0].aclose_called is True
 
 
 @pytest.mark.asyncio
@@ -118,3 +124,32 @@ async def test_migrate_all_iterates_tenants():
     assert result == {"t1": "model-a", "t2": "model-b"}
     assert await registry.get("t1") == "model-a"
     assert await registry.get("t2") == "model-b"
+    assert all(c.aclose_called for c in FakeOpenFGAClient.instances)
+
+
+@pytest.mark.asyncio
+async def test_migrate_tenant_closes_client_even_when_sync_raises(monkeypatch):
+    """Regression test: a client leak per tenant is especially bad in a
+    command meant to loop over every tenant (see DX-5's `migrate`)."""
+    tenants = InMemoryTenantStore()
+    await tenants.set("t1", "store-1")
+
+    class RaisingModelSync:
+        def __init__(self, fga_client):
+            self.fga_client = fga_client
+
+        async def sync(self, force=False):
+            raise RuntimeError("openfga unreachable")
+
+    monkeypatch.setattr(mm_module, "ModelSync", RaisingModelSync)
+
+    mgr = MigrationManager(
+        api_url="http://fake",
+        tenant_store=tenants,
+        model_registry=InMemoryModelRegistry(),
+    )
+
+    with pytest.raises(RuntimeError, match="openfga unreachable"):
+        await mgr.migrate_tenant("t1")
+
+    assert FakeOpenFGAClient.instances[0].aclose_called is True

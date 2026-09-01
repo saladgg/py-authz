@@ -122,6 +122,31 @@ async def test_provision_closes_client_when_sync_raises(monkeypatch):
     assert await store.get("t1") is None  # mapping not persisted on failure
 
 
+@pytest.mark.asyncio
+async def test_provision_propagates_and_closes_client_when_create_store_raises(monkeypatch):
+    """
+    Regression test for REL-5: `create_store()` failing — *before*
+    `store_id` is ever assigned — must propagate its own exception
+    cleanly, not mask it with `UnboundLocalError` from referencing an
+    unset `store_id` in the finally/logging path.
+    """
+    store = InMemoryTenantStore()
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    async def failing_create_store(self, name):
+        self.create_store_calls.append(name)
+        raise RuntimeError("cannot reach openfga")
+
+    monkeypatch.setattr(FakeOpenFGAClient, "create_store", failing_create_store)
+
+    with pytest.raises(RuntimeError, match="cannot reach openfga"):
+        await mgr.provision("t1")
+
+    assert FakeOpenFGAClient.instances[0].aclose_called is True
+    assert await store.get("t1") is None
+    assert FakeModelSync.instances == []  # never reached model sync
+
+
 # -------------------------------------------------------------------
 # Lock behavior
 # -------------------------------------------------------------------
