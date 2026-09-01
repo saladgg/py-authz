@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from py_authz.core.locks import RedisLock, RedisLockManager
@@ -8,6 +10,7 @@ class FakeRedis:
 
     def __init__(self):
         self._store: dict[str, str] = {}
+        self._ttls: dict[str, int] = {}
         self.set_calls: list[dict] = []
         self.eval_calls: list[tuple] = []
 
@@ -16,16 +19,27 @@ class FakeRedis:
         if nx and key in self._store:
             return None
         self._store[key] = value
+        self._ttls[key] = ex
         return True
 
     async def eval(self, script, numkeys, *args):
         self.eval_calls.append((script, numkeys, args))
         key = args[0]
         lock_id = args[1]
-        if self._store.get(key) == lock_id:
+
+        if self._store.get(key) != lock_id:
+            return 0
+
+        if '"del"' in script:
             del self._store[key]
+            self._ttls.pop(key, None)
             return 1
-        return 0
+
+        if '"expire"' in script:
+            self._ttls[key] = args[2]
+            return 1
+
+        raise AssertionError(f"FakeRedis.eval: unrecognized script:\n{script}")
 
 
 @pytest.mark.asyncio
@@ -87,3 +101,58 @@ async def test_manager_releases_even_when_body_raises():
             raise RuntimeError("boom")
 
     assert "k4" not in r._store
+
+
+@pytest.mark.asyncio
+async def test_renew_extends_ttl_only_when_owner_matches():
+    r = FakeRedis()
+    lock = RedisLock(r)
+
+    lock_id = await lock.acquire("k5", ttl=1)
+
+    assert await lock.renew("k5", "not-the-owner", ttl=99) is False
+    assert r._ttls["k5"] == 1  # unchanged
+
+    assert await lock.renew("k5", lock_id, ttl=99) is True
+    assert r._ttls["k5"] == 99
+
+
+@pytest.mark.asyncio
+async def test_manager_lock_renews_ttl_while_body_is_running():
+    """
+    Regression test for REL-6: a critical section that outlives the
+    initial TTL must not have its lock silently expire out from under it
+    — a background renewal keeps re-extending it for as long as the
+    `async with` body is running.
+    """
+    r = FakeRedis()
+    mgr = RedisLockManager(r)
+
+    async with mgr.lock("k6", ttl=1, renew_interval=0.05):
+        await asyncio.sleep(0.22)  # several renewal intervals
+
+    renewal_calls = [c for c in r.eval_calls if '"expire"' in c[0]]
+    assert len(renewal_calls) >= 2
+    assert "k6" not in r._store  # still released cleanly on exit
+
+
+@pytest.mark.asyncio
+async def test_manager_lock_renewal_survives_lost_lock_without_crashing():
+    """
+    If renewal discovers the lock is no longer held (e.g. it expired for
+    real and someone else acquired it), the renewal loop must stop
+    quietly rather than raising into the running critical section — the
+    lock is advisory, not a hard cancellation mechanism.
+    """
+    r = FakeRedis()
+    mgr = RedisLockManager(r)
+
+    body_completed = False
+
+    async with mgr.lock("k7", ttl=1, renew_interval=0.02):
+        # Simulate another process having taken over the key.
+        r._store["k7"] = "someone-else"
+        await asyncio.sleep(0.1)
+        body_completed = True
+
+    assert body_completed is True

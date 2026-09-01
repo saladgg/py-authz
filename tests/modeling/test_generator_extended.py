@@ -53,3 +53,66 @@ def test_build_relation_returns_empty_when_no_parts():
     result = gen._build_relation(rel)
 
     assert result == {}
+
+
+class Folder(ResourceModel):
+    type = "folder"
+    viewer = Relation("viewer")
+
+
+class HierDocument(ResourceModel):
+    type = "hier_document"
+    parent = Relation("parent", subjects=["folder"])
+    viewer = Relation("viewer", from_parent=("parent", "viewer"))
+
+
+def test_from_parent_emits_pure_tuple_to_userset_with_no_this():
+    """
+    Regression test for ARCH-2: `from_parent` alone (no explicit
+    `subjects`) must emit a bare `tupleToUserset` rewrite — no `this`
+    branch, since the relation isn't directly assignable by default.
+    """
+    registry.register(HierDocument)
+    gen = OpenFGAModelGenerator()
+
+    model = gen.generate()
+    types = {t["type"]: t for t in model["type_definitions"]}
+    relations = types["hier_document"]["relations"]
+
+    assert relations["viewer"] == {
+        "tupleToUserset": {
+            "tupleset": {"relation": "parent"},
+            "computedUserset": {"relation": "viewer"},
+        }
+    }
+    # `parent` itself is a plain direct relation restricted to `folder`.
+    assert relations["parent"] == {"this": {}}
+
+
+def test_from_parent_combines_with_this_when_subjects_explicit():
+    rel = Relation("viewer", from_parent=("parent", "viewer"), subjects=["user"])
+    gen = OpenFGAModelGenerator()
+
+    result = gen._build_relation(rel)
+
+    assert "union" in result
+    assert {"this": {}} in result["union"]["child"]
+    assert {
+        "tupleToUserset": {
+            "tupleset": {"relation": "parent"},
+            "computedUserset": {"relation": "viewer"},
+        }
+    } in result["union"]["child"]
+
+
+def test_parent_relation_metadata_restricts_subject_type():
+    registry.register(HierDocument)
+    gen = OpenFGAModelGenerator()
+
+    model = gen.generate()
+    types = {t["type"]: t for t in model["type_definitions"]}
+    metadata = types["hier_document"]["metadata"]["relations"]
+
+    assert metadata["parent"]["directly_related_user_types"] == [{"type": "folder"}]
+    # viewer has no direct subjects — empty list, not omitted.
+    assert metadata["viewer"]["directly_related_user_types"] == []

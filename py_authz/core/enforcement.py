@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from datetime import datetime
@@ -41,6 +42,7 @@ class AuthzEngine:
         *,
         raise_on_denied: bool = False,
         audit_logger=None,
+        metrics=None,
     ):
         """
         Initialize the authorization engine.
@@ -53,15 +55,29 @@ class AuthzEngine:
                 Optional cache backend.
 
             raise_on_denied (bool):
-                If True, raises AuthorizationDenied instead of returning False.
+                Default behavior when `enforce()`'s own `raise_on_denied`
+                argument isn't given: if True, raises AuthorizationDenied
+                instead of returning False.
 
             audit_logger:
                 Save audit logs
+
+            metrics:
+                Optional object implementing `incr(name, amount=1)` /
+                `observe(name, value)` (see `core/metrics.py:Metrics`, or
+                pass the module-level `metrics` singleton from there).
+                When given, `enforce()` records check/cache-hit/allowed/
+                denied counters and check-duration observations. `None`
+                (the default) records nothing — this is an optional,
+                explicitly-injected dependency like `cache`/`audit_logger`,
+                not a hardwired global.
         """
         self.fga_client = fga_client
         self.cache = cache
         self.raise_on_denied = raise_on_denied
         self.audit_logger = audit_logger
+        self.metrics = metrics
+        self._background_audit_tasks: set[asyncio.Task] = set()
 
     def _extract_path(self, explanation_data) -> list[str] | None:
         """
@@ -81,13 +97,27 @@ class AuthzEngine:
         if self.cache:
             await self.cache.delete(request.cache_key())
 
-    async def enforce(self, request: AuthzRequest) -> bool:
+    async def enforce(
+        self,
+        request: AuthzRequest,
+        *,
+        raise_on_denied: bool | None = None,
+    ) -> bool:
         """
         Enforce an authorization decision.
 
         Args:
             request (AuthzRequest):
                 The authorization request.
+
+            raise_on_denied (Optional[bool]):
+                Per-call override of the engine's own `raise_on_denied`
+                default. `None` (the default) uses the engine's default;
+                pass `True`/`False` explicitly to override it for just
+                this call. This is what lets `Authz.require()` request
+                raise-on-denied behavior without mutating the (possibly
+                shared, concurrently-used) engine's own state — see
+                `Authz.require()`.
 
         Returns:
             bool:
@@ -98,10 +128,14 @@ class AuthzEngine:
                 If the request is malformed.
 
             AuthorizationDenied:
-                If access is denied and raise_on_denied=True.
+                If access is denied and raise_on_denied resolves to True.
         """
 
         self._validate_request(request)
+
+        effective_raise_on_denied = (
+            self.raise_on_denied if raise_on_denied is None else raise_on_denied
+        )
 
         start = time.time()
         cache_key = request.cache_key()
@@ -134,7 +168,11 @@ class AuthzEngine:
                     )
                 )
 
-                return self._handle_result(cached, request)
+                self._record_metrics(allowed=cached, cache_hit=True, duration_ms=duration)
+
+                return self._handle_result(
+                    cached, request, raise_on_denied=effective_raise_on_denied
+                )
 
         # -------------------------------------------------
         # 2. Call OpenFGA
@@ -177,12 +215,13 @@ class AuthzEngine:
             )
         )
 
+        self._record_metrics(allowed=allowed, cache_hit=cache_hit, duration_ms=duration)
+
         # -------------------------------------------------
         # 5. Return / raise
         # -------------------------------------------------
 
         if self.audit_logger:
-            # TODO: Make this background task - slow db can degrade performance
             reason = self._build_reason(request, allowed, cache_hit)
             event = AuditEvent(
                 timestamp=datetime.now(),
@@ -198,8 +237,73 @@ class AuthzEngine:
                 },
                 request_id=get_request_id(),
             )
+            self._dispatch_audit_event(event)
+        return self._handle_result(allowed, request, raise_on_denied=effective_raise_on_denied)
+
+    def _record_metrics(self, *, allowed: bool, cache_hit: bool, duration_ms: float) -> None:
+        """No-op when no `metrics` was injected (the common case)."""
+        if not self.metrics:
+            return
+
+        self.metrics.incr("authz_check_total")
+        self.metrics.incr("authz_allowed_total" if allowed else "authz_denied_total")
+        if cache_hit:
+            self.metrics.incr("authz_cache_hit_total")
+        self.metrics.observe("authz_check_duration_ms", duration_ms)
+
+    # ------------------------------------------------------------------
+    # Audit dispatch
+    # ------------------------------------------------------------------
+
+    def _dispatch_audit_event(self, event: AuditEvent) -> None:
+        """
+        Write an audit event off the synchronous enforcement hot path.
+
+        The write is fired-and-forgotten as a background task rather than
+        awaited inline: an unhealthy audit sink (a slow or unreachable
+        database, say) must add latency to *its own* write, never become
+        an availability incident for every authorization check in the
+        process. Failures are caught inside `_log_audit_event` and never
+        propagate — audit logging is a side effect of a decision, never a
+        precondition for one.
+
+        Note: a background task is best-effort. A process that exits
+        immediately after its last `enforce()` call may drop the final
+        write(s) — call `flush_audit_logs()` before shutdown if your audit
+        sink needs every write to land.
+        """
+        task = asyncio.ensure_future(self._log_audit_event(event))
+        self._background_audit_tasks.add(task)
+        task.add_done_callback(self._background_audit_tasks.discard)
+
+    async def _log_audit_event(self, event: AuditEvent) -> None:
+        try:
             await self.audit_logger.log(event)
-        return self._handle_result(allowed, request)
+        except Exception:
+            logger.exception(
+                json.dumps(
+                    {
+                        "event": "audit_log_failed",
+                        "request_id": get_request_id(),
+                        "user": event.user_id,
+                        "resource": event.resource,
+                    }
+                )
+            )
+
+    async def flush_audit_logs(self) -> None:
+        """
+        Await any in-flight background audit writes.
+
+        Most callers don't need this — it exists for tests that assert on
+        audit-logger state right after an `enforce()` call, and for hosts
+        that want every audit write for their already-handled requests to
+        land before shutting down. Wrap the call in your own timeout
+        (e.g. `anyio.move_on_after`) if you need one.
+        """
+        pending = list(self._background_audit_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ------------------------------------------------------------------
     # Internal Helpers
@@ -227,13 +331,19 @@ class AuthzEngine:
         if not request.resource.type or not request.resource.id:
             raise InvalidAuthzRequest("Invalid resource format")
 
-    def _handle_result(self, allowed: bool, request: AuthzRequest) -> bool:
+    def _handle_result(
+        self, allowed: bool, request: AuthzRequest, *, raise_on_denied: bool
+    ) -> bool:
         """
         Handle the authorization result.
 
         Args:
             allowed (bool): Result from OpenFGA or cache
             request (AuthzRequest)
+            raise_on_denied (bool): resolved per-call value (see
+                `enforce()`) — this method no longer reads
+                `self.raise_on_denied` directly, so it can't be affected
+                by another concurrent call mutating engine state.
 
         Returns:
             bool
@@ -242,7 +352,7 @@ class AuthzEngine:
             AuthorizationDenied:
                 If access is denied and raise_on_denied=True
         """
-        if not allowed and self.raise_on_denied:
+        if not allowed and raise_on_denied:
             logger.warning(
                 json.dumps(
                     {
@@ -279,11 +389,20 @@ class AuthzEngine:
         """
         self._validate_request(request)
 
-        # Basic check
+        contextual = (
+            [t.to_fga() for t in request.contextual_tuples] if request.contextual_tuples else None
+        )
+
+        # Basic check — forwarding `context`/`contextual_tuples` so the
+        # explanation matches the decision it explains; the original
+        # `enforce()` decision could depend on either, and dropping them
+        # here would silently explain a *different* check.
         allowed = await self.fga_client.check(
             user=request.identity.id,
             relation=request.action,
             object=request.resource.to_fga_object(),
+            contextual_tuples=contextual,
+            context=request.context,
         )
 
         # Try advanced explanation (if supported)
@@ -295,7 +414,20 @@ class AuthzEngine:
                     user=request.identity.id,
                     relation=request.action,
                     object=request.resource.to_fga_object(),
+                    contextual_tuples=contextual,
+                    context=request.context,
                 )
+            except TypeError:
+                # Backward-compatible with an `explain` implementation
+                # that doesn't accept these newer keyword arguments.
+                try:
+                    explanation_data = await self.fga_client.explain(
+                        user=request.identity.id,
+                        relation=request.action,
+                        object=request.resource.to_fga_object(),
+                    )
+                except Exception:
+                    explanation_data = None
             except Exception:
                 # fallback silently
                 explanation_data = None

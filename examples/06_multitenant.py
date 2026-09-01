@@ -31,6 +31,7 @@ from examples import models  # noqa: F401 — register models
 from examples.models import Document
 from py_authz import Identity
 from py_authz.api import MultiTenantAuthz
+from py_authz.core.exceptions import TenantNotFoundError
 from py_authz.core.tenant_manager import TenantManager
 from py_authz.core.tenant_store import InMemoryTenantStore
 
@@ -70,8 +71,9 @@ async def main() -> None:
 
 
 class _StoreBackedResolver:
-    """TenantResolver that reads from a TenantStore — raises on unknown
-    tenants so `MultiTenantAuthz` falls back to the manager."""
+    """TenantResolver that reads from a TenantStore — raises
+    `TenantNotFoundError` on unknown tenants so `MultiTenantAuthz` falls
+    back to the manager (any other exception would propagate instead)."""
 
     def __init__(self, tenant_store: InMemoryTenantStore) -> None:
         self._store = tenant_store
@@ -79,7 +81,7 @@ class _StoreBackedResolver:
     async def resolve(self, tenant_id: str) -> str:
         store_id = await self._store.get(tenant_id)
         if store_id is None:
-            raise ValueError(f"Unknown tenant: {tenant_id}")
+            raise TenantNotFoundError(f"Unknown tenant: {tenant_id}")
         return store_id
 
 

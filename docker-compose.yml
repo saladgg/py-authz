@@ -1,10 +1,15 @@
 # ==========================================================
-# Local dev stack: OpenFGA + Keycloak
+# Local dev stack: OpenFGA + Keycloak + Redis + Postgres
 # ==========================================================
 # OpenFGA host port is 8082 to avoid colliding with Keycloak
 # (which defaults to 8080 inside the container → 8081 on host).
 # Keycloak boots in dev mode and imports docker/keycloak/realm.json
 # so examples/05_keycloak_fastapi.py works out of the box.
+# Redis backs the live storage tests in tests/live/ (see `make
+# test-integration`) and RedisCache/RedisTenantStore for manual testing.
+# Postgres backs PostgresTenantStore/PostgresModelRegistry/
+# PostgresAuditLogger — schema applied via py_authz.storage.schema.
+# apply_schema(), not by this compose file.
 
 services:
   openfga:
@@ -35,3 +40,22 @@ services:
       - "8081:8080" # Host: 8081 → Keycloak admin + OIDC endpoints
     volumes:
       - ./docker/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6380:6379" # Host: 6380 → Redis (avoids colliding with a locally
+                    # installed Redis, which commonly already owns 6379)
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: py_authz
+      POSTGRES_PASSWORD: py_authz
+      POSTGRES_DB: py_authz
+    ports:
+      - "5433:5432" # Host: 5433 → Postgres (avoids colliding with a
+                    # locally installed Postgres, which commonly already
+                    # owns 5432)

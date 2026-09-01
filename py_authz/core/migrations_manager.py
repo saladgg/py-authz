@@ -60,18 +60,21 @@ class MigrationManager:
             model_id=None,
         )
 
-        syncer = ModelSync(client)
+        try:
+            syncer = ModelSync(client)
 
-        # Sync (will diff automatically)
-        new_model_id = await syncer.sync()
+            # Sync (will diff automatically)
+            new_model_id = await syncer.sync()
 
-        # If no change, skip update
-        if current_model == new_model_id:
-            logger.info(f"migration_noop tenant={tenant_id} model_id={current_model}")
-            return current_model
+            # If no change, skip update
+            if current_model == new_model_id:
+                logger.info(f"migration_noop tenant={tenant_id} model_id={current_model}")
+                return current_model
 
-        # Track version
-        await self.model_registry.set(tenant_id, new_model_id)
+            # Track version
+            await self.model_registry.set(tenant_id, new_model_id)
 
-        logger.info(f"migration_success tenant={tenant_id} model_id={new_model_id}")
-        return new_model_id
+            logger.info(f"migration_success tenant={tenant_id} model_id={new_model_id}")
+            return new_model_id
+        finally:
+            await client.aclose()

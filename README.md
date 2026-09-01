@@ -108,6 +108,21 @@ Key components:
 
 Requires **Python 3.13+**.
 
+> **Not yet on PyPI, and this repo is currently private.** The commands
+> below are how installation will work once `py-authz` is published to
+> PyPI (tracked as REL-9 in [`docs/todos/`](docs/todos/)) — until then,
+> `pip install py-authz` will fail with "No matching distribution found".
+> If you have access to this repository, install a tagged release
+> directly from Git instead (requires your GitHub credentials to be
+> configured for `git`, e.g. via SSH or a PAT):
+>
+> ```bash
+> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v1.2.0"
+> ```
+>
+> Swap `[all]` for any extra below, and `v1.2.0` for the tag you want
+> (see [Releases](https://github.com/saladgg/py-authz/releases)).
+
 ```bash
 # Core only (OpenFGA SDK, httpx, attrs)
 pip install py-authz
@@ -198,8 +213,8 @@ class Document(ResourceModel):
     type = "document"
 
     owner = Relation("owner")
-    editor = Relation("editor", union=["owner"])     # owner implies editor
-    viewer = Relation("viewer", union=["editor"])    # editor implies viewer
+    editor = Relation("editor", union=["owner"])  # owner implies editor
+    viewer = Relation("viewer", union=["editor"])  # editor implies viewer
 
 
 registry.register(Document)
@@ -281,7 +296,7 @@ validator = KeycloakJWTValidator(
 )
 
 payload = await validator.validate(token)
-identity = validator.to_identity(payload)   # Identity(id="user:<sub>")
+identity = validator.to_identity(payload)  # Identity(id="user:<sub>")
 ```
 
 > Your OpenFGA tuples must use the same user string (`user:<sub>`), or override `to_identity` to normalize.
@@ -314,9 +329,9 @@ from py_authz.api import MultiTenantAuthz
 
 mt = MultiTenantAuthz(
     api_url=os.environ["FGA_API_URL"],
-    model_id=None,                    # resolved per-tenant
-    tenant_resolver=my_resolver,      # e.g. PostgresTenantStore
-    tenant_manager=my_manager,        # optional auto-provisioning
+    model_id=None,  # resolved per-tenant
+    tenant_resolver=my_resolver,  # e.g. PostgresTenantStore
+    tenant_manager=my_manager,  # optional auto-provisioning
 )
 
 authz = await mt.for_tenant("acme-corp")
@@ -361,8 +376,7 @@ py-authz/
 │   ├── audit/                # Audit event types + Postgres logger
 │   ├── adapters/             # FastAPI, Keycloak integrations
 │   ├── validation/           # Request validation hooks
-│   ├── config/               # Settings
-│   ├── cli/                  # py-authz CLI
+│   ├── cli/                  # py-authz CLI (env-var config via cli/config.py)
 │   └── utils/                # deps loader, logging, retry
 ├── tests/                    # Mirrors source layout; pytest-asyncio auto mode
 ├── examples/                 # Runnable end-to-end examples

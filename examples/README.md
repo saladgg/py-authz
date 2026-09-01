@@ -21,6 +21,8 @@ them without rebuilding context.
 | `08_list_objects.py`      | Inverse query — "which documents can alice view?"           |
 | `09_contextual_and_abac.py` | Per-request `contextual_tuples` and ABAC `context`        |
 | `10_unit_testing.py`      | `make_fake_authz()` — unit-test authz without OpenFGA       |
+| `11_hierarchical_permissions.py` | `Relation(from_parent=...)` — a folder viewer inherits document viewer |
+| `12_multitenant_fastapi.py` | `MultiTenantAuthz` + FastAPI together — `Authz` resolved per request by tenant |
 
 ## Prerequisites
 
@@ -54,8 +56,10 @@ optional deps.
 ## One-time seed
 
 Run once after starting OpenFGA. This creates a store, syncs the model, and
-writes tuples for `alice` (owner), `bob` (editor), `carol` (viewer), and
-`dave` (viewer of a different doc):
+writes tuples for `alice` (owner), `bob` (editor), `carol` (viewer), `dave`
+(viewer of a different doc), and links `document:budget` to
+`folder:engineering` via `parent` with no direct grants of its own — see
+`11_hierarchical_permissions.py`:
 
 ```bash
 uv run python examples/seed.py
@@ -107,6 +111,16 @@ uv run python examples/09_contextual_and_abac.py
 
 # In-memory fake — no OpenFGA needed (env vars not required)
 uv run python examples/10_unit_testing.py
+
+# Hierarchical permissions: folder viewer → document viewer, via a parent
+# relation (tupleToUserset) — no direct grant on document:budget at all
+uv run python examples/11_hierarchical_permissions.py
+
+# Multi-tenant FastAPI: Authz resolved per request by X-Tenant-ID header
+uv run uvicorn examples.12_multitenant_fastapi:app --reload
+# then:
+curl -H "X-Tenant-ID: acme" -H "X-User-Id: alice" http://localhost:8000/documents/report
+curl -H "X-Tenant-ID: globex" -H "X-User-Id: alice" http://localhost:8000/documents/report  # → 403
 ```
 
 ## How the pieces fit
@@ -133,10 +147,25 @@ uv run python examples/10_unit_testing.py
 ## Modeling notes
 
 `ResourceModel` subclasses declare one `Relation` per permission.
-`union=[...]` lets you say "editor implies viewer". `inherits=[...]` works
-similarly but is meant for computed usersets (e.g., inherit folder
-permissions). `subjects=[...]` (default `["user"]`) declares who can hold
-the relation.
+
+- **`union=[...]`** lets you say "editor implies viewer" — another
+  relation *on the same object* that also grants this one (OpenFGA
+  `computedUserset`).
+- **`inherits=[...]`** is currently an alias of `union` — same shape,
+  same rewrite, kept only for backward compatibility. If you're modeling
+  "inherit from a *different*, parent object" (a document inheriting a
+  folder's `viewer`), that's `from_parent`, not `inherits` — they're
+  different OpenFGA mechanisms.
+- **`from_parent=(tupleset_relation, computed_relation)`** is the real
+  cross-object mechanism (OpenFGA `tupleToUserset`) — see
+  `models.py`'s `Document.viewer` and
+  `11_hierarchical_permissions.py`. When it's the *only* thing set on a
+  relation (no explicit `subjects`), `subjects` defaults to `[]` rather
+  than `["user"]`: a purely-inherited relation isn't directly assignable
+  by default. Pass `subjects=["user"]` explicitly if you want both.
+- **`subjects=[...]`** (default `["user"]`, or `[]` when `from_parent` is
+  set with no explicit `subjects` — see above) declares who can hold the
+  relation directly.
 
 After defining a model, call `registry.register(YourModel)` — the generator
 only picks up registered classes.

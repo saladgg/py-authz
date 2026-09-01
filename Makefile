@@ -76,12 +76,41 @@ lint: ## Run linter and type checker
 
 .PHONY: test
 test: ## Run test suite with coverage
-	uv run pytest 
+	uv run pytest
+
+.PHONY: test-integration
+test-integration: ## Run tests/live against a real OpenFGA + Keycloak + Redis + Postgres stack (docker compose)
+	docker compose up -d openfga keycloak redis postgres
+	@echo "Waiting for OpenFGA + Keycloak + Postgres to become reachable..."
+	@i=0; until curl -sf http://localhost:8082/healthz >/dev/null 2>&1; do \
+		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "OpenFGA did not become healthy in time"; exit 1; fi; \
+		sleep 1; \
+	done
+	@i=0; until curl -sf http://localhost:8081/realms/py-authz/.well-known/openid-configuration >/dev/null 2>&1; do \
+		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "Keycloak did not become reachable in time"; exit 1; fi; \
+		sleep 1; \
+	done
+	@i=0; until docker exec postgres pg_isready -U py_authz >/dev/null 2>&1; do \
+		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "Postgres did not become ready in time"; exit 1; fi; \
+		sleep 1; \
+	done
+	FGA_API_URL=http://localhost:8082 \
+	KEYCLOAK_ISSUER=http://localhost:8081/realms/py-authz \
+	KEYCLOAK_AUDIENCE=py-authz-demo \
+	REDIS_URL=redis://localhost:6380/0 \
+	POSTGRES_DSN=postgres://py_authz:py_authz@localhost:5433/py_authz \
+	uv run pytest tests/live -q --no-cov
 
 
 # ----------------------------------------------------------
 # py-authz installation options
 # ----------------------------------------------------------
+# NOTE: these target PyPI, which py-authz is not yet published to (see
+# REL-9 in docs/todos/) — they will fail with "No matching distribution
+# found" until that ships. If you have access to this (currently private)
+# repo, install a tagged release from Git instead — see README.md's
+# Installation section for the working `pip install ... @ git+https://...`
+# form.
 
 .PHONY: install-core install-extras install-all
 

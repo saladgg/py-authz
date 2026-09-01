@@ -70,7 +70,16 @@ class MockOpenFGAClient:
         # matches the production code path in AuthzEngine.explain.
         if name == "explain" and self._has_explain:
 
-            async def _explain(user: str, relation: str, object: str):
+            async def _explain(
+                user: str,
+                relation: str,
+                object: str,
+                *,
+                contextual_tuples: list[dict] | None = None,
+                context: dict | None = None,
+            ):
+                self.last_explain_contextual_tuples = contextual_tuples
+                self.last_explain_context = context
                 if self._explain_raises is not None:
                     raise self._explain_raises
                 return self._explain_data

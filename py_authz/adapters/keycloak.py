@@ -1,15 +1,16 @@
-from typing import Any
-
-import httpx
-import jwt  # type: ignore[import-not-found]
-
-from py_authz.core.exceptions import AuthenticationError
-from py_authz.core.types import Identity
+from py_authz.adapters.oidc import OIDCJWTValidator
 
 
-class KeycloakJWTValidator:
+class KeycloakJWTValidator(OIDCJWTValidator):
     """
     Validates and decodes JWT tokens issued by Keycloak.
+
+    A thin `OIDCJWTValidator` subclass: Keycloak's JWKS endpoint is at a
+    deterministic path (`{issuer}/protocol/openid-connect/certs`), so this
+    passes it explicitly and skips the OIDC-discovery round trip
+    `OIDCJWTValidator` otherwise makes on first use. Everything else
+    (JWKS caching + rate-limited refetch-on-unknown-kid, signature
+    verification, exception mapping) is inherited unchanged.
 
     Features:
         - Fetches JWKS (public keys)
@@ -21,6 +22,8 @@ class KeycloakJWTValidator:
         self,
         issuer: str,
         audience: str,
+        *,
+        jwks_refresh_cooldown: float = 60.0,
     ):
         """
         Args:
@@ -30,79 +33,36 @@ class KeycloakJWTValidator:
 
             audience (str):
                 Expected audience (client_id)
+
+            jwks_refresh_cooldown (float):
+                Minimum seconds between forced JWKS refetches — see
+                `OIDCJWTValidator._get_jwks`.
         """
-        self.issuer = issuer.rstrip("/")
-        self.audience = audience
-        self.jwks_url = f"{self.issuer}/protocol/openid-connect/certs"
+        issuer = issuer.rstrip("/")
+        super().__init__(
+            issuer,
+            audience,
+            jwks_url=f"{issuer}/protocol/openid-connect/certs",
+            jwks_refresh_cooldown=jwks_refresh_cooldown,
+        )
+        # Preserved as a plain attribute (rather than only living inside
+        # the base class's `_explicit_jwks_url`) since it was public API
+        # before this class delegated to `OIDCJWTValidator`.
+        self.jwks_url = self._explicit_jwks_url
 
-        self._jwks: dict[str, Any] | None = None
-
-    # -------------------------------------------------------------------
-    # JWKS Fetching
-    # -------------------------------------------------------------------
-
-    async def _fetch_jwks(self) -> dict[str, Any]:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(self.jwks_url)
-            res.raise_for_status()
-            return res.json()
-
-    async def _get_jwks(self) -> dict[str, Any]:
-        if self._jwks is None:
-            self._jwks = await self._fetch_jwks()
-        return self._jwks
-
-    # -------------------------------------------------------------------
-    # Token Validation
-    # -------------------------------------------------------------------
-
-    async def validate(self, token: str) -> dict[str, Any]:
+    def _audience_error_message(self, exc: Exception) -> str:
         """
-        Validate JWT and return decoded payload.
+        Keycloak-specific hint: access tokens default to `aud: "account"`
+        unless an audience mapper is added to the client — a well-known
+        first-integration gotcha with no signal from Keycloak itself.
         """
-        try:
-            jwks = await self._get_jwks()
-
-            unverified_header = jwt.get_unverified_header(token)
-            kid = unverified_header["kid"]
-
-            key = next(
-                (k for k in jwks["keys"] if k["kid"] == kid),
-                None,
-            )
-
-            if not key:
-                raise AuthenticationError("Invalid token: unknown kid")
-
-            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key)
-
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                audience=self.audience,
-                issuer=self.issuer,
-            )
-
-            return payload
-
-        except jwt.ExpiredSignatureError as e:
-            raise AuthenticationError("Token expired") from e
-
-        except jwt.InvalidTokenError as e:
-            raise AuthenticationError(f"Invalid token: {str(e)}") from e
-
-    # -------------------------------------------------------------------
-    # Identity Extraction
-    # -------------------------------------------------------------------
-
-    def to_identity(self, payload: dict[str, Any]) -> Identity:
-        """
-        Convert JWT payload → Identity
-        """
-        sub = payload.get("sub")
-
-        if not sub:
-            raise AuthenticationError("Missing 'sub' in token")
-
-        return Identity(id=f"user:{sub}")
+        return (
+            f"Invalid token: audience mismatch — the token's 'aud' claim "
+            f"does not include {self.audience!r}. Keycloak access tokens "
+            f'default to aud: "account" unless you add an audience '
+            f"mapper to the client (Client scopes → dedicated scope → "
+            f"Mappers → Audience, mapped to this client's ID) or set the "
+            f'client scope\'s "included client audience". See '
+            f"`docker/keycloak/realm.json`'s `oidc-audience-mapper` for a "
+            f"working example."
+        )

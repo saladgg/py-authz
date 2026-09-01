@@ -9,7 +9,7 @@ from py_authz.core.types import Identity
 from py_authz.modeling.base import Relation, ResourceModel
 
 
-def require(
+def authorize(
     authz,
     relation: Relation,
     *,
@@ -19,6 +19,12 @@ def require(
     """
     Decorator for enforcing authorization on function calls.
     Supports both async and sync functions safely using anyio.
+
+    Named `authorize` (not `require`) to avoid colliding with
+    `Authz.require()` — an async instance method with a very different
+    call shape (`await authz.require(action, user, resource)` vs.
+    `@authorize(authz, relation, user_getter=..., resource_getter=...)`)
+    that's easy to confuse when both are in scope.
     """
 
     def decorator(func: Callable):
