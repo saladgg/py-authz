@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-09-01)
+
+### Features
+
+- Comprehensive audit remediation and dependency updates
+  ([#8](https://github.com/saladgg/py-authz/pull/8),
+  [`f5e2cea`](https://github.com/saladgg/py-authz/commit/f5e2ceacdf7f5f95ceab10029335c1fda9489de6))
+
+
 ## v1.2.0 (2026-04-26)
 
 ### Bug Fixes

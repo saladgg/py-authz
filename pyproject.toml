@@ -1,6 +1,6 @@
 [project]
 name = "py-authz"
-version = "v1.2.0"
+version = "v1.3.0"
 description = "Authz library based on OpenFGA"
 readme = "README.md"
 requires-python = ">=3.13"
