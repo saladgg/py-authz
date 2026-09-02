@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-09-02)
+
+### Features
+
+- Second-pass audit and remediation (Tiers 0-2) ([#9](https://github.com/saladgg/py-authz/pull/9),
+  [`d09dd9c`](https://github.com/saladgg/py-authz/commit/d09dd9c487d110e08ff8a94c9503e95687b54677))
+
+
 ## v1.3.0 (2026-09-01)
 
 ### Features
