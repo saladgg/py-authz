@@ -1,7 +1,8 @@
 import pytest
 
 from py_authz.core.exceptions import TenantNotFoundError
-from py_authz.core.tenant_resolver import StaticTenantResolver
+from py_authz.core.tenant_resolver import StaticTenantResolver, StoreBackedResolver
+from py_authz.core.tenant_store import InMemoryTenantStore
 
 
 @pytest.mark.asyncio
@@ -21,6 +22,32 @@ async def test_static_resolver_raises_tenant_not_found_error_on_unknown_tenant()
     from an arbitrary resolver failure.
     """
     resolver = StaticTenantResolver({})
+
+    with pytest.raises(TenantNotFoundError, match="Unknown tenant"):
+        await resolver.resolve("missing")
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-14: `StoreBackedResolver` adapts any
+# `TenantStore` into a `TenantResolver`, replacing the identical
+# hand-rolled glue every multi-tenant example/consumer previously had to
+# write itself.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_backed_resolver_returns_stored_value():
+    store = InMemoryTenantStore()
+    await store.set("t1", "store-1")
+
+    resolver = StoreBackedResolver(store)
+
+    assert await resolver.resolve("t1") == "store-1"
+
+
+@pytest.mark.asyncio
+async def test_store_backed_resolver_raises_tenant_not_found_error_on_unknown_tenant():
+    resolver = StoreBackedResolver(InMemoryTenantStore())
 
     with pytest.raises(TenantNotFoundError, match="Unknown tenant"):
         await resolver.resolve("missing")

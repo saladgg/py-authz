@@ -1,7 +1,7 @@
 import pytest
 
 from py_authz.modeling.base import Relation, ResourceModel
-from py_authz.modeling.registry import ModelRegistry
+from py_authz.modeling.registry import ResourceModelRegistry
 
 
 class Doc(ResourceModel):
@@ -10,7 +10,7 @@ class Doc(ResourceModel):
 
 
 def test_register_and_get():
-    reg = ModelRegistry()
+    reg = ResourceModelRegistry()
     reg.register(Doc)
 
     assert reg.get("document") is Doc
@@ -21,7 +21,7 @@ def test_register_rejects_empty_type():
     class Empty(ResourceModel):
         type = ""
 
-    reg = ModelRegistry()
+    reg = ResourceModelRegistry()
 
     with pytest.raises(ValueError, match="must define a 'type'"):
         reg.register(Empty)

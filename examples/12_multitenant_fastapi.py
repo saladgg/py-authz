@@ -45,26 +45,11 @@ from py_authz.adapters.fastapi import (
     tenant_from_request,
 )
 from py_authz.api import MultiTenantAuthz
-from py_authz.core.exceptions import TenantNotFoundError
 from py_authz.core.tenant_manager import TenantManager
+from py_authz.core.tenant_resolver import StoreBackedResolver
 from py_authz.core.tenant_store import InMemoryTenantStore
 
 OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8082")
-
-
-class _StoreBackedResolver:
-    """Same as 06_multitenant.py's — reads from the shared TenantStore,
-    raising `TenantNotFoundError` so `MultiTenantAuthz` falls back to the
-    manager for auto-provisioning."""
-
-    def __init__(self, tenant_store: InMemoryTenantStore) -> None:
-        self._store = tenant_store
-
-    async def resolve(self, tenant_id: str) -> str:
-        store_id = await self._store.get(tenant_id)
-        if store_id is None:
-            raise TenantNotFoundError(f"Unknown tenant: {tenant_id}")
-        return store_id
 
 
 @asynccontextmanager
@@ -75,7 +60,7 @@ async def lifespan(app: FastAPI):
     mt = MultiTenantAuthz(
         api_url=OPENFGA_URL,
         model_id=None,  # per-tenant latest model is used
-        tenant_resolver=_StoreBackedResolver(tenant_store),
+        tenant_resolver=StoreBackedResolver(tenant_store),  # see ARCH2-14
         tenant_manager=manager,  # auto-provision an unknown tenant on first access
     )
     app.state.mt = mt
@@ -113,6 +98,16 @@ async def authz_for_request(request: Request) -> Authz:
     in place of a static `Authz` instance: called with the current
     request, awaited if it returns a coroutine (this one is `async def`,
     so it always does).
+
+    SECURITY NOTE: `tenant_from_request` reads the caller-controlled
+    `X-Tenant-ID` header with no verification — fine for this demo (whose
+    own "auth" above is a stand-in, not real authentication), but NOT
+    safe once real authentication is wired in, since any caller could
+    then select another tenant's store just by changing this header (see
+    SEC2-2). A real deployment should use
+    `tenant_from_verified_claim()` instead, reading the tenant from a
+    claim inside the validated JWT (see `05_keycloak_fastapi.py` for real
+    JWT validation) — a value the caller cannot forge.
     """
     mt: MultiTenantAuthz = request.app.state.mt
     tenant_id = tenant_from_request(request)

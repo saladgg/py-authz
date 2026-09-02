@@ -20,14 +20,29 @@ class PostgresAuditLogger(AuditLogger):
     `close()` to release the pool).
     """
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, *, command_timeout: float | None = 5.0):
+        """
+        Args:
+            command_timeout: seconds allowed for the pool to acquire a
+                connection and for a single `execute()` to complete.
+                Previously unset (no timeout at all), so a Postgres
+                instance that hangs after accepting the TCP connection
+                (rather than refusing it outright) could block a write
+                indefinitely — and since audit writes run as background
+                tasks (see `AuthzEngine._dispatch_audit_event`), each
+                blocked write's task never completes, growing
+                `_background_audit_tasks` without bound for as long as
+                the outage lasts (see REL2-4). `None` restores the old,
+                unbounded behavior.
+        """
         self.dsn = dsn
+        self.command_timeout = command_timeout
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         if self._pool is not None:
             return
-        self._pool = await asyncpg.create_pool(self.dsn)
+        self._pool = await asyncpg.create_pool(self.dsn, command_timeout=self.command_timeout)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -57,7 +72,7 @@ class PostgresAuditLogger(AuditLogger):
         # "null").
         reason_data = None if event.reason_data is None else json.dumps(event.reason_data)
 
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=self.command_timeout) as conn:
             await conn.execute(
                 """
                     INSERT INTO audit_logs (

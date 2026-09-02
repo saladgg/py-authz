@@ -1,5 +1,6 @@
 import pytest
 
+from py_authz.core.exceptions import ConfigurationError
 from py_authz.storage import redis as redis_store_module
 from py_authz.storage.redis import RedisModelRegistry, RedisTenantStore
 
@@ -127,3 +128,67 @@ async def test_model_registry_set_accepts_ex_kwarg(patched_redis):
     await reg.set("t1", "model-1", ex=300)
 
     assert reg.client.set_calls == [("tenant:t1:model", "model-1", 300)]
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-18: `client=` lets a host app that
+# already owns a Redis client hand it to these classes directly, instead
+# of `redis.from_url(url)` always being called internally.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_accepts_injected_client(patched_redis):
+    from tests.storage.test_redis_storage import FakeAsyncRedis
+
+    injected = FakeAsyncRedis()
+    store = RedisTenantStore(client=injected)
+
+    await store.set("t1", "store-1")
+
+    assert store.client is injected
+    assert patched_redis.clients == []  # from_url() never called
+
+
+@pytest.mark.asyncio
+async def test_model_registry_accepts_injected_client(patched_redis):
+    from tests.storage.test_redis_storage import FakeAsyncRedis
+
+    injected = FakeAsyncRedis()
+    reg = RedisModelRegistry(client=injected)
+
+    await reg.set("t1", "model-1")
+
+    assert reg.client is injected
+    assert patched_redis.clients == []
+
+
+def test_tenant_store_requires_url_or_client():
+    with pytest.raises(ConfigurationError):
+        RedisTenantStore()
+
+
+def test_model_registry_requires_url_or_client():
+    with pytest.raises(ConfigurationError):
+        RedisModelRegistry()
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_close_closes_underlying_client(patched_redis):
+    """Regression test for REL2-8: `close()` didn't exist on this class
+    at all, so the CLI's `migrate` command had no way to release it."""
+
+    class ClosableFakeRedis(FakeAsyncRedis):
+        def __init__(self):
+            super().__init__()
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    injected = ClosableFakeRedis()
+    store = RedisTenantStore(client=injected)
+
+    await store.close()
+
+    assert injected.closed is True

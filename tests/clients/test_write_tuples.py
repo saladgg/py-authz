@@ -168,6 +168,7 @@ async def test_write_tuples_maps_timeout():
         store_id="s1",
         model_id=None,
         http_client=TimeoutWriteClient(),
+        max_retries=0,  # disable retry for deterministic test (see REL2-3)
     )
 
     with pytest.raises(ServiceTimeout):
@@ -181,6 +182,7 @@ async def test_write_tuples_maps_connect_error():
         store_id="s1",
         model_id=None,
         http_client=ConnectErrorWriteClient(),
+        max_retries=0,
     )
 
     with pytest.raises(ServiceUnavailable):

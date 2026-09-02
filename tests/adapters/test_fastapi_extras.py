@@ -8,6 +8,7 @@ from py_authz.adapters.fastapi import (
     require_dependency,
     require_fastapi,
     tenant_from_request,
+    tenant_from_verified_claim,
 )
 from py_authz.core.exceptions import ServiceUnavailable
 from py_authz.core.types import Identity
@@ -410,6 +411,75 @@ def test_tenant_from_request_raises_when_missing():
         assert e.status_code == 400
     else:
         raise AssertionError("should have raised")
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for SEC2-2: `tenant_from_verified_claim` resolves
+# the tenant from the authenticated identity's verified token claims,
+# never from a caller-controlled request header.
+# ----------------------------------------------------------------------
+
+
+def test_tenant_from_verified_claim_reads_identity_attributes():
+    class _Req:
+        class state:
+            user = Identity(id="user:1", attributes={"tenant_id": "acme"})
+
+    resolve = tenant_from_verified_claim()
+
+    assert resolve(_Req()) == "acme"
+
+
+def test_tenant_from_verified_claim_supports_custom_claim_name():
+    class _Req:
+        class state:
+            user = Identity(id="user:1", attributes={"org_id": "globex"})
+
+    resolve = tenant_from_verified_claim("org_id")
+
+    assert resolve(_Req()) == "globex"
+
+
+def test_tenant_from_verified_claim_raises_when_claim_missing():
+    class _Req:
+        class state:
+            user = Identity(id="user:1", attributes={})
+
+    resolve = tenant_from_verified_claim()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve(_Req())
+    assert exc_info.value.status_code == 400
+
+
+def test_tenant_from_verified_claim_raises_when_unauthenticated():
+    class _Req:
+        class state:
+            pass
+
+    resolve = tenant_from_verified_claim()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve(_Req())
+    assert exc_info.value.status_code == 400
+
+
+def test_tenant_from_verified_claim_ignores_spoofed_header():
+    """
+    Unlike `tenant_from_request`, this must never look at the request
+    header at all — a caller can't influence tenant selection just by
+    setting X-Tenant-ID; only a claim inside their verified token counts.
+    """
+
+    class _Req:
+        headers = {"X-Tenant-ID": "attacker-controlled"}
+
+        class state:
+            user = Identity(id="user:1", attributes={"tenant_id": "acme"})
+
+    resolve = tenant_from_verified_claim()
+
+    assert resolve(_Req()) == "acme"
 
 
 def test_request_context_middleware_sets_request_id_header():

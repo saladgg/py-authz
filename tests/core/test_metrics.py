@@ -35,3 +35,28 @@ def test_incr_accepts_custom_amount():
     m.incr("checks", amount=2)
 
     assert m.counters == {"checks": 5}
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for REL2-5: `durations[name]` used to grow without
+# bound — one float per `observe()` call, forever.
+# ----------------------------------------------------------------------
+
+
+def test_observe_caps_observations_per_metric():
+    m = Metrics(max_observations_per_metric=3)
+
+    for i in range(10):
+        m.observe("latency_ms", float(i))
+
+    # Oldest dropped first — only the most recent `max` observations survive.
+    assert m.durations["latency_ms"] == [7.0, 8.0, 9.0]
+
+
+def test_observe_unbounded_when_max_is_none():
+    m = Metrics(max_observations_per_metric=None)
+
+    for i in range(20):
+        m.observe("latency_ms", float(i))
+
+    assert len(m.durations["latency_ms"]) == 20

@@ -136,6 +136,73 @@ def real_redis_tenant_store(monkeypatch):
     return RedisTenantStore("redis://fake")
 
 
+class RaisingRedis:
+    """A `TenantStore`-shaped double whose `get`/`set` always raise —
+    simulates a Redis outage/connection error."""
+
+    async def get(self, key):
+        raise ConnectionError("redis unavailable")
+
+    async def set(self, key, value, ex=None):
+        raise ConnectionError("redis unavailable")
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for REL2-2: Redis is advisory, never load-bearing —
+# a Redis failure must never make tenant resolution less available than
+# a bare PostgresTenantStore alone would have been.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_falls_back_to_pg_when_redis_get_raises():
+    pg = InMemoryPg()
+    await pg.set("t1", "store-from-pg")
+
+    store = HybridTenantStore(pg_store=pg, redis_store=RaisingRedis())
+
+    assert await store.get("t1") == "store-from-pg"
+
+
+@pytest.mark.asyncio
+async def test_get_swallows_redis_set_error_after_pg_fallback():
+    """
+    Populating the cache after a PG fallback must not itself raise, even
+    if Redis is unavailable for the write too.
+    """
+    pg = InMemoryPg()
+    await pg.set("t1", "store-from-pg")
+
+    store = HybridTenantStore(pg_store=pg, redis_store=RaisingRedis())
+
+    # Must not raise.
+    assert await store.get("t1") == "store-from-pg"
+
+
+@pytest.mark.asyncio
+async def test_set_succeeds_when_redis_set_raises():
+    """
+    Postgres — the source of truth — must still be updated even when the
+    Redis cache write fails; the failure must not propagate and must not
+    be mistaken for the whole `set()` having failed (see REL2-2's note on
+    `TenantManager.provision()` previously reporting a false failure
+    here).
+    """
+    pg = InMemoryPg()
+    store = HybridTenantStore(pg_store=pg, redis_store=RaisingRedis())
+
+    await store.set("t1", "store-1")  # must not raise
+
+    assert await pg.get("t1") == "store-1"
+
+
+@pytest.mark.asyncio
+async def test_get_returns_none_when_pg_misses_and_redis_raises():
+    store = HybridTenantStore(pg_store=InMemoryPg(), redis_store=RaisingRedis())
+
+    assert await store.get("missing") is None
+
+
 @pytest.mark.asyncio
 async def test_hybrid_store_composes_with_real_redis_tenant_store(real_redis_tenant_store):
     pg = InMemoryPg()

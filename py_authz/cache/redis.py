@@ -28,18 +28,28 @@ class RedisCache(BaseCache):
         url: str = "redis://localhost:6379/0",
         *,
         prefix: str = "py_authz:",
+        client=None,
     ):
         """
         Initialize Redis cache.
 
         Args:
             url (str):
-                Redis connection URL.
+                Redis connection URL. Ignored if `client` is given.
 
             prefix (str):
                 Prefix for all cache keys (namespacing).
+
+            client:
+                An existing `redis.asyncio.Redis`-shaped client to use
+                instead of constructing one from `url` — lets a host app
+                that already owns a Redis connection pool hand it over
+                instead of this class always opening its own (see
+                ARCH2-18). Previously the only way to do this was to
+                monkeypatch the private `_client` attribute after
+                construction.
         """
-        self._client = redis.from_url(url)
+        self._client = client if client is not None else redis.from_url(url)
         self._prefix = prefix
 
     def _key(self, key: str) -> str:

@@ -206,10 +206,33 @@ class OpenFGAClient:
             ) from exc
 
     async def _request(self, method: str, path: str, json: dict | None = None) -> dict:
+        """
+        Shared HTTP helper behind `get_latest_model`/`create_store`/
+        `delete_store`/`list_objects`/`write_tuples`.
+
+        Retries transient errors the same way `check()` does — previously
+        this had no retry at all, so a bulk `write_tuples()` chunk or a
+        `create_store()` call during tenant provisioning failed outright
+        on the exact transient blip `check()` would have silently
+        absorbed (see REL2-3). Retrying happens per-call, so for
+        `write_tuples()`'s chunked writes, a transient failure on one
+        chunk doesn't re-send chunks that already succeeded.
+        """
         try:
-            response = await self._client.request(method, path, json=json)
+            response = await retry_async(
+                lambda: self._client.request(method, path, json=json),
+                retryable=(httpx.TimeoutException, httpx.ConnectError),
+                max_retries=self.max_retries,
+            )
             response.raise_for_status()
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                # A successful DELETE typically has no body (204 No
+                # Content) — `.json()` raises `json.JSONDecodeError`
+                # (a `ValueError`) on it. Only GET/POST responses here are
+                # ever expected to carry a JSON payload.
+                return {}
         except httpx.TimeoutException as exc:
             raise ServiceTimeout(
                 f"OpenFGA {method} {path} timed out",
@@ -225,6 +248,17 @@ class OpenFGAClient:
         except httpx.HTTPStatusError as exc:
             raise ExternalServiceError(
                 f"OpenFGA API error: {exc.response.status_code}",
+                service="openfga",
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            # Catch-all matching `check()`'s own fallback: an unexpected
+            # non-httpx failure (e.g. a malformed response body) is still
+            # classified as an `ExternalServiceError` instead of
+            # propagating raw and bypassing the CLI's exit-code mapping /
+            # the FastAPI adapter's fail-open/fail-closed handling.
+            raise ExternalServiceError(
+                f"Unexpected error during OpenFGA {method} {path}",
                 service="openfga",
                 cause=exc,
             ) from exc
@@ -265,6 +299,17 @@ class OpenFGAClient:
         )
 
         return res["id"]
+
+    async def delete_store(self, store_id: str) -> None:
+        """
+        Delete an OpenFGA store.
+
+        Added for ARCH2-8: `TenantManager.provision()` previously had no
+        way to clean up the real OpenFGA store it had just created if a
+        later step (model sync, persisting the mapping) failed —
+        orphaning it permanently.
+        """
+        await self._request("DELETE", f"/stores/{store_id}")
 
     async def aclose(self) -> None:
         await self._client.aclose()

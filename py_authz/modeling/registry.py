@@ -1,7 +1,7 @@
 from py_authz.modeling.base import ResourceModel
 
 
-class ModelRegistry:
+class ResourceModelRegistry:
     """
     Registry for all resource models.
 
@@ -9,6 +9,13 @@ class ModelRegistry:
         - validation
         - introspection
         - future model generation
+
+    Named `ResourceModelRegistry` (not `ModelRegistry`) to avoid colliding
+    with the unrelated `core.model_registry.ModelRegistry` Protocol (which
+    tracks a tenant's active OpenFGA *model_id*, not registered
+    `ResourceModel` classes) — the same naming-collision class ARCH-8
+    already fixed once for `Authz.require`/`decorators.require` (see
+    ARCH2-16).
     """
 
     def __init__(self):
@@ -28,4 +35,4 @@ class ModelRegistry:
 
 
 # Global registry (simple for now)
-registry = ModelRegistry()
+registry = ResourceModelRegistry()

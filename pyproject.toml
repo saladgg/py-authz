@@ -99,8 +99,10 @@ include = ["py_authz*"]
 # `include-package-data = true` alone doesn't guarantee non-.py files
 # land in a built wheel without a MANIFEST.in — this project has none,
 # so the bundled Postgres schema (py_authz/storage/schema.py) needs its
-# .sql files listed explicitly.
-py_authz = ["storage/sql/*.sql"]
+# .sql files listed explicitly. `py.typed` (PEP 561) is the same class of
+# gap (DX2-3): without it, a downstream project's own type checker treats
+# every import from this fully type-hinted library as `Any`.
+py_authz = ["storage/sql/*.sql", "py.typed"]
 
 [tool.ruff]
 line-length = 100
@@ -129,8 +131,14 @@ packages = ["py_authz"]
 explicit_package_bases = true
 disable_error_code = [
   "var-annotated", "import-untyped",
-  "annotation-unchecked", "union-attr", "arg-type"
+  "annotation-unchecked"
 ]
+# `arg-type`/`union-attr` used to be globally disabled here too — that
+# hid 4 real errors (see DX2-2), including a genuine nominal-typing
+# mismatch on the library's own official `testkit.make_fake_authz()`
+# helper. All fixed at the source (an `FGAClientProtocol`, corrected
+# annotations, and two narrowly-scoped `# type: ignore[arg-type]` at
+# genuinely-unavoidable PyJWT-stub sites) rather than re-suppressed here.
 
 [tool.semantic_release]
 commit_parser = "conventional"

@@ -5,14 +5,16 @@ evidence and code references; `NN_<topic>_todos.md` is the execution
 checklist (IDs match across the pair, and each todos file carries a status
 stamp at the top). Ship order within a backlog is its phase order.
 
-This is the first audit pass filed against py-authz. It was requested as
-a comprehensive, ground-up review of the whole library against its stated
-goal — a reusable, production-ready authorization framework for Python
-built around OpenFGA and Keycloak — covering architecture, the
+Two audit passes have been filed against py-authz so far, each requested
+as a comprehensive, ground-up review of the whole library against its
+stated goal — a reusable, production-ready authorization framework for
+Python built around OpenFGA and Keycloak — covering architecture, the
 authorization model, security, extensibility, developer experience,
-integrations, testing, and operational readiness. Findings are grouped
-into four backlogs by concern area rather than by feature, since this
-audit has no prior backlog to check against or avoid re-filing.
+integrations, testing, and operational readiness. Both group findings
+into four backlogs by concern area rather than by feature. `01`–`04`
+below is the first pass (filed 2026-08-31, fully shipped); `05`–`08`,
+further down, is the second pass (filed 2026-09-02 against the resulting
+1.3.0 tree, not yet executed).
 
 | Pair | Topic | Status stamp lives in |
 | ---- | ----- | --------------------- |
@@ -145,3 +147,103 @@ root cause behind confirmed bugs filed in `01` and `03`).
   access. **Left open, and outside this audit's reach**: a PyPI project
   owner must register this repo as a trusted publisher before the new
   job can actually succeed — a one-time action on an external account.
+
+## Second audit pass (filed 2026-09-02, backlogs `05`–`08`)
+
+Everything above (`01`–`04`) shipped in full on 2026-08-31 and the
+library moved from 1.2.0 to 1.3.0. This second pass is a fresh,
+ground-up re-audit of the resulting 1.3.0 tree, run the same way as the
+first: comprehensive, covering security, architecture, reliability,
+performance, and developer experience, with each of the four backlogs
+below first reading the corresponding `01`–`04` pair in full to confirm
+those fixes are genuinely shipped and durable (they are) before looking
+for anything new. Nothing in `05`–`08` re-files a `01`–`04` finding —
+every item is new, or is a regression/gap that survived that
+remediation. **Execution began the same day it was filed: Tiers 0–2 of
+each backlog (where a backlog has one) shipped 2026-09-02**, plus several
+cross-referenced Tier 4 items that landed as side effects of that work.
+Everything past Tier 2 remains open.
+
+| Pair | Topic | Status stamp lives in |
+| ---- | ----- | --------------------- |
+| 05 | Architecture & modeling — audit-trail blind spots (cache hits and the grant/revoke path are never logged), `MultiTenantAuthz` lagging single-tenant `Authz` in capability, model-sync/migration correctness, and a residual modeling-expressiveness gap (`intersection`/`difference`) | [`05_architecture_and_modeling_todos.md`](05_architecture_and_modeling_todos.md) — **filed 2026-09-02; Tiers 0–2 shipped same day (ARCH2-1 through ARCH2-12, ARCH2-14, ARCH2-16 through ARCH2-18), plus ARCH2-19 as a side effect — only Tier 3 (the larger modeling-expressiveness gap) and the rest of Tier 4 open** |
+| 06 | Security & identity — a reproducible cache-key collision that poisons cached authorization decisions, a cross-tenant bypass via an unauthenticated tenant header, unbounded tenant auto-provisioning, and CI/supply-chain hardening | [`06_security_and_identity_todos.md`](06_security_and_identity_todos.md) — **filed 2026-09-02; Tiers 0–2 shipped same day (SEC2-1 through SEC2-4, SEC2-6) — only Tier 3 (CI/supply-chain hardening) open** |
+| 07 | Reliability, storage & operations — a CI format-check step that silently reformats instead of gating, a storage backend that fails closed instead of degrading, retry/backoff coverage gaps, and unbounded background-task/cache growth | [`07_reliability_and_operations_todos.md`](07_reliability_and_operations_todos.md) — **filed 2026-09-02; Tiers 0–2 shipped same day (REL2-1 through REL2-12) — only Tier 3 (low-effort operational polish) open** |
+| 08 | Developer experience & test coverage — a `bulk_enforce()` exception-contract break that silently discards partial results, mypy checks disabled specifically to hide 4 real type errors, a missing `py.typed` marker, and several docs/example inaccuracies | [`08_developer_experience_and_testing_todos.md`](08_developer_experience_and_testing_todos.md) — **filed 2026-09-02; Tiers 0–2 shipped same day (DX2-1 through DX2-5), plus DX2-10/DX2-12 as side effects — Tiers 3, 5, 6, and the rest of Tier 4 open** |
+
+Cross-references between these four files (and back into `01`–`04` where
+relevant) are called out inline, same convention as the first pass — most
+notably a `MultiTenantAuthz.for_tenant()` concurrency race independently
+flagged by three of the four backlogs (fixed once, in `05`'s `ARCH2-9`),
+and a cache-key-namespacing dependency between `06`'s `SEC2-4` and `05`'s
+`ARCH2-3` that determines shipping order.
+
+### Headline findings from this pass, if you read nothing else
+
+- **`AuthzRequest.cache_key()` is not injective** (`06` SEC2-1) — the
+  single most concrete, easiest-to-reproduce defect in this pass. Four
+  variable-length strings are joined with a bare `:` separator; two
+  unrelated `(identity, action, resource)` tuples following the library's
+  own documented `"doc:456"`-style resource-ID convention can produce the
+  identical cache key, so one cached `True` decision silently authorizes
+  an unrelated request. No attacker required to trigger it — just the
+  library's own recommended ID shape.
+- **The shipped multi-tenant FastAPI helper trusts an unauthenticated
+  `X-Tenant-ID` header with no binding to the validated identity** (`06`
+  SEC2-2), and **tenant auto-provisioning has no validation or cap on the
+  tenant string it's given** (`06` SEC2-3) — composed together, any
+  authenticated caller can select an arbitrary tenant's OpenFGA store by
+  changing one header, and can force unbounded store creation and process
+  memory growth by sending distinct garbage tenant IDs.
+- **`AuthzEngine.bulk_enforce()` raises a bare `ExceptionGroup` on partial
+  failure and discards every already-computed result** (`08` DX2-1) —
+  reproduced directly. `ExceptionGroup` isn't an `AuthzError` subclass, so
+  the documented "catch `AuthzError` at framework boundaries" pattern
+  doesn't catch it, and a caller loses a whole batch's results over one
+  bad request.
+- **Cache hits are never audit-logged, and `Authz.grant`/`revoke` bypass
+  audit logging and metrics entirely** (`05` ARCH2-1, ARCH2-2) — the audit
+  trail SEC-3 hardened in the first pass has two systemic blind spots:
+  once a decision is cached, no further audit records are written for it
+  within the TTL, and the highest-value events for a compliance trail
+  (who granted/revoked what) were never wired to audit/metrics at all.
+- **CI's own "Format check" step doesn't check anything** (`07` REL2-1) —
+  it runs the mutating `make format` target instead of the non-mutating
+  `make format-check` target that already exists right next to it, so a
+  PR with unformatted or auto-fixable-lint-violating code passes every
+  time.
+- **mypy's config disables the two error codes that would catch real,
+  present bugs** (`08` DX2-2) — with `arg-type`/`union-attr` force
+  re-enabled, 4 genuine type errors surface, including a nominal-typing
+  mismatch in the library's own official `testkit.make_fake_authz()`
+  helper. `make lint`/CI report a clean pass; the config was tuned to make
+  mypy succeed, not to make the code correct under mypy.
+- **`HybridTenantStore` fails closed on a Redis blip instead of degrading
+  to its documented Postgres source of truth** (`07` REL2-2) — inverting
+  the reliability benefit composing the two backends is supposed to
+  provide; a healthy Postgres instance can't serve tenant lookups if
+  Redis alone hiccups.
+- **`OpenFGAClient`'s retry/backoff (from the first pass's ARCH-6) was
+  wired to `check()` only** (`07` REL2-3) — every write, list, and
+  store-creation call gets zero retries on the identical transient errors
+  `check()` already handles gracefully, and REL-8's chunked bulk-write fix
+  means a multi-chunk write now has more opportunities to hit one and
+  abandon a partially-applied write.
+- **No `py.typed` marker ships with the package** (`08` DX2-3) despite the
+  library being fully type-hinted — a PEP 561 gap that makes every type
+  hint in `py_authz/` invisible to a downstream consumer's own type
+  checker, worth fixing before the PyPI publish `03`'s REL-9 set up.
+
+All of the above (Tier 0 and Tier 1 across all four backlogs) shipped
+2026-09-02, along with Tier 2: `05`'s remaining model-sync/migration/
+tenant-management findings (an orphaned-store cleanup path, the
+`MultiTenantAuthz.for_tenant()` concurrency fix, per-tenant migration
+failure isolation, model-diff/validator correctness, the
+`StoreBackedResolver` adapter, the `ModelRegistry` naming collision, and
+Redis client injection), `07`'s remaining reliability findings (bounded
+cache/metrics growth, cache-stampede coalescing, lock-renewal resilience,
+closed CLI connections, `migrate --dry-run`/confirmation, Postgres pool
+sizing, and a pinned release toolchain), and `08`'s cache/IdP fail-safety
+findings (a cache outage can no longer take down `enforce()`, and a
+token with no `kid` header fails cleanly instead of crashing). See each
+backlog's own todos file for the per-item detail.

@@ -23,7 +23,7 @@ from __future__ import annotations
 from py_authz.api import Authz
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.modeling.base import Relation, ResourceModel
-from py_authz.modeling.registry import ModelRegistry
+from py_authz.modeling.registry import ResourceModelRegistry
 from py_authz.modeling.registry import registry as default_registry
 
 
@@ -41,9 +41,14 @@ class InMemoryFGAClient:
         *,
         store_id: str = "in-memory",
         model_id: str | None = "in-memory-model",
-        model_registry: ModelRegistry | None = None,
+        model_registry: ResourceModelRegistry | None = None,
     ):
-        self.store_id = store_id
+        # Widened to `str | None` (never actually `None` here, since
+        # `store_id`'s own parameter default is `"in-memory"`) to
+        # structurally match `FGAClientProtocol.store_id` — a `Protocol`
+        # attribute's type must match invariantly, not just be a subtype
+        # (see DX2-2).
+        self.store_id: str | None = store_id
         self.model_id = model_id
         self._registry = model_registry or default_registry
         self._tuples: set[tuple[str, str, str]] = set()
@@ -165,7 +170,7 @@ class InMemoryFGAClient:
 def make_fake_authz(
     *,
     store_id: str = "in-memory",
-    model_registry: ModelRegistry | None = None,
+    model_registry: ResourceModelRegistry | None = None,
 ) -> Authz:
     """
     Build an ``Authz`` instance backed by an in-memory FGA client.

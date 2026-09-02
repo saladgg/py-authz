@@ -7,13 +7,13 @@ import anyio
 
 from py_authz.audit.types import AuditEvent
 from py_authz.cache.base import BaseCache
-from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.context import get_request_id
 from py_authz.core.exceptions import (
     AuthorizationDenied,
     InvalidAuthzRequest,
 )
 from py_authz.core.logging import logger
+from py_authz.core.protocols import FGAClientProtocol
 from py_authz.core.types import (
     AuthzExplanation,
     AuthzRequest,
@@ -37,19 +37,25 @@ class AuthzEngine:
 
     def __init__(
         self,
-        fga_client: OpenFGAClient,
+        fga_client: FGAClientProtocol,
         cache: BaseCache | None = None,
         *,
         raise_on_denied: bool = False,
         audit_logger=None,
         metrics=None,
+        cache_namespace: str | None = None,
+        max_background_audit_tasks: int = 1000,
     ):
         """
         Initialize the authorization engine.
 
         Args:
-            fga_client (OpenFGAClient):
-                Client used to communicate with OpenFGA.
+            fga_client (FGAClientProtocol):
+                Client used to communicate with OpenFGA — any object
+                implementing `check`/`list_objects`/`write_tuples`/
+                `store_id` (structurally, per `FGAClientProtocol`; no
+                inheritance required). `OpenFGAClient` and
+                `testkit.InMemoryFGAClient` both satisfy this.
 
             cache (Optional[BaseCache]):
                 Optional cache backend.
@@ -71,13 +77,46 @@ class AuthzEngine:
                 (the default) records nothing — this is an optional,
                 explicitly-injected dependency like `cache`/`audit_logger`,
                 not a hardwired global.
+
+            cache_namespace (Optional[str]):
+                Prefix mixed into every cache key this engine computes.
+                Required whenever a `cache` backend might ever be shared
+                by more than one `AuthzEngine`/OpenFGA store — e.g. one
+                Redis instance shared across `MultiTenantAuthz` tenants.
+                Without it, two engines pointed at different stores but
+                sharing one cache would read back each other's cached
+                authorization decisions for any identity/action/resource
+                triple that happens to match across tenants. Pass the
+                tenant's `store_id` (or equivalent). `None` (the default)
+                is fine for a single, standalone engine that owns its
+                cache outright.
+
+            max_background_audit_tasks (int):
+                Upper bound on concurrently in-flight background audit
+                writes (see `_dispatch_audit_event`). Previously
+                unbounded: if the audit sink hangs (rather than failing
+                fast) under sustained load, every `enforce()` call spawns
+                one more never-completing task, growing process memory
+                without bound for as long as the outage lasts. Once this
+                many writes are in flight, a new one is dropped (logged as
+                a warning) rather than queued indefinitely — audit writes
+                are already documented as best-effort, not guaranteed
+                delivery (see REL2-4).
         """
         self.fga_client = fga_client
         self.cache = cache
         self.raise_on_denied = raise_on_denied
         self.audit_logger = audit_logger
         self.metrics = metrics
+        self.cache_namespace = cache_namespace
+        self.max_background_audit_tasks = max_background_audit_tasks
         self._background_audit_tasks: set[asyncio.Task] = set()
+        #: In-flight upstream `check()` calls, keyed by scoped cache key —
+        #: lets concurrent `enforce()` calls that miss the cache on the
+        #: *same* key share one OpenFGA round trip instead of each issuing
+        #: their own (a "cache stampede" right after a flush/restart, or
+        #: the instant a hot key's TTL expires — see REL2-6).
+        self._inflight_checks: dict[str, asyncio.Task[bool]] = {}
 
     def _extract_path(self, explanation_data) -> list[str] | None:
         """
@@ -93,9 +132,14 @@ class AuthzEngine:
         except Exception:
             return None
 
+    def _scoped_cache_key(self, request: AuthzRequest) -> str:
+        """Apply `cache_namespace` (see `__init__`) to `request`'s cache key."""
+        key = request.cache_key()
+        return f"{self.cache_namespace}:{key}" if self.cache_namespace else key
+
     async def invalidate(self, request: AuthzRequest):
         if self.cache:
-            await self.cache.delete(request.cache_key())
+            await self.cache.delete(self._scoped_cache_key(request))
 
     async def enforce(
         self,
@@ -138,7 +182,7 @@ class AuthzEngine:
         )
 
         start = time.time()
-        cache_key = request.cache_key()
+        cache_key = self._scoped_cache_key(request)
         cacheable = request.is_cacheable()
 
         # -------------------------------------------------
@@ -147,7 +191,26 @@ class AuthzEngine:
         cache_hit = False
 
         if self.cache and cacheable:
-            cached = await self.cache.get(cache_key)
+            try:
+                cached = await self.cache.get(cache_key)
+            except Exception:
+                # The cache is advisory, never load-bearing: a Redis blip
+                # must degrade to a real OpenFGA check, not turn a pure
+                # performance optimization into a hard outage for every
+                # authorization check (see DX2-4 — the same failure class
+                # SEC-3/SEC-1 already fixed for the audit logger and
+                # Keycloak key rotation).
+                logger.exception(
+                    json.dumps(
+                        {
+                            "event": "cache_get_failed",
+                            "request_id": get_request_id(),
+                            "cache_key": cache_key,
+                        }
+                    )
+                )
+                cached = None
+
             if cached is not None:
                 cache_hit = True
                 duration = (time.time() - start) * 1000
@@ -169,30 +232,20 @@ class AuthzEngine:
                 )
 
                 self._record_metrics(allowed=cached, cache_hit=True, duration_ms=duration)
+                self._audit_decision(request, cached, cache_hit=True)
 
                 return self._handle_result(
                     cached, request, raise_on_denied=effective_raise_on_denied
                 )
 
         # -------------------------------------------------
-        # 2. Call OpenFGA
+        # 2. Call OpenFGA (coalescing concurrent misses on the same key —
+        #    see REL2-6) and cache the result (3.)
         # -------------------------------------------------
         contextual = (
             [t.to_fga() for t in request.contextual_tuples] if request.contextual_tuples else None
         )
-        allowed = await self.fga_client.check(
-            user=request.identity.id,
-            relation=request.action,
-            object=request.resource.to_fga_object(),
-            contextual_tuples=contextual,
-            context=request.context,
-        )
-
-        # -------------------------------------------------
-        # 3. Cache result (only when request is cacheable)
-        # -------------------------------------------------
-        if self.cache and cacheable:
-            await self.cache.set(cache_key, allowed)
+        allowed = await self._check_upstream(request, cache_key, cacheable, contextual)
 
         duration = (time.time() - start) * 1000
 
@@ -221,24 +274,82 @@ class AuthzEngine:
         # 5. Return / raise
         # -------------------------------------------------
 
-        if self.audit_logger:
-            reason = self._build_reason(request, allowed, cache_hit)
-            event = AuditEvent(
-                timestamp=datetime.now(),
-                tenant_id=self.fga_client.store_id,
-                user_id=request.identity.id,
-                action=request.action,
-                resource=request.resource.to_fga_object(),
-                allowed=allowed,
-                reason=reason,
-                reason_data={
-                    "cache_hit": cache_hit,
-                    "relation": request.action,
-                },
-                request_id=get_request_id(),
-            )
-            self._dispatch_audit_event(event)
+        self._audit_decision(request, allowed, cache_hit=cache_hit)
         return self._handle_result(allowed, request, raise_on_denied=effective_raise_on_denied)
+
+    async def _check_upstream(
+        self,
+        request: AuthzRequest,
+        cache_key: str,
+        cacheable: bool,
+        contextual: list[dict] | None,
+    ) -> bool:
+        """
+        Call OpenFGA and cache the result — but if another `enforce()`
+        call is already doing exactly that for this same `cache_key`,
+        await its result instead of issuing a redundant upstream call
+        (see REL2-6).
+
+        Only coalesced when caching actually applies (`cacheable` and
+        `self.cache` configured); an uncacheable request (ABAC context/
+        contextual tuples) or a cacheless engine always calls through
+        directly, since there's no shared key to coalesce on.
+        """
+        if not (self.cache and cacheable):
+            return await self.fga_client.check(
+                user=request.identity.id,
+                relation=request.action,
+                object=request.resource.to_fga_object(),
+                contextual_tuples=contextual,
+                context=request.context,
+            )
+
+        existing = self._inflight_checks.get(cache_key)
+        if existing is not None:
+            return await existing
+
+        task = asyncio.ensure_future(self._check_and_cache(request, cache_key, contextual))
+        self._inflight_checks[cache_key] = task
+        try:
+            return await task
+        finally:
+            # Only the entry *this* call installed, and only if it's
+            # still the current one — a slow finally on an old task must
+            # never evict a newer task another call has since installed.
+            if self._inflight_checks.get(cache_key) is task:
+                del self._inflight_checks[cache_key]
+
+    async def _check_and_cache(
+        self, request: AuthzRequest, cache_key: str, contextual: list[dict] | None
+    ) -> bool:
+        # Only ever called by `_check_upstream()` after it has already
+        # confirmed `self.cache` is configured.
+        assert self.cache is not None
+
+        allowed = await self.fga_client.check(
+            user=request.identity.id,
+            relation=request.action,
+            object=request.resource.to_fga_object(),
+            contextual_tuples=contextual,
+            context=request.context,
+        )
+
+        try:
+            await self.cache.set(cache_key, allowed)
+        except Exception:
+            # Same fail-safe policy as the cache read (DX2-4): a cache
+            # write failure must never affect the decision just made.
+            logger.exception(
+                json.dumps(
+                    {
+                        "event": "cache_set_failed",
+                        "request_id": get_request_id(),
+                        "cache_key": cache_key,
+                    }
+                )
+            )
+
+        return allowed
 
     def _record_metrics(self, *, allowed: bool, cache_hit: bool, duration_ms: float) -> None:
         """No-op when no `metrics` was injected (the common case)."""
@@ -254,6 +365,82 @@ class AuthzEngine:
     # ------------------------------------------------------------------
     # Audit dispatch
     # ------------------------------------------------------------------
+
+    def _audit_decision(self, request: AuthzRequest, allowed: bool, *, cache_hit: bool) -> None:
+        """
+        Dispatch an audit event for an `enforce()` decision.
+
+        Called from both the cache-hit and live-check branches of
+        `enforce()` — a cache hit is a real access decision and must be
+        recorded like any other, not silently skipped (see ARCH2-1: this
+        used to be inlined only on the live-check path, so every decision
+        served from the cache within its TTL produced zero audit records).
+        """
+        if not self.audit_logger:
+            return
+
+        reason = self._build_reason(request, allowed, cache_hit)
+        event = AuditEvent(
+            timestamp=datetime.now(),
+            tenant_id=getattr(self.fga_client, "store_id", None),
+            user_id=request.identity.id,
+            action=request.action,
+            resource=request.resource.to_fga_object(),
+            allowed=allowed,
+            reason=reason,
+            reason_data={
+                "cache_hit": cache_hit,
+                "relation": request.action,
+            },
+            request_id=get_request_id(),
+        )
+        self._dispatch_audit_event(event)
+
+    def record_write(
+        self,
+        *,
+        identity: Identity,
+        relation: str,
+        resource_object: str,
+        operation: str,
+    ) -> None:
+        """
+        Record metrics and an audit event for a direct tuple write.
+
+        `Authz.grant`/`revoke`/`grant_many`/`revoke_many` call
+        `fga_client.write_tuples()` directly — they don't perform a check,
+        so they never went through `enforce()`, which was previously the
+        only place a check/audit event or metrics counter was ever
+        produced (see ARCH2-2). This is the equivalent hook for the write
+        path: call it once per granted/revoked tuple.
+
+        Args:
+            identity: The subject the tuple was written for.
+            relation: The relation granted/revoked.
+            resource_object: The OpenFGA object string ("<type>:<id>").
+            operation: `"grant"` or `"revoke"`.
+        """
+        if self.metrics:
+            self.metrics.incr(f"authz_{operation}_total")
+
+        if not self.audit_logger:
+            return
+
+        event = AuditEvent(
+            timestamp=datetime.now(),
+            tenant_id=getattr(self.fga_client, "store_id", None),
+            user_id=identity.id,
+            action=relation,
+            resource=resource_object,
+            allowed=True,
+            reason=f"{operation} via Authz.{operation}",
+            reason_data={
+                "operation": operation,
+                "relation": relation,
+            },
+            request_id=get_request_id(),
+        )
+        self._dispatch_audit_event(event)
 
     def _dispatch_audit_event(self, event: AuditEvent) -> None:
         """
@@ -271,7 +458,27 @@ class AuthzEngine:
         immediately after its last `enforce()` call may drop the final
         write(s) — call `flush_audit_logs()` before shutdown if your audit
         sink needs every write to land.
+
+        If `max_background_audit_tasks` in-flight writes are already
+        queued (the audit sink is hung, not just slow — e.g. a Postgres
+        connection stuck mid-query with no `command_timeout` configured),
+        this write is dropped and logged as a warning instead of adding a
+        task that would grow the backlog without bound (see REL2-4).
         """
+        if len(self._background_audit_tasks) >= self.max_background_audit_tasks:
+            logger.warning(
+                json.dumps(
+                    {
+                        "event": "audit_log_dropped_backpressure",
+                        "request_id": get_request_id(),
+                        "user": event.user_id,
+                        "resource": event.resource,
+                        "in_flight": len(self._background_audit_tasks),
+                    }
+                )
+            )
+            return
+
         task = asyncio.ensure_future(self._log_audit_event(event))
         self._background_audit_tasks.add(task)
         task.add_done_callback(self._background_audit_tasks.discard)
@@ -510,13 +717,33 @@ class AuthzEngine:
         *,
         concurrency: int = 10,
     ) -> list[BulkAuthzResult]:
+        """
+        Enforce many requests concurrently (bounded by `concurrency`).
+
+        A failure on one request (e.g. a transient `ExternalServiceError`
+        from OpenFGA) does not abort the batch or discard the results
+        already computed for the other requests — it's captured on that
+        request's own `BulkAuthzResult.error` instead, and `allowed` is
+        `False` for that entry. See DX2-1: this previously let such an
+        exception propagate out of the whole call as an unhandled
+        `ExceptionGroup` (not an `AuthzError`, so `except AuthzError` at a
+        framework boundary didn't catch it either), discarding every
+        already-completed result in the batch.
+
+        Returns:
+            list[BulkAuthzResult]: exactly one result per input request,
+            regardless of whether any individual request's check failed.
+        """
         semaphore = anyio.Semaphore(concurrency)
         results: list[BulkAuthzResult] = []
 
         async def worker(req: AuthzRequest):
             async with semaphore:
-                allowed = await self.enforce(req)
-                results.append(BulkAuthzResult(req, allowed))
+                try:
+                    allowed = await self.enforce(req)
+                    results.append(BulkAuthzResult(req, allowed))
+                except Exception as exc:
+                    results.append(BulkAuthzResult(req, False, error=exc))
 
         async with anyio.create_task_group() as tg:
             for req in requests:

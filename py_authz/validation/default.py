@@ -1,3 +1,4 @@
+from py_authz.core.exceptions import ModelValidationError
 from py_authz.validation.base import ModelValidator
 
 
@@ -8,24 +9,24 @@ class DefaultModelValidator(ModelValidator):
 
     def validate(self, model: dict):
         if "type_definitions" not in model:
-            raise ValueError("Model missing type_definitions")
+            raise ModelValidationError("Model missing type_definitions")
 
         for t in model["type_definitions"]:
             if "type" not in t:
-                raise ValueError("Type definition missing 'type'")
+                raise ModelValidationError("Type definition missing 'type'")
 
             relations = t.get("relations", {})
             detect_cycles(relations=relations)
 
             for name, rel in relations.items():
                 if not isinstance(rel, dict):
-                    raise ValueError(f"Invalid relation format: {name}")
+                    raise ModelValidationError(f"Invalid relation format: {name}")
 
                 # basic check
                 if not any(
                     k in rel for k in ["this", "union", "computedUserset", "tupleToUserset"]
                 ):
-                    raise ValueError(f"Relation '{name}' has no valid rewrite")
+                    raise ModelValidationError(f"Relation '{name}' has no valid rewrite")
 
 
 def _referenced_relations(rewrite) -> list:
@@ -81,8 +82,18 @@ def detect_cycles(relations: dict):
     stack = set()
 
     def visit(node):
+        if node not in relations:
+            # A `union`/`inherits`/`computedUserset` reference (a same-
+            # type name — see `_referenced_relations`'s docstring) that
+            # doesn't name a relation actually defined on this type. Left
+            # unchecked, `relations.get(node)` below returns `None`,
+            # `_referenced_relations(None)` returns `[]`, and the walk
+            # silently treats the typo as a dead end instead of failing
+            # fast — the model then passes validation and fails only once
+            # uploaded to a real OpenFGA server (see ARCH2-12).
+            raise ModelValidationError(f"Relation references unknown relation '{node}'")
         if node in stack:
-            raise ValueError(f"Circular relation detected: {node}")
+            raise ModelValidationError(f"Circular relation detected: {node}")
         if node in visited:
             return
 

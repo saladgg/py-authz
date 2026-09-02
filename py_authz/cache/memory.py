@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections import OrderedDict
 
 from .base import BaseCache
 
@@ -27,13 +28,25 @@ class InMemoryCache(BaseCache):
         - For production, consider using Redis or another external cache.
     """
 
-    def __init__(self):
+    def __init__(self, *, max_size: int | None = 10_000):
         """
-        Initialize the in-memory cache.
+        Args:
+            max_size: maximum number of entries kept at once —
+                least-recently-used evicted first once exceeded. A key
+                written once and never read again used to stay forever
+                (expired entries were only ever purged lazily, on a
+                subsequent `get()` for that *same* key), a plain memory
+                leak under sustained load in a process using this cache
+                as shipped (see REL2-5). `None` restores the old,
+                unbounded behavior.
         """
         # Store format:
         # key -> (value, expiry_timestamp)
-        self._store: dict[str, tuple[bool, float]] = {}
+        # An OrderedDict so both TTL expiry and LRU eviction can share one
+        # structure: `move_to_end()` on every access/write keeps the
+        # least-recently-used entry at the front, cheap to evict from.
+        self._store: OrderedDict[str, tuple[bool, float]] = OrderedDict()
+        self.max_size = max_size
 
         # Optional lock for safer concurrent access
         self._lock = asyncio.Lock()
@@ -63,6 +76,7 @@ class InMemoryCache(BaseCache):
                 del self._store[key]
                 return None
 
+            self._store.move_to_end(key)
             return value
 
     async def set(self, key: str, value: bool, ttl: int = 60) -> None:
@@ -78,6 +92,11 @@ class InMemoryCache(BaseCache):
 
         async with self._lock:
             self._store[key] = (value, expiry)
+            self._store.move_to_end(key)
+
+            if self.max_size is not None:
+                while len(self._store) > self.max_size:
+                    self._store.popitem(last=False)
 
     async def delete(self, key: str) -> None:
         """

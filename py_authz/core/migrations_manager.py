@@ -1,8 +1,29 @@
+from dataclasses import dataclass, field
+
+import anyio
+
 from py_authz.clients.openfga import OpenFGAClient
+from py_authz.core.exceptions import TenantNotFoundError
 from py_authz.core.logging import logger
+from py_authz.core.model_diff import ModelDiffer
 from py_authz.core.model_registry import ModelRegistry
 from py_authz.core.model_sync import ModelSync
 from py_authz.core.tenant_store import TenantStore
+from py_authz.modeling.generator import generate_model
+
+
+@dataclass
+class MigrationBatchResult:
+    """
+    Result of `MigrationManager.migrate_all()`.
+
+    A failure on one tenant no longer aborts the whole batch (see
+    ARCH2-10) — `succeeded`/`failed` report every tenant's own outcome
+    instead of the caller only ever seeing the first exception.
+    """
+
+    succeeded: dict[str, str] = field(default_factory=dict)
+    failed: dict[str, Exception] = field(default_factory=dict)
 
 
 class MigrationManager:
@@ -25,21 +46,34 @@ class MigrationManager:
     # Public API
     # -------------------------------------------------------------------
 
-    async def migrate_all(self, tenant_ids: list[str]) -> dict[str, str]:
+    async def migrate_all(
+        self, tenant_ids: list[str], *, concurrency: int = 10
+    ) -> MigrationBatchResult:
         """
-        Migrate all tenants to latest model.
+        Migrate all tenants to latest model, concurrently (bounded by
+        `concurrency`).
 
-        Returns:
-            dict: tenant_id → model_id
+        A failure on one tenant is captured on `MigrationBatchResult.
+        failed` instead of aborting the rest of the batch or discarding
+        results already computed for other tenants (see ARCH2-10) —
+        mirroring `AuthzEngine.bulk_enforce()`'s same fix (DX2-1).
         """
+        semaphore = anyio.Semaphore(concurrency)
+        result = MigrationBatchResult()
 
-        results = {}
+        async def worker(tenant_id: str) -> None:
+            async with semaphore:
+                try:
+                    result.succeeded[tenant_id] = await self.migrate_tenant(tenant_id)
+                except Exception as exc:
+                    result.failed[tenant_id] = exc
+                    logger.exception(f"migration_failed tenant={tenant_id}")
 
-        for tenant_id in tenant_ids:
-            model_id = await self.migrate_tenant(tenant_id)
-            results[tenant_id] = model_id
+        async with anyio.create_task_group() as tg:
+            for tenant_id in tenant_ids:
+                tg.start_soon(worker, tenant_id)
 
-        return results
+        return result
 
     async def migrate_tenant(self, tenant_id: str) -> str:
         """
@@ -50,9 +84,14 @@ class MigrationManager:
 
         store_id = await self.tenant_store.get(tenant_id)
         if not store_id:
-            raise ValueError(f"Tenant not found: {tenant_id}")
-
-        current_model = await self.model_registry.get(tenant_id)
+            # `TenantNotFoundError` (an `AuthzError`), not a bare
+            # `ValueError` — a typo'd `--tenant` is an anticipated user
+            # mistake, and this is the exact exception type the rest of
+            # the codebase already uses for "no such tenant" (see
+            # `core/tenant_resolver.py`); it's also what lets the CLI's
+            # top-level handler print a friendly message and a
+            # categorized exit code instead of a raw traceback (ARCH2-5).
+            raise TenantNotFoundError(f"Tenant not found: {tenant_id}")
 
         client = OpenFGAClient(
             api_url=self.api_url,
@@ -66,15 +105,61 @@ class MigrationManager:
             # Sync (will diff automatically)
             new_model_id = await syncer.sync()
 
-            # If no change, skip update
-            if current_model == new_model_id:
-                logger.info(f"migration_noop tenant={tenant_id} model_id={current_model}")
-                return current_model
+            # Whether anything actually changed is read from `syncer`'s
+            # own real-time comparison against OpenFGA — not from a
+            # separately-tracked "current model" read out of
+            # `self.model_registry` beforehand. The latter used to be a
+            # second, independent source of truth for the same fact: any
+            # other code path that syncs a tenant's model (`Authz.
+            # sync_model()`, `py-authz sync`) never updates
+            # `model_registry`, so it could silently drift and report a
+            # false "migration_success"/overwrite a value that hadn't
+            # actually gone stale (see ARCH2-17). `model_registry` is now
+            # purely a write-target here, never read back for this
+            # decision.
+            if not syncer.last_sync_changed:
+                logger.info(f"migration_noop tenant={tenant_id} model_id={new_model_id}")
+                return new_model_id
 
-            # Track version
             await self.model_registry.set(tenant_id, new_model_id)
 
             logger.info(f"migration_success tenant={tenant_id} model_id={new_model_id}")
             return new_model_id
         finally:
             await client.aclose()
+
+    async def dry_run_tenant(self, tenant_id: str) -> bool:
+        """
+        Report whether `migrate_tenant(tenant_id)` would change anything,
+        without uploading a new model or persisting anything (see
+        REL2-10 — backs `py-authz migrate --dry-run`).
+
+        Returns:
+            bool: True if the tenant's model would change.
+        """
+        store_id = await self.tenant_store.get(tenant_id)
+        if not store_id:
+            raise TenantNotFoundError(f"Tenant not found: {tenant_id}")
+
+        client = OpenFGAClient(api_url=self.api_url, store_id=store_id, model_id=None)
+        try:
+            new_model = generate_model()
+            current_model = await client.get_latest_model()
+            return not (current_model and ModelDiffer.is_equal(new_model, current_model))
+        finally:
+            await client.aclose()
+
+    async def dry_run_all(self, tenant_ids: list[str], *, concurrency: int = 10) -> dict[str, bool]:
+        """Concurrent `dry_run_tenant()` over many tenants."""
+        semaphore = anyio.Semaphore(concurrency)
+        results: dict[str, bool] = {}
+
+        async def worker(tenant_id: str) -> None:
+            async with semaphore:
+                results[tenant_id] = await self.dry_run_tenant(tenant_id)
+
+        async with anyio.create_task_group() as tg:
+            for tenant_id in tenant_ids:
+                tg.start_soon(worker, tenant_id)
+
+        return results

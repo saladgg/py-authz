@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 
 from py_authz.adapters.keycloak import KeycloakJWTValidator  # noqa: E402
 from py_authz.adapters.keycloak_fastapi import KeycloakAuthMiddleware  # noqa: E402
-from py_authz.core.exceptions import AuthenticationError  # noqa: E402
+from py_authz.core.exceptions import (  # noqa: E402
+    AuthenticationError,
+    IdentityProviderUnavailable,
+)
 from py_authz.core.types import Identity  # noqa: E402
 from tests.adapters.test_keycloak import _install_fake_jwt  # noqa: F401
 
@@ -85,6 +88,33 @@ async def test_middleware_raises_http_exception_on_invalid_token():
         await middleware.dispatch(_Req(), _call_next)
 
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_middleware_raises_503_when_identity_provider_unavailable():
+    """
+    Regression test for ARCH2-7: the IdP itself being unreachable is
+    distinct from "this token is invalid" — it should surface as a 503,
+    not be lumped in with a 401.
+    """
+    from fastapi import HTTPException
+
+    validator = StubValidator(error=IdentityProviderUnavailable("idp down"))
+    middleware = KeycloakAuthMiddleware(app=lambda *a: None, validator=validator)
+
+    class _Req:
+        headers = {"Authorization": "Bearer some-token"}
+
+        class state:
+            pass
+
+    async def _call_next(_):
+        raise AssertionError("call_next should not run when the IdP is unavailable")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await middleware.dispatch(_Req(), _call_next)
+
+    assert exc_info.value.status_code == 503
 
 
 @pytest.mark.asyncio

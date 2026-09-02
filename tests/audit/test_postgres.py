@@ -22,9 +22,11 @@ class FakePool:
     def __init__(self):
         self.executes: list[tuple[str, tuple]] = []
         self.closed = False
+        self.acquire_timeouts: list[float | None] = []
 
     @asynccontextmanager
-    async def acquire(self):
+    async def acquire(self, timeout=None):
+        self.acquire_timeouts.append(timeout)
         yield FakeConnection(self)
 
     async def close(self):
@@ -35,9 +37,11 @@ class FakePool:
 def patched_asyncpg(monkeypatch):
     pool = FakePool()
     pool.create_pool_calls = 0
+    pool.create_pool_kwargs = None
 
-    async def _create_pool(dsn):
+    async def _create_pool(dsn, **kwargs):
         pool.create_pool_calls += 1
+        pool.create_pool_kwargs = kwargs
         return pool
 
     fake_module = type("asyncpg_stub", (), {"create_pool": staticmethod(_create_pool)})
@@ -51,6 +55,35 @@ async def test_connect_creates_pool(patched_asyncpg):
     await logger.connect()
 
     assert logger._pool is patched_asyncpg
+
+
+@pytest.mark.asyncio
+async def test_connect_passes_command_timeout_to_pool(patched_asyncpg):
+    """
+    Regression test for REL2-4: previously `create_pool()`/`pool.
+    acquire()` had no timeout at all, so a hung Postgres connection could
+    block a write (and its background task — see
+    `AuthzEngine._dispatch_audit_event`) forever.
+    """
+    logger = PostgresAuditLogger(dsn="postgres://fake", command_timeout=3.5)
+    await logger.connect()
+
+    assert patched_asyncpg.create_pool_kwargs == {"command_timeout": 3.5}
+
+    event = AuditEvent(
+        timestamp=datetime(2026, 4, 18, 12, 0, 0),
+        tenant_id="t1",
+        user_id="user:1",
+        action="view",
+        resource="document:1",
+        allowed=True,
+        reason=None,
+        reason_data=None,
+        request_id=None,
+    )
+    await logger.log(event)
+
+    assert patched_asyncpg.acquire_timeouts == [3.5]
 
 
 @pytest.mark.asyncio

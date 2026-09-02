@@ -57,3 +57,106 @@ def test_is_equal_false_when_schema_differs_despite_matching_metadata():
     remote_b = {"id": "same-id", "schema_version": "1.1", "type_definitions": [{"type": "b"}]}
 
     assert not ModelDiffer.is_equal(remote_a, remote_b)
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-11: list order must not affect equality —
+# `type_definitions`, `directly_related_user_types`, and union/
+# intersection `child` lists are all unordered sets semantically.
+# ----------------------------------------------------------------------
+
+
+def test_is_equal_ignores_type_definitions_order():
+    a = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "document"}, {"type": "folder"}],
+    }
+    b = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "folder"}, {"type": "document"}],
+    }
+
+    assert ModelDiffer.is_equal(a, b)
+
+
+def test_is_equal_ignores_directly_related_user_types_order():
+    def model(order):
+        return {
+            "schema_version": "1.1",
+            "type_definitions": [
+                {
+                    "type": "document",
+                    "relations": {"viewer": {"this": {}}},
+                    "metadata": {
+                        "relations": {
+                            "viewer": {"directly_related_user_types": order},
+                        }
+                    },
+                }
+            ],
+        }
+
+    a = model([{"type": "user"}, {"type": "team", "relation": "member"}])
+    b = model([{"type": "team", "relation": "member"}, {"type": "user"}])
+
+    assert ModelDiffer.is_equal(a, b)
+
+
+def test_is_equal_ignores_union_child_order():
+    def model(order):
+        return {
+            "schema_version": "1.1",
+            "type_definitions": [
+                {
+                    "type": "document",
+                    "relations": {"viewer": {"union": {"child": order}}},
+                }
+            ],
+        }
+
+    a = model([{"this": {}}, {"computedUserset": {"relation": "editor"}}])
+    b = model([{"computedUserset": {"relation": "editor"}}, {"this": {}}])
+
+    assert ModelDiffer.is_equal(a, b)
+
+
+def test_is_equal_still_false_when_union_child_content_actually_differs():
+    """Canonicalization must not make genuinely different models equal."""
+    a = {
+        "schema_version": "1.1",
+        "type_definitions": [
+            {
+                "type": "document",
+                "relations": {
+                    "viewer": {
+                        "union": {
+                            "child": [
+                                {"this": {}},
+                                {"computedUserset": {"relation": "editor"}},
+                            ]
+                        }
+                    }
+                },
+            }
+        ],
+    }
+    b = {
+        "schema_version": "1.1",
+        "type_definitions": [
+            {
+                "type": "document",
+                "relations": {
+                    "viewer": {
+                        "union": {
+                            "child": [
+                                {"this": {}},
+                                {"computedUserset": {"relation": "owner"}},
+                            ]
+                        }
+                    }
+                },
+            }
+        ],
+    }
+
+    assert not ModelDiffer.is_equal(a, b)
