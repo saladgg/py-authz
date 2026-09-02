@@ -1,5 +1,6 @@
 import pytest
 
+from py_authz.core.exceptions import ModelValidationError
 from py_authz.validation.default import DefaultModelValidator, detect_cycles
 
 
@@ -65,12 +66,12 @@ def test_validate_accepts_tuple_to_userset(validator):
 
 
 def test_validate_rejects_model_without_type_definitions(validator):
-    with pytest.raises(ValueError, match="type_definitions"):
+    with pytest.raises(ModelValidationError, match="type_definitions"):
         validator.validate({})
 
 
 def test_validate_rejects_type_definition_missing_type(validator):
-    with pytest.raises(ValueError, match="Type definition missing"):
+    with pytest.raises(ModelValidationError, match="Type definition missing"):
         validator.validate({"type_definitions": [{"relations": {}}]})
 
 
@@ -81,7 +82,7 @@ def test_validate_rejects_non_dict_relation(validator):
         ],
     }
 
-    with pytest.raises(ValueError, match="Invalid relation format"):
+    with pytest.raises(ModelValidationError, match="Invalid relation format"):
         validator.validate(model)
 
 
@@ -92,17 +93,17 @@ def test_validate_rejects_relation_without_known_rewrite(validator):
         ],
     }
 
-    with pytest.raises(ValueError, match="no valid rewrite"):
+    with pytest.raises(ModelValidationError, match="no valid rewrite"):
         validator.validate(model)
 
 
 def test_detect_cycles_raises_on_self_loop():
-    with pytest.raises(ValueError, match="Circular"):
+    with pytest.raises(ModelValidationError, match="Circular"):
         detect_cycles({"a": {"computedUserset": {"relation": "a"}}})
 
 
 def test_detect_cycles_raises_on_indirect_cycle():
-    with pytest.raises(ValueError, match="Circular"):
+    with pytest.raises(ModelValidationError, match="Circular"):
         detect_cycles(
             {
                 "a": {"computedUserset": {"relation": "b"}},
@@ -118,7 +119,7 @@ def test_detect_cycles_raises_on_cycle_nested_in_union():
     branches closes a cycle. This is exactly what `OpenFGAModelGenerator`
     emits for `Relation(union=[...])`/`Relation(inherits=[...])`.
     """
-    with pytest.raises(ValueError, match="Circular"):
+    with pytest.raises(ModelValidationError, match="Circular"):
         detect_cycles(
             {
                 "editor": {
@@ -178,6 +179,32 @@ def test_detect_cycles_ignores_tuple_to_userset_cross_type_reference():
     )
 
 
+def test_detect_cycles_raises_on_dangling_reference():
+    """
+    Regression test for ARCH2-12: a typo'd `union=`/`inherits=` reference
+    (naming a relation that doesn't exist on this type) used to be
+    silently treated as a dead end by the cycle-detection walk instead of
+    raising — passing validation, then failing only once uploaded to a
+    real OpenFGA server.
+    """
+    with pytest.raises(ModelValidationError, match="unknown relation 'nonexistent'"):
+        detect_cycles({"viewer": {"computedUserset": {"relation": "nonexistent"}}})
+
+
+def test_validate_raises_on_dangling_reference_end_to_end(validator):
+    model = {
+        "type_definitions": [
+            {
+                "type": "document",
+                "relations": {"viewer": {"computedUserset": {"relation": "nonexistent"}}},
+            },
+        ],
+    }
+
+    with pytest.raises(ModelValidationError, match="unknown relation"):
+        validator.validate(model)
+
+
 def test_validate_raises_on_circular_relations_end_to_end(validator):
     """
     Regression test for ARCH-3: exercises cycle detection the way it's
@@ -198,5 +225,5 @@ def test_validate_raises_on_circular_relations_end_to_end(validator):
         ],
     }
 
-    with pytest.raises(ValueError, match="Circular"):
+    with pytest.raises(ModelValidationError, match="Circular"):
         validator.validate(model)

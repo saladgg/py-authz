@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 import py_authz.api as api_module
@@ -39,6 +41,14 @@ class FakeFGAClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class RecordingAuditLogger:
+    def __init__(self):
+        self.events: list = []
+
+    async def log(self, event):
+        self.events.append(event)
 
 
 @pytest.fixture(autouse=True)
@@ -195,3 +205,156 @@ async def test_authz_aclose_tolerates_a_client_with_no_aclose():
     authz = Authz(AuthzEngine(fga_client=ClientWithoutAclose()))
 
     await authz.aclose()  # must not raise
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-3 / SEC2-4: `MultiTenantAuthz` previously
+# never forwarded `cache`/`audit_logger`/`metrics`/`raise_on_denied` into
+# the `AuthzEngine`s it builds, so every tenant got none of those
+# capabilities regardless of what was configured on `MultiTenantAuthz`
+# itself. When a `cache` *is* forwarded, it must be namespaced per-tenant
+# (by `store_id`) so it's safe to share one cache across every tenant.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_forwards_cache_audit_logger_metrics_and_raise_on_denied():
+    from py_authz.cache.memory import InMemoryCache
+    from py_authz.core.metrics import Metrics
+
+    resolver = FakeResolver({"t1": "store-1"})
+    cache = InMemoryCache()
+    audit_logger = RecordingAuditLogger()
+    metrics = Metrics()
+
+    mt = MultiTenantAuthz(
+        api_url="http://fake",
+        model_id=None,
+        tenant_resolver=resolver,
+        cache=cache,
+        audit_logger=audit_logger,
+        metrics=metrics,
+        raise_on_denied=True,
+    )
+
+    authz = await mt.for_tenant("t1")
+
+    assert authz._engine.cache is cache
+    assert authz._engine.audit_logger is audit_logger
+    assert authz._engine.metrics is metrics
+    assert authz._engine.raise_on_denied is True
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_namespaces_cache_by_resolved_store_id():
+    resolver = FakeResolver({"t1": "store-1", "t2": "store-2"})
+    mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=resolver)
+
+    authz_t1 = await mt.for_tenant("t1")
+    authz_t2 = await mt.for_tenant("t2")
+
+    assert authz_t1._engine.cache_namespace == "store-1"
+    assert authz_t2._engine.cache_namespace == "store-2"
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_concurrent_first_resolution_constructs_exactly_one_client():
+    """
+    Regression test for ARCH2-9: concurrent first-callers for the same
+    never-yet-cached tenant used to each independently resolve/provision/
+    construct their own `OpenFGAClient` — all but the last writer to
+    `self._cache` silently discarded (and never closed). A lock around
+    the whole check-then-act sequence must make them share one result.
+    """
+    resolver = FakeResolver({"t1": "store-1"})
+    mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=resolver)
+
+    results = await asyncio.gather(*(mt.for_tenant("t1") for _ in range(10)))
+
+    assert len(FakeFGAClient.instances) == 1
+    assert all(authz is results[0] for authz in results)
+    assert resolver.calls == ["t1"]  # resolved exactly once, not 10 times
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_evicts_least_recently_used_tenant_when_over_cap():
+    """
+    Regression test for SEC2-3: `MultiTenantAuthz`'s tenant cache used to
+    be entirely unbounded by design — combined with tenant
+    auto-provisioning accepting any caller-supplied `tenant_id`, an
+    attacker-controlled stream of distinct tenant IDs could grow process
+    memory/socket count without bound. `max_cached_tenants` now evicts
+    the least-recently-used tenant (closing its `Authz`) once the cache
+    would otherwise grow past it.
+    """
+    resolver = FakeResolver({"t1": "store-1", "t2": "store-2", "t3": "store-3"})
+    mt = MultiTenantAuthz(
+        api_url="http://fake",
+        model_id=None,
+        tenant_resolver=resolver,
+        max_cached_tenants=2,
+    )
+
+    authz_t1 = await mt.for_tenant("t1")
+    await mt.for_tenant("t2")
+    await mt.for_tenant("t3")  # over the cap of 2 -> evicts t1 (least recently used)
+
+    await asyncio.sleep(0)  # let the background eviction close() run
+
+    assert list(mt._cache.keys()) == ["t2", "t3"]
+    assert FakeFGAClient.instances[0].closed is True  # t1's client
+    assert authz_t1 not in mt._cache.values()
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_lru_touch_protects_recently_used_tenant_from_eviction():
+    resolver = FakeResolver({"t1": "store-1", "t2": "store-2", "t3": "store-3"})
+    mt = MultiTenantAuthz(
+        api_url="http://fake",
+        model_id=None,
+        tenant_resolver=resolver,
+        max_cached_tenants=2,
+    )
+
+    await mt.for_tenant("t1")
+    await mt.for_tenant("t2")
+    await mt.for_tenant("t1")  # touch t1 again -> t2 becomes least-recently-used
+    await mt.for_tenant("t3")  # evicts t2, not t1
+
+    await asyncio.sleep(0)
+
+    assert list(mt._cache.keys()) == ["t1", "t3"]
+
+
+@pytest.mark.asyncio
+async def test_max_cached_tenants_none_disables_eviction():
+    """Backward compatibility: the old unbounded-by-default behavior is
+    still available as an explicit opt-in."""
+    resolver = FakeResolver({"t1": "store-1", "t2": "store-2", "t3": "store-3"})
+    mt = MultiTenantAuthz(
+        api_url="http://fake",
+        model_id=None,
+        tenant_resolver=resolver,
+        max_cached_tenants=None,
+    )
+
+    await mt.for_tenant("t1")
+    await mt.for_tenant("t2")
+    await mt.for_tenant("t3")
+
+    assert len(mt._cache) == 3
+    assert all(not c.closed for c in FakeFGAClient.instances)
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_defaults_leave_engine_capabilities_unconfigured():
+    """Backward compatibility: no new kwargs given -> same as before."""
+    resolver = FakeResolver({"t1": "store-1"})
+    mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=resolver)
+
+    authz = await mt.for_tenant("t1")
+
+    assert authz._engine.cache is None
+    assert authz._engine.audit_logger is None
+    assert authz._engine.metrics is None
+    assert authz._engine.raise_on_denied is False

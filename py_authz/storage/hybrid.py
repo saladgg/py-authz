@@ -1,3 +1,9 @@
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class HybridTenantStore:
     """
     Redis (cache) + Postgres (source of truth).
@@ -10,6 +16,12 @@ class HybridTenantStore:
     `redis.asyncio.Redis` client does not (it returns raw bytes from
     `get()` and its `set()`, while it does accept `ex`, isn't meant to be
     handed to this class directly) and should not be passed here.
+
+    Redis is treated as advisory, never load-bearing: any exception from
+    `redis_store.get()`/`.set()` is caught, logged, and the call degrades
+    to Postgres alone (see REL2-2) — a Redis outage must never make tenant
+    resolution *less* available than a bare `PostgresTenantStore` would
+    have been on its own.
     """
 
     def __init__(self, pg_store, redis_store):
@@ -17,20 +29,20 @@ class HybridTenantStore:
         self.redis = redis_store
 
     async def get(self, tenant_id: str):
-        cached = await self.redis.get(tenant_id)
+        cached = await self._redis_get(tenant_id)
         if cached:
             return cached
 
         store_id = await self.pg.get(tenant_id)
 
         if store_id:
-            await self.redis.set(tenant_id, store_id, ex=300)
+            await self._redis_set(tenant_id, store_id)
 
         return store_id
 
     async def set(self, tenant_id: str, store_id: str):
         await self.pg.set(tenant_id, store_id)
-        await self.redis.set(tenant_id, store_id, ex=300)
+        await self._redis_set(tenant_id, store_id)
 
     async def list_tenant_ids(self) -> list[str]:
         """
@@ -40,3 +52,20 @@ class HybridTenantStore:
         them.
         """
         return await self.pg.list_tenant_ids()
+
+    async def _redis_get(self, tenant_id: str) -> str | None:
+        try:
+            return await self.redis.get(tenant_id)
+        except Exception:
+            logger.exception(
+                json.dumps({"event": "hybrid_tenant_store_redis_get_failed", "tenant": tenant_id})
+            )
+            return None
+
+    async def _redis_set(self, tenant_id: str, store_id: str) -> None:
+        try:
+            await self.redis.set(tenant_id, store_id, ex=300)
+        except Exception:
+            logger.exception(
+                json.dumps({"event": "hybrid_tenant_store_redis_set_failed", "tenant": tenant_id})
+            )

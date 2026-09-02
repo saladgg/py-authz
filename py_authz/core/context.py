@@ -1,6 +1,8 @@
 import contextvars
 
-request_id_var = contextvars.ContextVar("request_id", default=None)
+request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_id", default=None
+)
 
 
 def set_request_id(request_id: str):

@@ -58,6 +58,7 @@ async def _resolve_authz(authz, request: "Request"):
 
 async def _enforce(
     authz,
+    request: "Request",
     relation: Relation,
     user: Identity,
     resource: ResourceModel,
@@ -65,18 +66,29 @@ async def _enforce(
     fail_open: bool,
 ) -> None:
     """
-    Run the authorization check and raise the appropriate `HTTPException`.
+    Resolve `authz` (see `_resolve_authz`) and run the authorization
+    check, raising the appropriate `HTTPException`.
 
     A dependency failure (`ExternalServiceError` — OpenFGA unreachable or
-    timed out) is translated to a 503 by default (`fail_open=False`):
-    fail-closed, so an availability incident is never indistinguishable
-    from an actual authorization decision (a 403 "denied"). Pass
-    `fail_open=True` to let the request through instead when the
-    dependency is degraded — only appropriate for routes where staying
-    available matters more than strict enforcement during an outage.
+    timed out, a `LockAcquisitionTimeout` during per-request tenant
+    provisioning, etc.) is translated to a 503 by default
+    (`fail_open=False`): fail-closed, so an availability incident is
+    never indistinguishable from an actual authorization decision (a 403
+    "denied"). Pass `fail_open=True` to let the request through instead
+    when the dependency is degraded — only appropriate for routes where
+    staying available matters more than strict enforcement during an
+    outage.
+
+    `authz` resolution happens *inside* this try/except (not before it,
+    as it previously did) — a `MultiTenantAuthz`-backed resolver can
+    itself hit `ExternalServiceError` (e.g. tenant auto-provisioning
+    timing out on a contended lock — see ARCH2-4), and that failure needs
+    the same fail-open/fail-closed treatment as a failure in the check
+    itself, not an unhandled 500.
     """
     try:
-        allowed = await authz.can(relation, user, resource)
+        resolved_authz = await _resolve_authz(authz, request)
+        allowed = await resolved_authz.can(relation, user, resource)
     except ExternalServiceError as exc:
         if fail_open:
             return
@@ -170,11 +182,10 @@ def require_dependency(
     """
 
     async def dependency(request: "Request", **kwargs):
-        resolved_authz = await _resolve_authz(authz, request)
         user = await _resolve(user_getter(request))
         resource = await _resolve(resource_getter(request, **kwargs))
 
-        await _enforce(resolved_authz, relation, user, resource, fail_open=fail_open)
+        await _enforce(authz, request, relation, user, resource, fail_open=fail_open)
 
     return dependency
 
@@ -231,13 +242,12 @@ def require_fastapi(
             if request is None:
                 raise RuntimeError("FastAPI Request object not found")
 
-            resolved_authz = await _resolve_authz(authz, request)
             user = await _resolve(user_getter(request))
             # remove duplicate request
             filtered_kwargs = {k: v for k, v in kwargs.items() if k != "request"}
             resource = await _resolve(resource_getter(request, **filtered_kwargs))
 
-            await _enforce(resolved_authz, relation, user, resource, fail_open=fail_open)
+            await _enforce(authz, request, relation, user, resource, fail_open=fail_open)
 
             if is_async:
                 return await func(*args, **kwargs)
@@ -251,12 +261,20 @@ def require_fastapi(
 
 def tenant_from_request(request: "Request") -> str:
     """
-    Extract tenant from request.
+    Extract tenant from the `X-Tenant-ID` request header.
 
-    Customize this:
-        - header (X-Tenant-ID)
-        - subdomain
-        - JWT claims
+    **Insecure by itself — demo/development use only.** This header is
+    entirely caller-controlled: nothing here verifies it against the
+    authenticated identity, so ANY caller (authenticated or not) can
+    select an arbitrary tenant's store just by setting this header — a
+    direct cross-tenant authorization bypass if identities, object IDs,
+    or grants happen to overlap across tenants (see SEC2-2). Do not use
+    this in front of real authentication without first cross-checking its
+    value against something verified.
+
+    Prefer `tenant_from_verified_claim()` (reads a tenant claim from the
+    validated JWT instead — see `OIDCJWTValidator.to_identity()`) or a
+    subdomain resolved server-side.
     """
     tenant = request.headers.get("X-Tenant-ID")
 
@@ -264,6 +282,44 @@ def tenant_from_request(request: "Request") -> str:
         raise HTTPException(status_code=400, detail="Missing tenant")
 
     return tenant
+
+
+def tenant_from_verified_claim(claim: str = "tenant_id") -> Callable[["Request"], str]:
+    """
+    Return a tenant-resolution callable that reads `claim` from the
+    *authenticated identity's verified token claims*
+    (`request.state.user.attributes`, populated by
+    `OIDCJWTValidator.to_identity()`/`KeycloakAuthMiddleware`) — never
+    from a raw, caller-controlled request header. This is the safe
+    alternative to `tenant_from_request` for any deployment with real
+    authentication: a value inside a signature-verified JWT can't be
+    forged by the caller the way an arbitrary header can (see SEC2-2).
+
+    Requires the configured IdP to actually issue a `claim` (e.g. a
+    custom `tenant_id`/`org_id` claim) — raises a 400 if it's missing, or
+    if the request has no authenticated identity at all.
+
+    Example:
+        async def authz_for_request(request: Request) -> Authz:
+            tenant_id = tenant_from_verified_claim()(request)
+            return await mt.for_tenant(tenant_id)
+
+        require_fastapi(authz_for_request, Document.view, ...)
+    """
+
+    def _resolve(request: "Request") -> str:
+        user = getattr(request.state, "user", None)
+        tenant = user.attributes.get(claim) if user is not None and user.attributes else None
+
+        if not tenant:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing '{claim}' claim on authenticated identity",
+            )
+
+        return tenant
+
+    return _resolve
 
 
 async def request_context_middleware(request: "Request", call_next):

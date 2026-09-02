@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from py_authz.core.exceptions import LockAcquisitionTimeout
 from py_authz.core.locks import RedisLock, RedisLockManager
 
 
@@ -59,7 +60,7 @@ async def test_acquire_times_out_when_key_held():
     r._store["busy"] = "someone-else"
     lock = RedisLock(r)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(LockAcquisitionTimeout):
         await lock.acquire("busy", retry_interval=0.01, timeout=0.05)
 
 
@@ -134,6 +135,43 @@ async def test_manager_lock_renews_ttl_while_body_is_running():
     renewal_calls = [c for c in r.eval_calls if '"expire"' in c[0]]
     assert len(renewal_calls) >= 2
     assert "k6" not in r._store  # still released cleanly on exit
+
+
+@pytest.mark.asyncio
+async def test_manager_lock_renewal_survives_transient_renew_errors():
+    """
+    Regression test for REL2-7: a *transient* error renewing (e.g. Redis
+    unreachable for one call) must not be treated the same as "the lock
+    is legitimately gone" — the renewal loop must log it and keep trying
+    on subsequent intervals, not silently stop.
+    """
+    r = FakeRedis()
+    mgr = RedisLockManager(r)
+
+    call_count = 0
+    real_renew = RedisLock.renew
+
+    async def flaky_renew(self, key, lock_id, ttl):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise ConnectionError("redis unavailable")
+        return await real_renew(self, key, lock_id, ttl)
+
+    RedisLock.renew = flaky_renew
+    try:
+        body_completed = False
+        async with mgr.lock("k8", ttl=1, renew_interval=0.02):
+            await asyncio.sleep(0.15)  # several renewal intervals
+            body_completed = True
+    finally:
+        RedisLock.renew = real_renew
+
+    assert body_completed is True
+    assert call_count >= 3  # retried past the transient failures
+    renewal_calls = [c for c in r.eval_calls if '"expire"' in c[0]]
+    assert len(renewal_calls) >= 1  # eventually succeeded at least once
+    assert "k8" not in r._store  # still released cleanly on exit
 
 
 @pytest.mark.asyncio

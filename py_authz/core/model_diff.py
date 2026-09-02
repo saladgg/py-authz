@@ -46,6 +46,32 @@ def _strip_server_defaults(value: Any) -> Any:
     return value
 
 
+def _canonicalize_lists(value: Any) -> Any:
+    """
+    Recursively sort every list's items into a stable, deterministic
+    order, so two structurally-equal models that merely enumerate their
+    `type_definitions`, `directly_related_user_types`, or `union`/
+    `intersection` `child` operands in a different order compare equal
+    (see ARCH2-11). None of these lists have order-dependent semantics in
+    OpenFGA's model schema — union/intersection are commutative, and
+    `type_definitions`/`directly_related_user_types` are unordered sets —
+    so sorting them is always safe.
+
+    Each item is sorted by its own normalized JSON form (`sort_keys=True`)
+    rather than a field-specific key, since not every list's items share
+    one natural sort key (a `type_definitions` entry has `type`; a
+    `directly_related_user_types` entry doesn't).
+    """
+    if isinstance(value, dict):
+        return {key: _canonicalize_lists(sub_value) for key, sub_value in value.items()}
+
+    if isinstance(value, list):
+        canonical_items = [_canonicalize_lists(item) for item in value]
+        return sorted(canonical_items, key=lambda item: json.dumps(item, sort_keys=True))
+
+    return value
+
+
 class ModelDiffer:
     """
     Compares OpenFGA models for equality.
@@ -79,7 +105,8 @@ class ModelDiffer:
         """
         schema_only = {field: model.get(field) for field in cls.SCHEMA_FIELDS}
         cleaned = _strip_server_defaults(schema_only)
-        return json.dumps(cleaned, sort_keys=True)
+        canonical = _canonicalize_lists(cleaned)
+        return json.dumps(canonical, sort_keys=True)
 
     @classmethod
     def is_equal(

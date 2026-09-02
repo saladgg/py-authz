@@ -13,7 +13,29 @@ def test_cache_key():
 
     req = AuthzRequest(identity=user, action="view", resource=resource)
 
-    assert req.cache_key() == "user:1:view:doc:123"
+    assert req.cache_key() == "6:user:1|4:view|3:doc|3:123"
+
+
+def test_cache_key_is_injective_across_colon_boundaries():
+    """
+    Regression test for SEC2-1: a naive ":".join(...) cache key is NOT
+    injective — two unrelated requests, built using the library's own
+    documented colon-bearing resource-ID convention ("doc:456"), could
+    concatenate to the identical raw string. The length-prefixed encoding
+    must keep them distinct.
+    """
+    req_a = AuthzRequest(
+        identity=Identity(id="user:123"),
+        action="viewer",
+        resource=Resource(type="document", id="doc:456"),
+    )
+    req_b = AuthzRequest(
+        identity=Identity(id="user:123"),
+        action="viewer:document",
+        resource=Resource(type="doc", id="456"),
+    )
+
+    assert req_a.cache_key() != req_b.cache_key()
 
 
 def test_authz_explanation_defaults():

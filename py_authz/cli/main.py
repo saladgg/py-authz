@@ -14,6 +14,7 @@ from py_authz.core.exceptions import (
     ConfigurationError,
     ExternalServiceError,
     InvalidAuthzRequest,
+    TenantNotFoundError,
 )
 from py_authz.core.logging import setup_logging
 
@@ -27,6 +28,7 @@ logger = logging.getLogger("py_authz.cli")
 _EXIT_CODES: list[tuple[type[AuthzError], int]] = [
     (ConfigurationError, 2),
     (InvalidAuthzRequest, 3),
+    (TenantNotFoundError, 3),  # a bad --tenant argument is an invalid-request shape too
     (ExternalServiceError, 4),
     (AuthzError, 1),  # fallback for any other AuthzError subclass
 ]
@@ -130,6 +132,19 @@ def main():
         help="Python module path containing authz models",
         required=False,
     )
+    migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report which tenants would change, without migrating anything",
+    )
+    migrate_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "Skip the confirmation prompt for --all-tenants. Required when "
+            "running non-interactively (no TTY, e.g. in CI)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -180,6 +195,8 @@ def main():
                     backend=args.backend,
                     conn=args.conn,
                     tenant_ids=args.tenant_ids,
+                    dry_run=args.dry_run,
+                    yes=args.yes,
                 )
             )
 

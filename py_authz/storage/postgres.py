@@ -27,14 +27,42 @@ class PostgresTenantStore:
     idempotent, so it's safe to call more than once.
     """
 
-    def __init__(self, dsn: str):
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        pool_min_size: int = 10,
+        pool_max_size: int = 10,
+        command_timeout: float | None = 5.0,
+    ):
+        """
+        Args:
+            pool_min_size, pool_max_size: forwarded to `asyncpg.
+                create_pool()`. Previously unset (asyncpg's own default of
+                10/10 applied silently, with no way to tune it for the
+                host application's actual concurrency needs).
+            command_timeout: seconds allowed for the pool to acquire a
+                connection and for a single query to complete. Previously
+                unset (no timeout at all), so a Postgres instance under
+                load, or a network partition after the initial TCP
+                handshake, could block a call indefinitely instead of
+                failing fast (see REL2-11).
+        """
         self.dsn = dsn
+        self.pool_min_size = pool_min_size
+        self.pool_max_size = pool_max_size
+        self.command_timeout = command_timeout
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         if self._pool is not None:
             return
-        self._pool = await asyncpg.create_pool(self.dsn)
+        self._pool = await asyncpg.create_pool(
+            self.dsn,
+            min_size=self.pool_min_size,
+            max_size=self.pool_max_size,
+            command_timeout=self.command_timeout,
+        )
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -55,7 +83,7 @@ class PostgresTenantStore:
 
     async def get(self, tenant_id: str) -> str | None:
         pool = self._require_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=self.command_timeout) as conn:
             row = await conn.fetchrow(
                 "SELECT store_id FROM tenants WHERE tenant_id = $1",
                 tenant_id,
@@ -64,7 +92,7 @@ class PostgresTenantStore:
 
     async def set(self, tenant_id: str, store_id: str) -> None:
         pool = self._require_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=self.command_timeout) as conn:
             await conn.execute(
                 """
                 INSERT INTO tenants (tenant_id, store_id)
@@ -78,7 +106,7 @@ class PostgresTenantStore:
 
     async def list_tenant_ids(self) -> list[str]:
         pool = self._require_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=self.command_timeout) as conn:
             rows = await conn.fetch("SELECT tenant_id FROM tenants ORDER BY tenant_id")
             return [row["tenant_id"] for row in rows]
 
@@ -86,14 +114,30 @@ class PostgresTenantStore:
 class PostgresModelRegistry:
     """See `PostgresTenantStore`'s docstring — same lifecycle contract."""
 
-    def __init__(self, dsn: str):
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        pool_min_size: int = 10,
+        pool_max_size: int = 10,
+        command_timeout: float | None = 5.0,
+    ):
+        """See `PostgresTenantStore.__init__` (REL2-11)."""
         self.dsn = dsn
+        self.pool_min_size = pool_min_size
+        self.pool_max_size = pool_max_size
+        self.command_timeout = command_timeout
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         if self._pool is not None:
             return
-        self._pool = await asyncpg.create_pool(self.dsn)
+        self._pool = await asyncpg.create_pool(
+            self.dsn,
+            min_size=self.pool_min_size,
+            max_size=self.pool_max_size,
+            command_timeout=self.command_timeout,
+        )
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -114,7 +158,7 @@ class PostgresModelRegistry:
 
     async def get(self, tenant_id: str) -> str | None:
         pool = self._require_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=self.command_timeout) as conn:
             row = await conn.fetchrow(
                 "SELECT model_id FROM tenant_models WHERE tenant_id = $1",
                 tenant_id,
@@ -123,7 +167,7 @@ class PostgresModelRegistry:
 
     async def set(self, tenant_id: str, model_id: str) -> None:
         pool = self._require_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=self.command_timeout) as conn:
             await conn.execute(
                 """
                 INSERT INTO tenant_models (tenant_id, model_id)

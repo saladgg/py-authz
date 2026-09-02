@@ -1,3 +1,6 @@
+import asyncio
+from collections import OrderedDict
+
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.exceptions import TenantNotFoundError
@@ -231,9 +234,12 @@ class Authz:
         """
         if isinstance(relation, Relation):
             relation_name = relation.name
-            if relation.resource_cls is None and resource_type is None:
-                raise TypeError("Relation is unbound; pass resource_type explicitly.")
-            type_name = resource_type or relation.resource_cls.type
+            if relation.resource_cls is None:
+                if not resource_type:
+                    raise TypeError("Relation is unbound; pass resource_type explicitly.")
+                type_name = resource_type
+            else:
+                type_name = resource_type or relation.resource_cls.type
         else:
             if not resource_type:
                 raise TypeError("resource_type is required when relation is a string.")
@@ -258,7 +264,15 @@ class Authz:
         if not self._engine.fga_client:
             raise RuntimeError("FGA client not configured")
 
-        syncer = ModelSync(self._engine.fga_client)
+        # `ModelSync` needs OpenFGA's real store-management API
+        # (`get_latest_model`/`create_store`, beyond the check/write/list
+        # surface `FGAClientProtocol` declares — see `core/protocols.py`)
+        # — i.e. a real `OpenFGAClient`, not `testkit.InMemoryFGAClient`.
+        # Calling `sync_model()` against a fake-backed `Authz` will raise
+        # `AttributeError` at runtime; that's an inherent, pre-existing
+        # limitation of `sync_model()` itself, not something this ignore
+        # introduces (see DX2-2).
+        syncer = ModelSync(self._engine.fga_client)  # type: ignore[arg-type]
         return await syncer.sync()
 
     async def grant(
@@ -290,6 +304,12 @@ class Authz:
                 }
             ]
         )
+        self._engine.record_write(
+            identity=identity,
+            relation=relation,
+            resource_object=_to_fga_object(resource),
+            operation="grant",
+        )
         await self._invalidate_cache(identity, relation, resource)
 
     async def revoke(
@@ -314,6 +334,12 @@ class Authz:
                     "object": _to_fga_object(resource),
                 }
             ],
+        )
+        self._engine.record_write(
+            identity=identity,
+            relation=relation,
+            resource_object=_to_fga_object(resource),
+            operation="revoke",
         )
         await self._invalidate_cache(identity, relation, resource)
 
@@ -340,6 +366,12 @@ class Authz:
         await self._engine.fga_client.write_tuples(writes=writes)
 
         for identity, relation, resource in tuples:
+            self._engine.record_write(
+                identity=identity,
+                relation=relation,
+                resource_object=_to_fga_object(resource),
+                operation="grant",
+            )
             await self._invalidate_cache(identity, relation, resource)
 
     async def revoke_many(
@@ -365,14 +397,24 @@ class Authz:
         await self._engine.fga_client.write_tuples(writes=[], deletes=deletes)
 
         for identity, relation, resource in tuples:
+            self._engine.record_write(
+                identity=identity,
+                relation=relation,
+                resource_object=_to_fga_object(resource),
+                operation="revoke",
+            )
             await self._invalidate_cache(identity, relation, resource)
 
     async def _invalidate_cache(self, identity, relation: str, resource) -> None:
         if not self._engine.cache:
             return
 
+        # Routed through `AuthzEngine.invalidate()` (rather than touching
+        # `self._engine.cache` directly) so this respects `cache_namespace`
+        # scoping — required once a cache is shared across engines/tenants
+        # (see SEC2-4).
         request = AuthzRequest(identity=identity, action=relation, resource=_to_resource(resource))
-        await self._engine.cache.delete(request.cache_key())
+        await self._engine.invalidate(request)
 
     async def aclose(self) -> None:
         """
@@ -395,19 +437,37 @@ class MultiTenantAuthz:
     Multi-tenant wrapper around Authz.
 
     `for_tenant()` caches one `Authz`/`AuthzEngine`/`OpenFGAClient` triple
-    per tenant for the lifetime of this object — every distinct tenant a
-    process ever resolves accumulates one open HTTP connection pool
-    (`OpenFGAClient`'s `httpx.AsyncClient`) permanently. This cache has no
-    eviction (no LRU, no TTL) by design: it's built for a small, bounded
-    tenant count (the common case — a fixed set of orgs/customers a
-    deployment serves), not an unbounded or highly dynamic one. If your
-    tenant count is large or grows over the life of a long-running
-    process, don't rely on this cache as-is — wrap `for_tenant()` with
-    your own bounded cache (an LRU keyed on `tenant_id`, calling
-    `authz.aclose()` on eviction), or resolve a fresh `Authz` per request
-    without caching at all if your `tenant_resolver` is cheap enough.
-    Call `aclose()` on process shutdown either way, to release whatever is
-    currently cached.
+    per tenant — every distinct tenant a process resolves holds one open
+    HTTP connection pool (`OpenFGAClient`'s `httpx.AsyncClient`) for as
+    long as it stays cached. This is an LRU cache bounded by
+    `max_cached_tenants` (default 1000): once full, resolving a new
+    tenant evicts the least-recently-used one, closing its `Authz`
+    (releasing its connection pool) in the background. Previously this
+    cache had no eviction at all, unconditionally unbounded by design —
+    combined with tenant auto-provisioning accepting any caller-supplied
+    `tenant_id` (see SEC2-3), that meant an attacker able to influence
+    `tenant_id` (e.g. via an unauthenticated `X-Tenant-ID` header) could
+    force unbounded process memory/socket growth. Pass
+    `max_cached_tenants=None` to opt back into the old unbounded
+    behavior — only appropriate for a genuinely small, fixed, trusted
+    tenant set. Call `aclose()` on process shutdown either way, to
+    release whatever is currently cached.
+
+    Args:
+        cache, audit_logger, metrics, raise_on_denied:
+            Forwarded into every `AuthzEngine` this builds (previously
+            unconfigurable here — see ARCH2-3). `cache`, if given, may
+            safely be one instance shared across every tenant: each
+            tenant's `AuthzEngine` is constructed with
+            `cache_namespace=store_id`, so cached decisions can never leak
+            across tenants even when they share one Redis/in-memory
+            backend (see SEC2-4).
+
+        max_cached_tenants (Optional[int]):
+            Maximum number of tenants' `Authz` instances kept cached at
+            once; least-recently-used tenant is evicted (and its
+            `Authz.aclose()` scheduled) when a new tenant would exceed
+            it. `None` disables the bound entirely. See SEC2-3.
     """
 
     def __init__(
@@ -417,13 +477,36 @@ class MultiTenantAuthz:
         model_id: str | None,
         tenant_resolver,
         tenant_manager=None,
+        cache=None,
+        audit_logger=None,
+        metrics=None,
+        raise_on_denied: bool = False,
+        max_cached_tenants: int | None = 1000,
     ):
         self.api_url = api_url
         self.model_id = model_id
         self.tenant_resolver = tenant_resolver
         self.tenant_manager = tenant_manager
+        self.cache = cache
+        self.audit_logger = audit_logger
+        self.metrics = metrics
+        self.raise_on_denied = raise_on_denied
+        self.max_cached_tenants = max_cached_tenants
 
-        self._cache = {}
+        self._cache: OrderedDict[str, Authz] = OrderedDict()
+        self._eviction_tasks: set[asyncio.Task] = set()
+        # Guards the whole check-then-act resolve/provision/construct
+        # sequence in `for_tenant()` (see ARCH2-9): without it, concurrent
+        # first-callers for the same uncached tenant could each resolve,
+        # provision, and construct their own `OpenFGAClient` — all but one
+        # silently discarded (and never closed) when they all write to
+        # `self._cache`. One lock for the whole cache (not per-tenant) is
+        # a deliberate simplicity/concurrency tradeoff: it briefly
+        # serializes concurrent *misses* for different tenants too, but
+        # avoids a second unbounded structure (one lock per distinct
+        # tenant_id ever seen) that would undermine SEC2-3's cache-size
+        # bound. Cache *hits* never touch this lock.
+        self._resolution_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         """
@@ -436,10 +519,27 @@ class MultiTenantAuthz:
             await authz.aclose()
         self._cache.clear()
 
+        # Any in-flight LRU-eviction closes (see `for_tenant()`) — awaited
+        # here so shutdown doesn't race ahead of them.
+        if self._eviction_tasks:
+            await asyncio.gather(*self._eviction_tasks, return_exceptions=True)
+
     async def for_tenant(self, tenant_id: str):
         if tenant_id in self._cache:
+            self._cache.move_to_end(tenant_id)  # mark as most-recently-used
             return self._cache[tenant_id]
 
+        async with self._resolution_lock:
+            # Re-check: another concurrent call may have finished
+            # resolving this exact tenant while we were waiting for the
+            # lock (see ARCH2-9).
+            if tenant_id in self._cache:
+                self._cache.move_to_end(tenant_id)
+                return self._cache[tenant_id]
+
+            return await self._resolve_and_cache_tenant(tenant_id)
+
+    async def _resolve_and_cache_tenant(self, tenant_id: str):
         try:
             store_id = await self.tenant_resolver.resolve(tenant_id)
         except TenantNotFoundError:
@@ -463,12 +563,28 @@ class MultiTenantAuthz:
             model_id=self.model_id,
         )
 
-        engine = AuthzEngine(fga_client=client)
-
-        from py_authz.api import Authz
+        engine = AuthzEngine(
+            fga_client=client,
+            cache=self.cache,
+            cache_namespace=store_id,
+            raise_on_denied=self.raise_on_denied,
+            audit_logger=self.audit_logger,
+            metrics=self.metrics,
+        )
 
         authz = Authz(engine)
 
         self._cache[tenant_id] = authz
+
+        if self.max_cached_tenants is not None:
+            while len(self._cache) > self.max_cached_tenants:
+                _evicted_id, evicted_authz = self._cache.popitem(last=False)
+                # Fire-and-forget: closing an evicted tenant's connection
+                # pool shouldn't add latency to *this* request. Tracked in
+                # `_eviction_tasks` so `aclose()` can wait for these on
+                # shutdown instead of racing ahead of them.
+                task = asyncio.ensure_future(evicted_authz.aclose())
+                self._eviction_tasks.add(task)
+                task.add_done_callback(self._eviction_tasks.discard)
 
         return authz

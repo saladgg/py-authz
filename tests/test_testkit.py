@@ -4,7 +4,7 @@ import pytest
 
 from py_authz.core.types import ContextualTuple, Identity
 from py_authz.modeling.base import Relation, ResourceModel
-from py_authz.modeling.registry import ModelRegistry
+from py_authz.modeling.registry import ResourceModelRegistry
 from py_authz.testkit import InMemoryFGAClient, make_fake_authz
 
 
@@ -19,7 +19,7 @@ def doc_registry():
         editor = Relation("editor", union=["owner"])
         viewer = Relation("viewer", union=["editor"])
 
-    reg = ModelRegistry()
+    reg = ResourceModelRegistry()
     reg.register(Document)
     return reg, Document
 
@@ -57,7 +57,7 @@ async def test_inherits_edges_resolved_same_as_union():
         editor = Relation("editor", inherits=["owner"])
         viewer = Relation("viewer", inherits=["editor"])
 
-    reg = ModelRegistry()
+    reg = ResourceModelRegistry()
     reg.register(InheritDoc)
     authz = make_fake_authz(model_registry=reg)
 
@@ -156,7 +156,7 @@ async def test_contextual_tuple_grants_access_only_for_that_request(doc_registry
 
 @pytest.mark.asyncio
 async def test_unknown_resource_type_returns_false_without_crashing():
-    client = InMemoryFGAClient(model_registry=ModelRegistry())
+    client = InMemoryFGAClient(model_registry=ResourceModelRegistry())
 
     # Empty registry, no tuples — must not raise.
     assert await client.check("user:1", "viewer", "unknown:1") is False
@@ -182,7 +182,7 @@ def hierarchy_registry():
         parent = Relation("parent", subjects=["folder"])
         viewer = Relation("viewer", from_parent=("parent", "viewer"))
 
-    reg = ModelRegistry()
+    reg = ResourceModelRegistry()
     reg.register(Folder)
     reg.register(Document)
     return reg, Folder, Document

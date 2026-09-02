@@ -137,6 +137,34 @@ class ServiceTimeout(ExternalServiceError):
     pass
 
 
+class LockAcquisitionTimeout(ExternalServiceError):
+    """
+    Raised when a distributed lock (`RedisLockManager`/`RedisLock`) could
+    not be acquired before its timeout elapsed — e.g. Redis is
+    unreachable, or the lock is held by another process for longer than
+    expected. Inherits from `ExternalServiceError` (rather than being a
+    bare `TimeoutError`) so it's caught by the same fail-open/fail-closed
+    handling in the FastAPI adapter and the same CLI exit-code bucket as
+    any other external-dependency failure (see ARCH2-4).
+    """
+
+    pass
+
+
+class IdentityProviderUnavailable(ExternalServiceError):
+    """
+    Raised when the identity provider itself — not a specific token — is
+    unreachable: an OIDC discovery-document or JWKS fetch failed due to a
+    network error, timeout, or non-2xx response. Distinct from
+    `AuthenticationError` (which means a specific token is invalid): this
+    signals the IdP dependency is down, which callers may want to
+    translate to a 503 rather than a 401 (see `KeycloakAuthMiddleware`
+    and ARCH2-7).
+    """
+
+    pass
+
+
 # ---------------------------------------------------------------------
 # Configuration Errors
 # ---------------------------------------------------------------------
@@ -149,6 +177,19 @@ class ConfigurationError(AuthzError):
     Example cases:
         - Missing OpenFGA credentials
         - Invalid configuration values
+    """
+
+    pass
+
+
+class ModelValidationError(ConfigurationError):
+    """
+    Raised when an OpenFGA authorization model fails validation —
+    malformed relation definitions, an unrecognized rewrite rule, or a
+    circular relation dependency (see `DefaultModelValidator`/
+    `detect_cycles`). This is a config-shaped mistake (an incorrectly
+    declared model), not a runtime bug, so it inherits from
+    `ConfigurationError` and shares its CLI exit code (see ARCH2-5).
     """
 
     pass

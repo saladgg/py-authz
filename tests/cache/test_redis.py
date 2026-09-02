@@ -28,12 +28,31 @@ def redis_cache(monkeypatch):
 
     mock = MockRedis()
 
-    cache = RedisCache()
+    # `client=` (ARCH2-18) — the supported way to inject a test/host-owned
+    # client, replacing the old private-attribute workaround.
+    return RedisCache(client=mock)
 
-    # inject mock client
-    cache._client = mock
 
-    return cache
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-18: `client=` lets a caller inject an
+# existing Redis client instead of `RedisCache` always constructing its
+# own from `url`.
+# ----------------------------------------------------------------------
+
+
+def test_redis_cache_client_injection_skips_url_construction(monkeypatch):
+    from py_authz.cache import redis as redis_cache_module
+    from py_authz.cache.redis import RedisCache
+
+    def _fail_from_url(url):
+        raise AssertionError("from_url must not be called when client= is given")
+
+    monkeypatch.setattr(redis_cache_module.redis, "from_url", _fail_from_url)
+
+    mock = MockRedis()
+    cache = RedisCache(client=mock)
+
+    assert cache._client is mock
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,10 @@ _install_fake_jwt()
 import jwt  # noqa: E402
 
 from py_authz.adapters.oidc import OIDCJWTValidator  # noqa: E402
-from py_authz.core.exceptions import AuthenticationError  # noqa: E402
+from py_authz.core.exceptions import (  # noqa: E402
+    AuthenticationError,
+    IdentityProviderUnavailable,
+)
 
 
 class _FakeResponse:
@@ -158,3 +161,115 @@ async def test_validate_raises_clear_message_on_audience_mismatch(monkeypatch, p
 
     with pytest.raises(AuthenticationError, match="audience mismatch"):
         await validator.validate("some-token")
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-7: the IdP itself being unreachable
+# (network error / timeout / non-2xx) used to propagate as a raw httpx
+# exception, crashing every authenticated request with an unhandled 500
+# for as long as the outage lasted.
+# ----------------------------------------------------------------------
+
+
+class FailingHTTPClient:
+    """Fake `httpx.AsyncClient` whose every `get()` raises."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+    async def get(self, url):
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_raises_identity_provider_unavailable(patch_async_client):
+    patch_async_client(FailingHTTPClient(httpx.ConnectError("boom")))
+
+    validator = OIDCJWTValidator(issuer="https://auth.example.com", audience="aud")
+
+    with pytest.raises(IdentityProviderUnavailable):
+        await validator._resolve_jwks_url()
+
+
+@pytest.mark.asyncio
+async def test_jwks_fetch_failure_raises_identity_provider_unavailable(patch_async_client):
+    patch_async_client(FailingHTTPClient(httpx.TimeoutException("boom")))
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+    )
+
+    with pytest.raises(IdentityProviderUnavailable):
+        await validator._fetch_jwks()
+
+
+@pytest.mark.asyncio
+async def test_jwks_fetch_http_status_error_raises_identity_provider_unavailable(
+    patch_async_client,
+):
+    class ErroringResponseClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, url):
+            return _FakeResponse({}, status_code=503)
+
+    patch_async_client(ErroringResponseClient())
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+    )
+
+    with pytest.raises(IdentityProviderUnavailable):
+        await validator._fetch_jwks()
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for SEC2-2: `to_identity()` now carries the full
+# decoded token payload as `Identity.attributes`, so a caller can build a
+# tenant resolver off a verified claim instead of a raw request header.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_raises_clean_error_when_kid_missing(monkeypatch, patch_async_client):
+    """
+    Regression test for DX2-5: a token with no `kid` header (valid per
+    spec, or trivially crafted) used to raise a bare, uncaught `KeyError`
+    instead of `AuthenticationError`.
+    """
+    patch_async_client(
+        RoutedHTTPClient({"https://auth.example.com/keys": {"keys": [{"kid": "k1"}]}})
+    )
+    monkeypatch.setattr(jwt, "get_unverified_header", lambda t: {"alg": "RS256"})  # no "kid"
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+    )
+
+    with pytest.raises(AuthenticationError, match="missing kid"):
+        await validator.validate("some-token")
+
+
+def test_to_identity_carries_full_payload_as_attributes():
+    validator = OIDCJWTValidator(issuer="https://auth.example.com", audience="aud")
+
+    identity = validator.to_identity({"sub": "abc", "tenant_id": "acme"})
+
+    assert identity.id == "user:abc"
+    assert identity.attributes == {"sub": "abc", "tenant_id": "acme"}

@@ -31,8 +31,8 @@ from examples import models  # noqa: F401 — register models
 from examples.models import Document
 from py_authz import Identity
 from py_authz.api import MultiTenantAuthz
-from py_authz.core.exceptions import TenantNotFoundError
 from py_authz.core.tenant_manager import TenantManager
+from py_authz.core.tenant_resolver import StoreBackedResolver
 from py_authz.core.tenant_store import InMemoryTenantStore
 
 OPENFGA_URL = os.environ.get("FGA_API_URL", "http://localhost:8082")
@@ -44,8 +44,10 @@ async def main() -> None:
     tenant_store = InMemoryTenantStore()
     manager = TenantManager(api_url=OPENFGA_URL, tenant_store=tenant_store)
 
-    # Resolver reads from the same store the manager writes to.
-    resolver = _StoreBackedResolver(tenant_store)
+    # Resolver reads from the same store the manager writes to. See
+    # ARCH2-14: this used to be a hand-rolled class in this file; now
+    # shipped once in the library itself.
+    resolver = StoreBackedResolver(tenant_store)
 
     mt = MultiTenantAuthz(
         api_url=OPENFGA_URL,
@@ -68,21 +70,6 @@ async def main() -> None:
     print("acme:   alice editor?", await acme.enforce("editor", alice, report.to_resource()))
     print("globex: alice editor?", await globex.enforce("editor", alice, report.to_resource()))
     print("globex: alice viewer?", await globex.enforce("viewer", alice, report.to_resource()))
-
-
-class _StoreBackedResolver:
-    """TenantResolver that reads from a TenantStore — raises
-    `TenantNotFoundError` on unknown tenants so `MultiTenantAuthz` falls
-    back to the manager (any other exception would propagate instead)."""
-
-    def __init__(self, tenant_store: InMemoryTenantStore) -> None:
-        self._store = tenant_store
-
-    async def resolve(self, tenant_id: str) -> str:
-        store_id = await self._store.get(tenant_id)
-        if store_id is None:
-            raise TenantNotFoundError(f"Unknown tenant: {tenant_id}")
-        return store_id
 
 
 if __name__ == "__main__":

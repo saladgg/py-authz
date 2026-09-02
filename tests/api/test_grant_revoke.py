@@ -4,6 +4,7 @@ from py_authz.api import Authz
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.types import AuthzRequest, Identity, Resource
 from py_authz.modeling.base import ResourceModel
+from tests.conftest import RecordingAuditLogger
 
 
 class GrantRevokeDoc(ResourceModel):
@@ -249,3 +250,109 @@ async def test_grant_without_cache_configured_does_not_raise(mock_fga_client, id
     # Should not raise even though there's no cache to invalidate.
     await authz.grant(identity, "viewer", resource)
     await authz.revoke(identity, "viewer", resource)
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-2: grant/revoke (and their *_many
+# variants) bypass `enforce()` entirely, so they previously never
+# produced an audit event or a metrics counter — the highest-value
+# events for a compliance trail (who granted/revoked what) were silently
+# unrecorded.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grant_records_audit_event_and_metrics(mock_fga_client, identity, resource):
+    from py_authz.core.metrics import Metrics
+
+    audit = RecordingAuditLogger()
+    metrics = Metrics()
+    engine = AuthzEngine(
+        fga_client=mock_fga_client, cache=None, audit_logger=audit, metrics=metrics
+    )
+    authz = Authz(engine)
+
+    await authz.grant(identity, "viewer", resource)
+    await engine.flush_audit_logs()
+
+    assert len(audit.events) == 1
+    event = audit.events[0]
+    assert event.allowed is True
+    assert event.user_id == identity.id
+    assert event.action == "viewer"
+    assert event.resource == resource.to_fga_object()
+    assert event.reason_data == {"operation": "grant", "relation": "viewer"}
+    assert metrics.counters.get("authz_grant_total") == 1
+
+
+@pytest.mark.asyncio
+async def test_revoke_records_audit_event_and_metrics(mock_fga_client, identity, resource):
+    from py_authz.core.metrics import Metrics
+
+    audit = RecordingAuditLogger()
+    metrics = Metrics()
+    engine = AuthzEngine(
+        fga_client=mock_fga_client, cache=None, audit_logger=audit, metrics=metrics
+    )
+    authz = Authz(engine)
+
+    await authz.revoke(identity, "viewer", resource)
+    await engine.flush_audit_logs()
+
+    assert len(audit.events) == 1
+    assert audit.events[0].reason_data == {"operation": "revoke", "relation": "viewer"}
+    assert metrics.counters.get("authz_revoke_total") == 1
+
+
+@pytest.mark.asyncio
+async def test_grant_many_records_one_audit_event_per_tuple(mock_fga_client, identity):
+    from py_authz.core.metrics import Metrics
+
+    audit = RecordingAuditLogger()
+    metrics = Metrics()
+    engine = AuthzEngine(
+        fga_client=mock_fga_client, cache=None, audit_logger=audit, metrics=metrics
+    )
+    authz = Authz(engine)
+
+    users = [Identity(id=f"user:{i}") for i in range(3)]
+    res = Resource(type="document", id="42")
+
+    await authz.grant_many([(u, "viewer", res) for u in users])
+    await engine.flush_audit_logs()
+
+    assert len(audit.events) == 3
+    assert metrics.counters.get("authz_grant_total") == 3
+
+
+@pytest.mark.asyncio
+async def test_revoke_many_records_one_audit_event_per_tuple(mock_fga_client, identity):
+    from py_authz.core.metrics import Metrics
+
+    audit = RecordingAuditLogger()
+    metrics = Metrics()
+    engine = AuthzEngine(
+        fga_client=mock_fga_client, cache=None, audit_logger=audit, metrics=metrics
+    )
+    authz = Authz(engine)
+
+    users = [Identity(id=f"user:{i}") for i in range(2)]
+    res = Resource(type="document", id="99")
+
+    await authz.revoke_many([(u, "editor", res) for u in users])
+    await engine.flush_audit_logs()
+
+    assert len(audit.events) == 2
+    assert metrics.counters.get("authz_revoke_total") == 2
+
+
+@pytest.mark.asyncio
+async def test_grant_without_audit_logger_or_metrics_does_not_raise(
+    mock_fga_client, identity, resource
+):
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None)
+    authz = Authz(engine)
+
+    # Neither audit_logger nor metrics configured — record_write() must
+    # be a safe no-op, not raise.
+    await authz.grant(identity, "viewer", resource)

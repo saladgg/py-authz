@@ -1,6 +1,7 @@
 import pytest
 
 from py_authz.cli.config import get_env
+from py_authz.core.exceptions import ConfigurationError
 
 
 def test_get_env_returns_value(monkeypatch):
@@ -18,5 +19,5 @@ def test_get_env_returns_default(monkeypatch):
 def test_get_env_required_raises(monkeypatch):
     monkeypatch.delenv("MISSING_VAR", raising=False)
 
-    with pytest.raises(RuntimeError, match="Missing required"):
+    with pytest.raises(ConfigurationError, match="Missing required"):
         get_env("MISSING_VAR", required=True)

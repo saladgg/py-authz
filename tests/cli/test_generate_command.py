@@ -3,6 +3,7 @@ import json
 import pytest
 
 from py_authz.cli.commands.generate import generate_command
+from py_authz.core.exceptions import ModelValidationError
 from py_authz.modeling.base import Relation, ResourceModel
 from py_authz.modeling.registry import registry
 
@@ -55,7 +56,7 @@ def _remove_cyclic_model_from_global_registry():
 def test_generate_command_validates_by_default_and_rejects_cycles():
     registry.register(CyclicA)
 
-    with pytest.raises(ValueError, match="Circular"):
+    with pytest.raises(ModelValidationError, match="Circular"):
         generate_command(output=None)
 
 

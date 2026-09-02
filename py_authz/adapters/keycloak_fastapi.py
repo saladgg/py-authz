@@ -2,7 +2,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from py_authz.adapters.keycloak import KeycloakJWTValidator
-from py_authz.core.exceptions import AuthenticationError
+from py_authz.core.exceptions import AuthenticationError, ExternalServiceError
 from py_authz.utils.deps import require_fast_api
 
 _, HTTPException, status = require_fast_api()
@@ -38,6 +38,17 @@ class KeycloakAuthMiddleware(BaseHTTPMiddleware):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication",
+            ) from e
+
+        except ExternalServiceError as e:
+            # The identity provider itself is unreachable (e.g.
+            # `IdentityProviderUnavailable` from a failed discovery/JWKS
+            # fetch) — distinct from "this token is invalid": a 503, not
+            # a 401, so an IdP outage isn't indistinguishable from a bad
+            # credential (see ARCH2-7).
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Identity provider unavailable",
             ) from e
 
         return await call_next(request)

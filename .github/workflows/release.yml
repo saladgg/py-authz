@@ -34,7 +34,15 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: pip install python-semantic-release build
+        # Pinned (see REL2-12): this job holds `contents: write` and cuts
+        # every real release — an unpinned `pip install` here means an
+        # upstream major-version bump (python-semantic-release has a
+        # track record of breaking CLI/config compatibility across
+        # majors) could silently break the release pipeline with no
+        # signal until an actual release attempt fails, and this repo's
+        # own `uv.lock` doesn't govern this workflow's Python environment
+        # at all. Bump deliberately via PR.
+        run: pip install python-semantic-release==10.6.2 build==1.6.0
 
       - name: Capture tag before release
         id: before

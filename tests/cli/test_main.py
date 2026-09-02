@@ -129,6 +129,8 @@ def test_main_migrate_invokes_migrate_command(patch_cli_entry):
             "backend": "redis",
             "conn": "redis://fake",
             "tenant_ids": None,
+            "dry_run": False,
+            "yes": False,
         }
     ]
 
@@ -137,7 +139,29 @@ def test_main_migrate_with_specific_tenants(patch_cli_entry):
     _run_main(["migrate", "--tenant", "t1", "--tenant", "t2", "--api-url", "http://fake"])
 
     assert patch_cli_entry["migrate"] == [
-        {"api_url": "http://fake", "backend": "memory", "conn": None, "tenant_ids": ["t1", "t2"]}
+        {
+            "api_url": "http://fake",
+            "backend": "memory",
+            "conn": None,
+            "tenant_ids": ["t1", "t2"],
+            "dry_run": False,
+            "yes": False,
+        }
+    ]
+
+
+def test_main_migrate_forwards_dry_run_and_yes_flags(patch_cli_entry):
+    _run_main(["migrate", "--all-tenants", "--api-url", "http://fake", "--dry-run", "--yes"])
+
+    assert patch_cli_entry["migrate"] == [
+        {
+            "api_url": "http://fake",
+            "backend": "memory",
+            "conn": None,
+            "tenant_ids": None,
+            "dry_run": True,
+            "yes": True,
+        }
     ]
 
 

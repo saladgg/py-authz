@@ -123,15 +123,25 @@ class AuthzRequest:
 
     def cache_key(self) -> str:
         """
-        Generate a deterministic cache key for this request.
+        Generate a deterministic, collision-free cache key for this
+        request.
+
+        Each field is length-prefixed before joining. A naive
+        `":".join(...)` (this method's previous implementation) is NOT
+        injective: `Resource.id`'s own docstring recommends colon-bearing
+        IDs like "doc:456", so e.g. `(user="user:123", action="viewer",
+        resource=Resource("document", "doc:456"))` and `(user="user:123",
+        action="viewer:document", resource=Resource("doc", "456"))` would
+        collide onto the identical joined string — letting one request's
+        cached decision silently authorize a completely unrelated one.
+        Length-prefixing each field makes that collision impossible.
 
         Returns:
-            str: Cache key string
-
-        Example:
-            "user:123:viewer:document:456"
+            str: Opaque cache key string. Do not attempt to parse it back
+            apart or rely on its exact format — only on its uniqueness.
         """
-        return f"{self.identity.id}:{self.action}:{self.resource.type}:{self.resource.id}"
+        fields = (self.identity.id, self.action, self.resource.type, self.resource.id)
+        return "|".join(f"{len(field)}:{field}" for field in fields)
 
     def is_cacheable(self) -> bool:
         """
@@ -156,5 +166,17 @@ class AuthzExplanation:
 
 @dataclass
 class BulkAuthzResult:
+    """
+    One request's outcome from `AuthzEngine.bulk_enforce()`.
+
+    `allowed` is `False` and `error` is set when this specific request's
+    `enforce()` call raised (e.g. a transient `ExternalServiceError`) —
+    check `error is not None` to distinguish "denied" from "failed to
+    decide". See DX2-1: `bulk_enforce()` used to let such an exception
+    propagate out of the whole batch (as an unhandled `ExceptionGroup`,
+    not an `AuthzError`), discarding every already-completed result.
+    """
+
     request: AuthzRequest
     allowed: bool
+    error: Exception | None = None

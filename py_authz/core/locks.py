@@ -3,6 +3,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from py_authz.core.exceptions import LockAcquisitionTimeout
 from py_authz.core.logging import logger
 from py_authz.utils.deps import require_redis
 
@@ -37,7 +38,12 @@ class RedisLock:
             lock_id (str)
 
         Raises:
-            TimeoutError if lock not acquired
+            LockAcquisitionTimeout: if the lock isn't acquired within
+                `timeout` (an `ExternalServiceError` subclass — not a bare
+                `TimeoutError` — so it's handled the same way as any other
+                external-dependency failure by the FastAPI adapter's
+                fail-open/fail-closed policy and the CLI's exit-code
+                mapping; see ARCH2-4).
         """
         lock_id = str(uuid.uuid4())
         elapsed = 0.0
@@ -56,7 +62,7 @@ class RedisLock:
             await asyncio.sleep(retry_interval)
             elapsed += retry_interval
 
-        raise TimeoutError(f"Failed to acquire lock: {key}")
+        raise LockAcquisitionTimeout(f"Failed to acquire lock: {key}", service="redis-lock")
 
     async def release(self, key: str, lock_id: str):
         """
@@ -100,12 +106,31 @@ class RedisLockManager:
         self._lock = RedisLock(client)
 
     @asynccontextmanager
-    async def lock(self, key: str, ttl: int = 30, *, renew_interval: float | None = None):
+    async def lock(
+        self,
+        key: str,
+        ttl: int = 30,
+        *,
+        renew_interval: float | None = None,
+        acquire_timeout: float = 5,
+        acquire_retry_interval: float = 0.1,
+    ):
         """
         Args:
             key: lock key.
 
             ttl: initial (and renewed) lock TTL in seconds.
+
+            acquire_timeout: how long (seconds) to keep retrying
+                acquisition before raising `LockAcquisitionTimeout`.
+                Previously hardcoded to `RedisLock.acquire()`'s own
+                default (5s) with no way for a caller to tune it — e.g. a
+                caller that would rather fail fast, or one that knows its
+                critical sections are contended and wants to wait longer
+                (see ARCH2-4).
+
+            acquire_retry_interval: how often (seconds) to retry
+                acquisition while waiting.
 
             renew_interval: how often (seconds) to renew the lock's TTL
                 while the `async with` body is running. Defaults to
@@ -125,7 +150,9 @@ class RedisLockManager:
                 section idempotent (as `TenantManager.provision()` does,
                 via its own re-check-under-lock).
         """
-        lock_id = await self._lock.acquire(key, ttl=ttl)
+        lock_id = await self._lock.acquire(
+            key, ttl=ttl, retry_interval=acquire_retry_interval, timeout=acquire_timeout
+        )
         interval = renew_interval if renew_interval is not None else max(ttl / 3, 0.01)
 
         stop_event = asyncio.Event()
@@ -136,7 +163,25 @@ class RedisLockManager:
                     await asyncio.wait_for(stop_event.wait(), timeout=interval)
                     return  # stop_event was set — body finished, nothing more to do
                 except TimeoutError:
-                    renewed = await self._lock.renew(key, lock_id, ttl)
+                    try:
+                        renewed = await self._lock.renew(key, lock_id, ttl)
+                    except Exception:
+                        # A *transient* failure renewing (e.g. Redis
+                        # unreachable for this one call) is not the same
+                        # as "the lock is legitimately gone" — the former
+                        # used to be indistinguishable from the latter
+                        # (both fell through the bare `except TimeoutError`
+                        # above uncaught, silently killing the renewal
+                        # task with no warning until the critical section
+                        # finally exited — far too late to matter). Log
+                        # immediately and retry on the next interval
+                        # instead of giving up on the first hiccup (see
+                        # REL2-7).
+                        logger.exception(
+                            f"lock_renewal_error key={key} — transient failure renewing; "
+                            "will retry next interval"
+                        )
+                        continue
                     if not renewed:
                         logger.warning(
                             f"lock_renewal_failed key={key} — lock no longer held; "

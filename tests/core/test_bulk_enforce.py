@@ -75,3 +75,46 @@ async def test_bulk_enforce_respects_concurrency_limit():
 async def test_bulk_enforce_empty_list_returns_empty(engine):
     results = await engine.bulk_enforce([])
     assert results == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_enforce_captures_per_request_errors_without_losing_others():
+    """
+    Regression test for DX2-1: a failure on one request must not raise an
+    ExceptionGroup out of bulk_enforce, and must not discard the results
+    already computed for the other requests in the batch.
+    """
+
+    class FlakyOpenFGAClient(MockOpenFGAClient):
+        async def check(self, user, relation, object, *, contextual_tuples=None, context=None):
+            if object == "doc:2":
+                raise RuntimeError("transient upstream failure")
+            return await super().check(
+                user, relation, object, contextual_tuples=contextual_tuples, context=context
+            )
+
+    fga = FlakyOpenFGAClient(allowed=True)
+    engine = AuthzEngine(fga_client=fga, cache=None)
+
+    requests = [
+        AuthzRequest(
+            identity=Identity(id="user:1"),
+            action="view",
+            resource=Resource(type="doc", id=str(i)),
+        )
+        for i in range(4)
+    ]
+
+    results = await engine.bulk_enforce(requests)  # must not raise
+
+    assert len(results) == 4
+    failed = [r for r in results if r.error is not None]
+    succeeded = [r for r in results if r.error is None]
+
+    assert len(failed) == 1
+    assert isinstance(failed[0].error, RuntimeError)
+    assert failed[0].allowed is False
+    assert failed[0].request.resource.id == "2"
+
+    assert len(succeeded) == 3
+    assert all(r.allowed is True for r in succeeded)

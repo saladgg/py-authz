@@ -1,11 +1,31 @@
+from py_authz.core.exceptions import ConfigurationError
 from py_authz.utils.deps import require_redis
 
 redis = require_redis()
 
 
+def _build_client(url: str | None, client):
+    """Shared `url`-or-`client` resolution for `RedisTenantStore`/
+    `RedisModelRegistry` (see ARCH2-18)."""
+    if client is not None:
+        return client
+    if url is not None:
+        return redis.from_url(url)
+    raise ConfigurationError("Either `url` or `client` must be provided")
+
+
 class RedisTenantStore:
-    def __init__(self, url: str):
-        self.client = redis.from_url(url)
+    def __init__(self, url: str | None = None, *, client=None):
+        """
+        Args:
+            url: Redis connection URL. Ignored if `client` is given.
+            client: an existing `redis.asyncio.Redis`-shaped client to use
+                instead of constructing one from `url` — lets a host app
+                that already owns a Redis connection pool hand it over
+                instead of this class always opening its own (see
+                ARCH2-18).
+        """
+        self.client = _build_client(url, client)
 
     async def get(self, tenant_id: str) -> str | None:
         value = await self.client.get(f"tenant:{tenant_id}:store")
@@ -49,10 +69,23 @@ class RedisTenantStore:
 
         return tenant_ids
 
+    async def close(self) -> None:
+        """
+        Close the underlying Redis connection.
+
+        Added for symmetry with `PostgresTenantStore`/`RedisModelRegistry`
+        — lets callers (e.g. the CLI's `migrate` command, see REL2-8)
+        release the connection via `hasattr(store, "close")` duck-typing
+        without special-casing this class.
+        """
+        await self.client.aclose()
+
 
 class RedisModelRegistry:
-    def __init__(self, url: str):
-        self.client = redis.from_url(url)
+    def __init__(self, url: str | None = None, *, client=None):
+        """See `RedisTenantStore.__init__` — same `client=` injection
+        option (ARCH2-18)."""
+        self.client = _build_client(url, client)
 
     async def get(self, tenant_id: str) -> str | None:
         value = await self.client.get(f"tenant:{tenant_id}:model")
@@ -64,3 +97,7 @@ class RedisModelRegistry:
 
     async def set(self, tenant_id: str, model_id: str, ex: int | None = None) -> None:
         await self.client.set(f"tenant:{tenant_id}:model", model_id, ex=ex)
+
+    async def close(self) -> None:
+        """See `RedisTenantStore.close()` (REL2-8)."""
+        await self.client.aclose()

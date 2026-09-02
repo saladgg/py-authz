@@ -18,6 +18,15 @@ class ModelSync:
     def __init__(self, fga_client: OpenFGAClient, validator: DefaultModelValidator | None = None):
         self.fga_client = fga_client
         self.validator = validator
+        #: Set by `sync()`: whether the just-completed call actually
+        #: uploaded a new model (`True`) or found the current one already
+        #: matched and reused it (`False`). `None` before `sync()` is ever
+        #: called. This is what `MigrationManager` reads instead of
+        #: comparing against its own separately-tracked "current model"
+        #: (see ARCH2-17) — `sync()` already knows the answer from its own
+        #: real-time diff against OpenFGA, so a second, independently-
+        #: updated source of truth for the same fact can only drift.
+        self.last_sync_changed: bool | None = None
 
     # -------------------------------------------------------------------
     # Public API
@@ -52,6 +61,7 @@ class ModelSync:
             # on the *write* endpoint's response, see `_upload_model`
             # below). Reading the wrong key here silently defeated this
             # whole no-op path against a real OpenFGA server.
+            self.last_sync_changed = False
             return current_model["id"]
 
         # -------------------------------------------------
@@ -60,6 +70,7 @@ class ModelSync:
         model_id = await self._upload_model(new_model)
 
         self.fga_client.model_id = model_id
+        self.last_sync_changed = True
 
         return model_id
 

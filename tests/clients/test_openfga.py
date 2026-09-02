@@ -276,6 +276,7 @@ async def test_request_maps_timeout_to_service_timeout():
         store_id="s1",
         model_id=None,
         http_client=TimeoutRequestClient(),
+        max_retries=0,  # disable retry for deterministic test
     )
 
     with pytest.raises(ServiceTimeout):
@@ -289,10 +290,113 @@ async def test_request_maps_connect_error_to_service_unavailable():
         store_id="s1",
         model_id=None,
         http_client=ConnectErrorRequestClient(),
+        max_retries=0,
     )
 
     with pytest.raises(ServiceUnavailable):
         await client.create_store(name="t")
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for REL2-3: `_request()` (behind `create_store`/
+# `get_latest_model`/`list_objects`/`write_tuples`) previously had no
+# retry at all, unlike `check()`.
+# ----------------------------------------------------------------------
+
+
+class FlakyRequestClient:
+    """Fails once, then succeeds — mirrors `FlakyClient` for `check()`."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def request(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise httpx.TimeoutException("Temporary failure")
+        return MockResponse({"id": "store-abc"})
+
+
+@pytest.mark.asyncio
+async def test_request_retries_and_succeeds():
+    flaky = FlakyRequestClient()
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id=None,
+        model_id=None,
+        http_client=flaky,
+        max_retries=1,
+    )
+
+    store_id = await client.create_store(name="t")
+
+    assert store_id == "store-abc"
+    assert flaky.calls == 2  # retried once
+
+
+class UnexpectedErrorRequestClient:
+    async def request(self, *args, **kwargs):
+        raise ValueError("malformed response")
+
+    async def aclose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_request_maps_unexpected_exception_to_external_service_error():
+    """The catch-all fallback (matching `check()`'s own) — a non-httpx
+    exception must still surface as an `ExternalServiceError`, not raw."""
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s1",
+        model_id=None,
+        http_client=UnexpectedErrorRequestClient(),
+    )
+
+    with pytest.raises(ExternalServiceError):
+        await client.create_store(name="t")
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for ARCH2-8: `delete_store()` is what lets
+# `TenantManager.provision()` clean up an orphaned store on partial
+# failure. A DELETE response typically has no body (204 No Content) —
+# `_request()` must not choke trying to `.json()`-decode an empty one.
+# ----------------------------------------------------------------------
+
+
+class NoContentResponse:
+    status_code = 204
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        raise ValueError("no JSON object could be decoded")
+
+
+class DeleteRecordingClient:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    async def request(self, method, path, json=None):
+        self.calls.append((method, path))
+        return NoContentResponse()
+
+
+@pytest.mark.asyncio
+async def test_delete_store_sends_delete_and_tolerates_empty_body():
+    http = DeleteRecordingClient()
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id=None,
+        model_id=None,
+        http_client=http,
+    )
+
+    await client.delete_store("store-abc")  # must not raise
+
+    assert http.calls == [("DELETE", "/stores/store-abc")]
 
 
 @pytest.mark.asyncio

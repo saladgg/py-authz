@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from py_authz.core import tenant_manager as tm_module
+from py_authz.core.exceptions import InvalidAuthzRequest
 from py_authz.core.tenant_manager import TenantManager
 from py_authz.core.tenant_store import InMemoryTenantStore
 
@@ -15,8 +16,10 @@ class FakeOpenFGAClient:
         self.store_id = store_id
         self.model_id = model_id
         self.create_store_calls: list[str] = []
+        self.delete_store_calls: list[str] = []
         self.aclose_called = False
         self.create_store_error: Exception | None = None
+        self.delete_store_error: Exception | None = None
         FakeOpenFGAClient.instances.append(self)
 
     async def create_store(self, name):
@@ -24,6 +27,11 @@ class FakeOpenFGAClient:
         if self.create_store_error is not None:
             raise self.create_store_error
         return f"store-for-{name}"
+
+    async def delete_store(self, store_id):
+        self.delete_store_calls.append(store_id)
+        if self.delete_store_error is not None:
+            raise self.delete_store_error
 
     async def aclose(self):
         self.aclose_called = True
@@ -118,8 +126,40 @@ async def test_provision_closes_client_when_sync_raises(monkeypatch):
     with pytest.raises(RuntimeError, match="sync failed"):
         await mgr.provision("t1")
 
-    assert FakeOpenFGAClient.instances[0].aclose_called is True
+    client = FakeOpenFGAClient.instances[0]
+    assert client.aclose_called is True
     assert await store.get("t1") is None  # mapping not persisted on failure
+    # Regression coverage for ARCH2-8: `create_store()` succeeded before
+    # `sync()` failed, so the orphaned store must be cleaned up.
+    assert client.delete_store_calls == ["store-for-t1"]
+
+
+@pytest.mark.asyncio
+async def test_provision_cleanup_failure_does_not_mask_original_exception(monkeypatch):
+    """
+    If the `delete_store()` cleanup call itself fails, the *original*
+    exception (why provisioning failed in the first place) must still be
+    what propagates — the cleanup is best-effort.
+    """
+    store = InMemoryTenantStore()
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    original_init = FakeModelSync.__init__
+
+    def init_with_error(self, fga_client):
+        original_init(self, fga_client)
+        self.sync_error = RuntimeError("sync failed")
+
+    monkeypatch.setattr(FakeModelSync, "__init__", init_with_error)
+
+    async def failing_delete_store(self, store_id):
+        self.delete_store_calls.append(store_id)
+        raise RuntimeError("cleanup also failed")
+
+    monkeypatch.setattr(FakeOpenFGAClient, "delete_store", failing_delete_store)
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        await mgr.provision("t1")
 
 
 @pytest.mark.asyncio
@@ -142,8 +182,12 @@ async def test_provision_propagates_and_closes_client_when_create_store_raises(m
     with pytest.raises(RuntimeError, match="cannot reach openfga"):
         await mgr.provision("t1")
 
-    assert FakeOpenFGAClient.instances[0].aclose_called is True
+    client = FakeOpenFGAClient.instances[0]
+    assert client.aclose_called is True
     assert await store.get("t1") is None
+    # store_id was never assigned (create_store itself failed) — nothing
+    # to clean up.
+    assert client.delete_store_calls == []
     assert FakeModelSync.instances == []  # never reached model sync
 
 
@@ -209,3 +253,51 @@ async def test_provision_rechecks_store_under_lock():
 
     assert result == "other-workers-store"
     assert FakeOpenFGAClient.instances == []  # no store created
+
+
+# -------------------------------------------------------------------
+# tenant_id validation (SEC2-3)
+# -------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provision_rejects_tenant_id_with_disallowed_characters():
+    """
+    Regression test for SEC2-3: `tenant_id` can originate from
+    request-derived input (e.g. `X-Tenant-ID` via `MultiTenantAuthz`) —
+    an attacker-controlled string must be rejected before any lookup,
+    lock acquisition, or store creation is attempted.
+    """
+    store = InMemoryTenantStore()
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    with pytest.raises(InvalidAuthzRequest):
+        await mgr.provision("../etc/passwd")
+
+    assert FakeOpenFGAClient.instances == []
+
+
+@pytest.mark.asyncio
+async def test_provision_accepts_ordinary_tenant_ids():
+    store = InMemoryTenantStore()
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    for tenant_id in ["t1", "acme-corp", "tenant_42", "a.b.c"]:
+        result = await mgr.provision(tenant_id)
+        assert result == f"store-for-{tenant_id}"
+
+
+@pytest.mark.asyncio
+async def test_provision_honors_custom_tenant_id_pattern():
+    store = InMemoryTenantStore()
+    mgr = TenantManager(
+        api_url="http://fake",
+        tenant_store=store,
+        tenant_id_pattern=r"^tenant-\d+$",
+    )
+
+    result = await mgr.provision("tenant-42")
+    assert result == "store-for-tenant-42"
+
+    with pytest.raises(InvalidAuthzRequest):
+        await mgr.provision("not-matching")

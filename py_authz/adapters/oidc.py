@@ -4,7 +4,7 @@ from typing import Any
 import httpx
 import jwt  # type: ignore[import-not-found]
 
-from py_authz.core.exceptions import AuthenticationError
+from py_authz.core.exceptions import AuthenticationError, IdentityProviderUnavailable
 from py_authz.core.types import Identity
 
 
@@ -86,19 +86,39 @@ class OIDCJWTValidator:
             return self._explicit_jwks_url
 
         if self._discovery is None:
-            async with httpx.AsyncClient() as client:
-                res = await client.get(f"{self.issuer}/.well-known/openid-configuration")
-                res.raise_for_status()
-                self._discovery = res.json()
+            try:
+                async with httpx.AsyncClient() as client:
+                    res = await client.get(f"{self.issuer}/.well-known/openid-configuration")
+                    res.raise_for_status()
+                    self._discovery = res.json()
+            except httpx.HTTPError as exc:
+                # A network error, timeout, or non-2xx response fetching
+                # the discovery document — the IdP dependency itself is
+                # unreachable, not "this token is invalid". Previously
+                # propagated as a raw httpx exception, crashing every
+                # authenticated request with an unhandled 500 for as long
+                # as the IdP was down (see ARCH2-7).
+                raise IdentityProviderUnavailable(
+                    f"Unable to fetch OIDC discovery document from {self.issuer}",
+                    service="oidc",
+                    cause=exc,
+                ) from exc
 
         return self._discovery["jwks_uri"]
 
     async def _fetch_jwks(self) -> dict[str, Any]:
         jwks_url = await self._resolve_jwks_url()
-        async with httpx.AsyncClient() as client:
-            res = await client.get(jwks_url)
-            res.raise_for_status()
-            return res.json()
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.get(jwks_url)
+                res.raise_for_status()
+                return res.json()
+        except httpx.HTTPError as exc:
+            raise IdentityProviderUnavailable(
+                f"Unable to fetch JWKS from {jwks_url}",
+                service="oidc",
+                cause=exc,
+            ) from exc
 
     async def _get_jwks(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """
@@ -145,7 +165,17 @@ class OIDCJWTValidator:
             jwks = await self._get_jwks()
 
             unverified_header = jwt.get_unverified_header(token)
-            kid = unverified_header["kid"]
+            kid = unverified_header.get("kid")
+
+            if kid is None:
+                # A JWT with no `kid` header (valid per spec — the header
+                # is optional there — or trivially crafted by an
+                # attacker) used to raise a bare, uncaught `KeyError`
+                # here, escaping as an unhandled 500 through
+                # `KeycloakAuthMiddleware` (which only catches
+                # `AuthenticationError`) instead of a clean 401 (see
+                # DX2-5).
+                raise AuthenticationError("Invalid token: missing kid")
 
             key = self._find_key(jwks, kid)
 
@@ -165,7 +195,13 @@ class OIDCJWTValidator:
 
             payload = jwt.decode(
                 token,
-                public_key,
+                # `from_jwk`'s stub return type is broader (`RSAPrivateKey
+                # | RSAPublicKey`) than what `jwt.decode` accepts for
+                # verification, because the JWK *format* can encode
+                # either — but a JWKS endpoint only ever publishes public
+                # keys, so this is always actually an `RSAPublicKey` in
+                # practice (see DX2-2).
+                public_key,  # type: ignore[arg-type]
                 algorithms=self.ALGORITHMS,
                 audience=self.audience,
                 issuer=self.issuer,
@@ -203,11 +239,18 @@ class OIDCJWTValidator:
 
     def to_identity(self, payload: dict[str, Any]) -> Identity:
         """
-        Convert JWT payload → Identity
+        Convert JWT payload → Identity.
+
+        `attributes` carries the full decoded token payload — this is
+        what lets a caller build a tenant resolver (or any other
+        claim-based decision) off a *verified* claim (e.g. a custom
+        `tenant_id`/`org_id` claim the IdP was configured to issue)
+        instead of trusting unauthenticated request data like a header.
+        See `adapters/fastapi.py:tenant_from_verified_claim` and SEC2-2.
         """
         sub = payload.get("sub")
 
         if not sub:
             raise AuthenticationError("Missing 'sub' in token")
 
-        return Identity(id=f"user:{sub}")
+        return Identity(id=f"user:{sub}", attributes=payload)
