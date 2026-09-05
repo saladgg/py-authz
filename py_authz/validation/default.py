@@ -24,7 +24,15 @@ class DefaultModelValidator(ModelValidator):
 
                 # basic check
                 if not any(
-                    k in rel for k in ["this", "union", "computedUserset", "tupleToUserset"]
+                    k in rel
+                    for k in [
+                        "this",
+                        "union",
+                        "computedUserset",
+                        "tupleToUserset",
+                        "intersection",
+                        "difference",
+                    ]
                 ):
                     raise ModelValidationError(f"Relation '{name}' has no valid rewrite")
 

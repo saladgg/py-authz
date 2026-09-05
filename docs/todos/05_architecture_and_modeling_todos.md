@@ -4,13 +4,13 @@ Execution checklist for
 [`05_architecture_and_modeling.md`](05_architecture_and_modeling.md). IDs
 match that file.
 
-> **Status (2026-09-02):** Tiers 0–2 shipped. `ARCH2-1` through `ARCH2-12`
-> and `ARCH2-14`/`ARCH2-16`/`ARCH2-17`/`ARCH2-18` are done — `ARCH2-3`
-> shipped together with `06`'s `SEC2-4`; `ARCH2-5` also covers `07`'s
-> REL2-9; `ARCH2-9` also resolves `06`'s SEC2-6 and `08`'s DX2-10.
-> `ARCH2-19` (Tier 4) also landed as a side effect. Only Tier 3 (the
-> larger modeling-expressiveness gap, ARCH2-13) and the rest of Tier 4
-> remain open.
+> **Status (2026-09-05):** All tiers shipped — this backlog is fully
+> closed. `ARCH2-1` through `ARCH2-12` and `ARCH2-14`/`ARCH2-16`/
+> `ARCH2-17`/`ARCH2-18` are done — `ARCH2-3` shipped together with `06`'s
+> `SEC2-4`; `ARCH2-5` also covers `07`'s REL2-9; `ARCH2-9` also resolves
+> `06`'s SEC2-6 and `08`'s DX2-10. `ARCH2-19` through `ARCH2-23` (all of
+> Tier 4) are done. `ARCH2-13` (Tier 3, the larger modeling-expressiveness
+> gap) shipped last, same day, confirmed against a real OpenFGA server.
 
 ---
 
@@ -120,38 +120,120 @@ match that file.
   REL2-8). `tests/cache/test_redis.py`'s fixture updated to use the
   constructor instead of reaching into `cache._client`.
 
-## Tier 3 — Larger modeling gap (separate, larger effort)
+## Tier 3 — Larger modeling gap (separate, larger effort) ✅
 
-- [ ] **ARCH2-13 — Add `intersection=[...]`/`exclude=...` support to
+- [x] **ARCH2-13 — Add `intersection=[...]`/`exclude=...` support to
   `Relation` and the generator**, and consider letting `from_parent` take
-  multiple `(relation, parent_relation)` pairs. Larger, standalone effort;
-  sequence after Tier 0–2. `validation/default.py`'s
-  `_referenced_relations()` already anticipates these shapes — verify its
-  handling once the generator can actually produce them.
+  multiple `(relation, parent_relation)` pairs. **Shipped 2026-09-05.**
+  `Relation` gained `intersection: list[str] | None` (≥2 relation names,
+  ANDed — OpenFGA's `intersection` rewrite) and `exclude: str | None`
+  (OpenFGA's `difference` rewrite: "this relation-def, minus `exclude`").
+  Design choices:
+    - `intersection` **composes** with `this`/`union`/`inherits`/
+      `from_parent` — it becomes just another child ORed alongside them
+      in the emitted `union` (mirroring OpenFGA's own grammar, where
+      `intersection` can itself be a child of `union`), not a full
+      replacement. Requires at least 2 relation names or
+      `_build_relation()` raises `ModelValidationError` at generation
+      time (an "AND" of fewer than 2 is meaningless).
+    - `exclude` is genuinely a two-operand `difference` (`base`/
+      `subtract`), so unlike `intersection` it wraps the *entire* rewrite
+      built from everything else rather than being one more `union`
+      child — `exclude="banned"` reads as "this relation, minus banned"
+      at the call site. Raises `ModelValidationError` at generation time
+      for: excluding a relation with no base to subtract from, excluding
+      the relation itself, or excluding a relation also named in that
+      same relation's `union`/`inherits`/`intersection` (contradictory:
+      both included and excluded).
+    - `from_parent: tuple[str, str] | list[tuple[str, str]] | None` — now
+      also accepts a list of `(tupleset_relation, computed_relation)`
+      pairs, each becoming its own `tupleToUserset` child ORed together
+      (e.g. "viewer via parent folder OR via parent workspace"). The
+      single-tuple call sites (all pre-existing models/examples/tests)
+      keep working unchanged — a new `from_parent_pairs()` helper in
+      `modeling/base.py` normalizes both shapes, shared by the generator
+      and by `testkit.InMemoryFGAClient` (updated to evaluate
+      `intersection`/`exclude`/multi-`from_parent` identically to the
+      real generator, so fake-backed unit tests stay trustworthy).
+    - Found and fixed a real, adjacent bug while wiring this up:
+      `DefaultModelValidator.validate()`'s basic rewrite-shape check
+      didn't recognize a bare top-level `intersection`/`difference` key
+      as valid — it would have rejected the generator's own new output
+      as "no valid rewrite". Fixed alongside.
+    - `validation/default.py`'s `_referenced_relations()`/`detect_cycles()`
+      (added for ARCH-3/ARCH2-12, previously dead code for these shapes)
+      is now exercised by real generator output — new tests in
+      `tests/validation/test_default.py` build actual
+      `intersection`/`difference`/multi-`from_parent` models via
+      `OpenFGAModelGenerator` and confirm a cycle reachable only through
+      each new branch is still detected, and that a realistic acyclic
+      model using all three passes full validation end to end.
+    - No new `examples/` file — the todo's core ask (modeling support +
+      validator correctness) is covered by the unit/live tests;
+      `examples/11_hierarchical_permissions.py` remains the reference
+      example for `from_parent`, and adding a second example for the
+      newer features didn't seem to add enough beyond the tests to
+      justify the scope.
+    - **Confirmed against a real OpenFGA server** (`docker compose up -d
+      openfga`, `v1.19.0`, same as ARCH-2's precedent): new
+      `tests/live/test_intersection_exclude_live.py` builds a
+      `Document` model using all three features together (`intersection`
+      of `editor`+`verified`, `exclude` of `banned` from `safe_viewer`,
+      and `viewer` reachable via either a parent folder or parent
+      workspace), syncs it to a real store via `ModelSync`, and passes 5
+      live `check()`-backed assertions: intersection denies with only one
+      side held and allows with both; a plain grant is allowed and then
+      denied once also `banned`; and a subject is allowed via either
+      parent relation but denied via neither. All 5 passed.
 
-## Tier 4 — Low-effort cleanups (batch together)
+## Tier 4 — Low-effort cleanups (batch together) ✅
 
 - [x] **ARCH2-19** — delete the redundant `from py_authz.api import Authz`
   self-import in `api.py`. **Shipped 2026-09-02**, incidentally, while
   editing `for_tenant()` for `06`'s SEC2-3.
-- [ ] **ARCH2-20** — add a shared `OpenFGAClient.for_tenant(...)` factory
+- [x] **ARCH2-20** — add a shared `OpenFGAClient.for_tenant(...)` factory
   used by `TenantManager`, `MultiTenantAuthz`, and `MigrationManager`
-  instead of three independent construction call sites.
-- [ ] **ARCH2-21** — delete `core/tenant.py`'s unused `TenantContext`, or
+  instead of three independent construction call sites. New
+  `OpenFGAClient.for_tenant(...)` classmethod (covers `api_url`/
+  `store_id`/`model_id`/`timeout`/`max_retries`/`http_client` — the full
+  constructor surface) replaces all three (four, counting
+  `MigrationManager.dry_run_tenant()`) hand-built call sites. New tests
+  in `tests/clients/test_openfga.py` confirm it builds an equivalent
+  client; existing call-site tests' fakes gained a matching `for_tenant`
+  classmethod.
+- [x] **ARCH2-21** — delete `core/tenant.py`'s unused `TenantContext`, or
   wire it in if it's meant to replace ad hoc `(tenant_id, store_id)` pairs.
-- [ ] **ARCH2-22** — decide and implement: either `Authz.can()`'s
+  **Deleted** — confirmed genuinely dead (referenced nowhere but its own
+  standalone test, which was deleted alongside it); no single call site
+  anywhere in the codebase passes a `(tenant_id, store_id)` pair together
+  as a unit, so there was no clean integration point to wire it into.
+- [x] **ARCH2-22** — decide and implement: either `Authz.can()`'s
   `Relation` branch accepts a plain `Resource` (matching `grant`/`revoke`),
-  or the asymmetry is documented explicitly.
-- [ ] **ARCH2-23** — document that `Relation` instances must not be shared
+  or the asymmetry is documented explicitly. **Unified**, not just
+  documented — `can()`'s `Relation` branch now accepts a plain `Resource`
+  too, whose `.type` is checked against `relation.resource_cls.type`
+  (raising `TypeError` on a mismatch; an unbound `Relation` can't check,
+  so any `Resource` passes through, matching `list_objects()`'s existing
+  handling of unbound relations). New tests in
+  `tests/api/test_relation_api.py` cover the matching-type accept,
+  mismatched-type reject, and unbound-relation pass-through cases.
+- [x] **ARCH2-23** — document that `Relation` instances must not be shared
   via inheritance across `ResourceModel` subclasses, or fix
-  `_relation_map()` to re-bind inherited relations per subclass.
+  `_relation_map()` to re-bind inherited relations per subclass. **Fixed**
+  (real bug, not docs-only): confirmed a `Relation` inherited without
+  being redeclared is the literal same object across every subclass that
+  inherits it, so `.resource_cls` stays pinned to whichever class the
+  metaclass bound first — the actual fix landed in
+  `ResourceModelMeta.__new__` (not `_relation_map()` itself, which never
+  reads `.resource_cls`) since that's where binding happens: it now gives
+  every subclass an independent copy of each inherited `Relation`, bound
+  to that subclass. New tests in `tests/modeling/test_base.py` cover two
+  sibling subclasses of a shared base each getting distinct,
+  correctly-bound copies.
 
 ---
 
 ## Next step
 
-Tiers 0–2 are shipped. What's left: Tier 3 (`ARCH2-13` — the larger
-`intersection`/`difference`/multi-parent modeling gap, a standalone,
-larger-effort item) and the rest of Tier 4 (`ARCH2-20` through
-`ARCH2-23`, all small, independent cleanups safe to batch together in any
-order).
+All tiers (0–4) are shipped, `ARCH2-13` (Tier 3) last, on 2026-09-05. This
+backlog is fully closed — nothing left to sequence here.

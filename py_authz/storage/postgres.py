@@ -104,10 +104,32 @@ class PostgresTenantStore:
                 store_id,
             )
 
-    async def list_tenant_ids(self) -> list[str]:
+    async def list_tenant_ids(self, *, limit: int | None = None, offset: int = 0) -> list[str]:
+        """
+        Args:
+            limit: Maximum number of tenant ids to return. `None` (the
+                default) returns every tenant, matching the previous
+                unconditional behavior — callers with a large tenant
+                count should pass a bounded `limit` and page with
+                `offset` instead of loading the entire table into memory
+                in one call (see REL2-17).
+            offset: Number of tenant ids (ordered by `tenant_id`) to skip
+                before returning results — combine with `limit` for
+                simple offset-based pagination.
+        """
         pool = self._require_pool()
         async with pool.acquire(timeout=self.command_timeout) as conn:
-            rows = await conn.fetch("SELECT tenant_id FROM tenants ORDER BY tenant_id")
+            if limit is None:
+                rows = await conn.fetch(
+                    "SELECT tenant_id FROM tenants ORDER BY tenant_id OFFSET $1",
+                    offset,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT tenant_id FROM tenants ORDER BY tenant_id LIMIT $1 OFFSET $2",
+                    limit,
+                    offset,
+                )
             return [row["tenant_id"] for row in rows]
 
 

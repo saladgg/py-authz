@@ -40,3 +40,7 @@ todos.md
 pypr_archived.toml
 .claude
 CLAUDE.md
+
+# Local-only compose overrides (e.g. port-collision workarounds) — never
+# meant to be shared/committed.
+docker-compose.override.yml

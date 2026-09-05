@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 
 import anyio
@@ -67,7 +68,7 @@ class MigrationManager:
                     result.succeeded[tenant_id] = await self.migrate_tenant(tenant_id)
                 except Exception as exc:
                     result.failed[tenant_id] = exc
-                    logger.exception(f"migration_failed tenant={tenant_id}")
+                    logger.exception(json.dumps({"event": "migration_failed", "tenant": tenant_id}))
 
         async with anyio.create_task_group() as tg:
             for tenant_id in tenant_ids:
@@ -80,7 +81,7 @@ class MigrationManager:
         Migrate a single tenant safely.
         """
 
-        logger.info(f"migration_start tenant={tenant_id}")
+        logger.info(json.dumps({"event": "migration_start", "tenant": tenant_id}))
 
         store_id = await self.tenant_store.get(tenant_id)
         if not store_id:
@@ -93,11 +94,7 @@ class MigrationManager:
             # categorized exit code instead of a raw traceback (ARCH2-5).
             raise TenantNotFoundError(f"Tenant not found: {tenant_id}")
 
-        client = OpenFGAClient(
-            api_url=self.api_url,
-            store_id=store_id,
-            model_id=None,
-        )
+        client = OpenFGAClient.for_tenant(api_url=self.api_url, store_id=store_id)
 
         try:
             syncer = ModelSync(client)
@@ -118,12 +115,28 @@ class MigrationManager:
             # purely a write-target here, never read back for this
             # decision.
             if not syncer.last_sync_changed:
-                logger.info(f"migration_noop tenant={tenant_id} model_id={new_model_id}")
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "migration_noop",
+                            "tenant": tenant_id,
+                            "model_id": new_model_id,
+                        }
+                    )
+                )
                 return new_model_id
 
             await self.model_registry.set(tenant_id, new_model_id)
 
-            logger.info(f"migration_success tenant={tenant_id} model_id={new_model_id}")
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "migration_success",
+                        "tenant": tenant_id,
+                        "model_id": new_model_id,
+                    }
+                )
+            )
             return new_model_id
         finally:
             await client.aclose()
@@ -141,7 +154,7 @@ class MigrationManager:
         if not store_id:
             raise TenantNotFoundError(f"Tenant not found: {tenant_id}")
 
-        client = OpenFGAClient(api_url=self.api_url, store_id=store_id, model_id=None)
+        client = OpenFGAClient.for_tenant(api_url=self.api_url, store_id=store_id)
         try:
             new_model = generate_model()
             current_model = await client.get_latest_model()

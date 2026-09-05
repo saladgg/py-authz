@@ -4,10 +4,10 @@ Execution checklist for
 [`06_security_and_identity.md`](06_security_and_identity.md). IDs match
 that file.
 
-> **Status (2026-09-02):** Tiers 0–2 shipped. `SEC2-4` was pulled forward
-> and shipped alongside `05`'s `ARCH2-3`; `SEC2-6` (a cross-reference)
-> resolved alongside `05`'s ARCH2-9. Only Tier 3 (CI/supply-chain
-> hardening) remains open.
+> **Status (2026-09-05):** Tiers 0–3 shipped — this file is fully closed.
+> `SEC2-4` was pulled forward and shipped alongside `05`'s `ARCH2-3`;
+> `SEC2-6` (a cross-reference) resolved alongside `05`'s ARCH2-9. Tier 3
+> (CI/supply-chain hardening) shipped 2026-09-05.
 
 ---
 
@@ -59,34 +59,70 @@ that file.
   check-then-act race) — fixed there (shipped 2026-09-02); this file's
   finding was a cross-reference only.
 
-## Tier 3 — Independent hardening (small, parallelizable)
+## Tier 3 — Independent hardening (small, parallelizable) ✅
 
-- [ ] **SEC2-5 — Structure the tenant-provisioning and migration log
+- [x] **SEC2-5 — Structure the tenant-provisioning and migration log
   lines** (`tenant_manager.py`, `migrations_manager.py`) through
   `json.dumps({...})` or `logger.info(..., extra={...})`, matching
   `core/enforcement.py`'s existing pattern, to close the log-injection gap
   on attacker-reachable `tenant_id` values.
-- [ ] **SEC2-7 — CI hardening**: add `permissions: contents: read` to
+  Both files' `provision_*`/`migration_*` log lines now go through
+  `json.dumps({"event": ..., "tenant": tenant_id, ...})`, matching
+  `core/enforcement.py`'s existing structured-logging convention exactly
+  — no more raw f-string interpolation of an attacker-reachable
+  `tenant_id` into a log message.
+- [x] **SEC2-7 — CI hardening**: add `permissions: contents: read` to
   `ci.yml`; pin every third-party GitHub Action (in both `ci.yml` and
   `release.yml`) to a full commit SHA; pin `python-semantic-release`/
   `build` versions in `release.yml`'s `pip install` line.
-- [ ] **SEC2-8 — Add supply-chain scanning**: `pip-audit` (CI step or
+  `ci.yml` now declares workflow-level `permissions: contents: read`
+  (least-privilege; `release.yml`'s broader `contents: write`/
+  `id-token: write` scoping was already correct and is unchanged). Every
+  `uses:` in both workflows (`actions/checkout`, `astral-sh/setup-uv`,
+  `actions/setup-python`, `actions/upload-artifact`,
+  `actions/download-artifact`, `pypa/gh-action-pypi-publish`) is now
+  pinned to a full commit SHA resolved live via `gh api` against the
+  version each tag currently pointed to, with a trailing `# vX.Y.Z`
+  comment. `release.yml`'s `pip install python-semantic-release==10.6.2
+  build==1.6.0` was already pinned (`REL2-12`) — left as-is.
+- [x] **SEC2-8 — Add supply-chain scanning**: `pip-audit` (CI step or
   pre-commit hook), a secret-scanning pre-commit hook (gitleaks or
   detect-secrets), Ruff's `S` ruleset or a bandit/semgrep job, and
   `.github/dependabot.yml` for both `github-actions` and the Python
   ecosystem.
-- [ ] **SEC2-9 — Pin CI's Docker Compose images**: give `openfga/openfga`
+  `pip-audit` added as a `dev`-group dependency, a new `make audit`
+  target, and a new `Audit dependencies` step in `ci.yml`'s `lint-test`
+  job (chosen over a pre-commit hook since this repo's CI doesn't run
+  `pre-commit` itself, so a step that must actually gate merges belongs
+  in CI) — clean run, no known vulnerabilities. `gitleaks` added as a new
+  pre-commit hook (`.pre-commit-config.yaml`). Ruff's `S` ruleset added
+  to `pyproject.toml`; its only two classes of finding (663× `S101`
+  `assert` across `tests/**`, one `S101` type-narrowing assert in
+  `core/enforcement.py`) are silenced via a `tests/**` per-file-ignore and
+  one inline `# noqa: S101` respectively — both documented inline, no
+  ruleset left broken. `.github/dependabot.yml` added, covering both the
+  `github-actions` and `pip` ecosystems on a weekly schedule.
+- [x] **SEC2-9 — Pin CI's Docker Compose images**: give `openfga/openfga`
   a specific released tag (not `:latest`) and pin `redis`/`postgres` to
   specific patch tags or digests.
-- [ ] **SEC2-10 — Decide and document (or add) upper-bound version
+  `docker-compose.yml` (the only compose file; `make test-integration` /
+  `ci.yml`'s `integration-test` job both target it) now pins
+  `openfga/openfga:v1.19.0` (latest stable release as of 2026-09-05),
+  `redis:7.4.11-alpine`, and `postgres:16.15-alpine` — all specific patch
+  tags, no floating `:latest`/bare-major tags left.
+- [x] **SEC2-10 — Decide and document (or add) upper-bound version
   constraints** for `pyjwt`/`httpx` in `pyproject.toml`, given their
   identity/crypto-adjacent role.
+  Decided to add upper bounds, documented inline in `pyproject.toml`:
+  `httpx>=0.28.1,<1` and `pyjwt[crypto]>=2.13.0,<3` (both occurrences,
+  including the `all` extra). Reasoning captured next to each constraint;
+  `SEC2-8`'s new Dependabot config still reacts quickly to an in-range
+  release either way.
 
 ---
 
 ## Next step
 
-Ship Tier 0 (SEC2-1) immediately and independently of everything else.
-Then Tier 1 (the tenant-trust-boundary pair), Tier 2 (cache namespacing,
-coordinated with `05`'s ARCH2-3), and Tier 3 (CI/supply-chain hardening,
-fully parallelizable and low-risk) in any order.
+Nothing left open in this file — Tiers 0 through 3 have all shipped.
+Any further security/identity work belongs in a future audit round, not
+this backlog.

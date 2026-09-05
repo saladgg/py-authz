@@ -17,6 +17,10 @@ class FakeOpenFGAClient:
         self.aclose_called = False
         FakeOpenFGAClient.instances.append(self)
 
+    @classmethod
+    def for_tenant(cls, *, api_url, store_id=None, model_id=None, **kwargs):
+        return cls(api_url=api_url, store_id=store_id, model_id=model_id)
+
     async def get_latest_model(self):
         return None
 

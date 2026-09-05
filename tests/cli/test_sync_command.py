@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from py_authz.cli.commands import sync as sync_module
@@ -69,3 +71,21 @@ async def test_sync_command_falls_back_to_env(monkeypatch, capsys):
     assert FakeModelSync.instances[0].validator is not None
     captured = capsys.readouterr()
     assert "model-from-sync" in captured.out
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for DX2-15: opt-in `--json` machine-readable output.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_command_json_output_prints_structured_summary(capsys):
+    await sync_command(
+        store_id="store-1",
+        api_url="http://fake",
+        json_output=True,
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {"store_id": "store-1", "active_model_id": "model-from-sync"}

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from py_authz.cli.commands import migrate as migrate_module
@@ -264,6 +266,71 @@ async def test_migrate_command_closes_backends_on_success(monkeypatch):
     await migrate_command(api_url="http://fake", tenant_ids=["t1"])
 
     assert store.closed is True
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for DX2-15: opt-in `--json` machine-readable output.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_migrate_command_json_output_reports_succeeded_and_failed(capsys, monkeypatch):
+    async def fake_build_backends(backend, conn):
+        from py_authz.core.model_registry import InMemoryModelRegistry
+
+        return InMemoryTenantStore(), InMemoryModelRegistry()
+
+    monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
+
+    original_init = FakeMigrationManager.__init__
+
+    def init_with_failure(self, **kwargs):
+        original_init(self, **kwargs)
+        self.failures = {"t2": RuntimeError("openfga unreachable")}
+
+    monkeypatch.setattr(FakeMigrationManager, "__init__", init_with_failure)
+
+    with pytest.raises(ExternalServiceError):
+        await migrate_command(api_url="http://fake", tenant_ids=["t1", "t2"], json_output=True)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {
+        "succeeded": {"t1": "model-for-t1"},
+        "failed": {"t2": "openfga unreachable"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_migrate_command_json_output_dry_run(capsys, monkeypatch):
+    async def fake_build_backends(backend, conn):
+        from py_authz.core.model_registry import InMemoryModelRegistry
+
+        return InMemoryTenantStore(), InMemoryModelRegistry()
+
+    monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
+
+    await migrate_command(api_url="http://fake", tenant_ids=["t1"], dry_run=True, json_output=True)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {"dry_run": True, "changes": {"t1": True}}
+
+
+@pytest.mark.asyncio
+async def test_migrate_command_json_output_no_tenants_found(capsys, monkeypatch):
+    async def fake_build_backends(backend, conn):
+        from py_authz.core.model_registry import InMemoryModelRegistry
+
+        return InMemoryTenantStore(), InMemoryModelRegistry()
+
+    monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
+
+    await migrate_command(api_url="http://fake", json_output=True)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {"tenants_found": 0, "succeeded": {}, "failed": {}}
 
 
 @pytest.mark.asyncio

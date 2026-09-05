@@ -101,6 +101,49 @@ class OpenFGAClient:
             timeout=self.timeout,
         )
 
+    @classmethod
+    def for_tenant(
+        cls,
+        *,
+        api_url: str,
+        store_id: str | None = None,
+        model_id: str | None = None,
+        timeout: float = 2.0,
+        max_retries: int = 2,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> "OpenFGAClient":
+        """
+        Construct an `OpenFGAClient` scoped to one tenant's store.
+
+        This is exactly `OpenFGAClient(...)` — a single named
+        constructor for the shape every tenant-lifecycle call site needs
+        (`TenantManager.provision()`, `MultiTenantAuthz.for_tenant()`,
+        `MigrationManager`), all of which previously hand-built an
+        `OpenFGAClient` independently (see ARCH2-20). `store_id`/
+        `model_id` default to `None` since `TenantManager.provision()`
+        constructs a client *before* a store exists (it assigns
+        `client.store_id` once `create_store()` returns one). Routing
+        every such call site through here means a future required
+        constructor parameter (e.g. auth credentials) only needs adding
+        in one place.
+
+        Args:
+            api_url: Base URL of the OpenFGA API.
+            store_id: OpenFGA store identifier, if already known.
+            model_id: Authorization model ID, if already known.
+            timeout: Request timeout in seconds.
+            max_retries: Number of retry attempts for transient failures.
+            http_client: Optional injected HTTP client (useful for testing).
+        """
+        return cls(
+            api_url=api_url,
+            store_id=store_id,
+            model_id=model_id,
+            timeout=timeout,
+            max_retries=max_retries,
+            http_client=http_client,
+        )
+
     async def check(
         self,
         user: str,

@@ -110,6 +110,22 @@ async def test_tenant_store_list_tenant_ids_empty_when_no_tenants(patched_redis)
 
 
 @pytest.mark.asyncio
+async def test_tenant_store_list_tenant_ids_respects_limit(patched_redis):
+    """REL2-17: `limit` bounds how many ids are collected before the SCAN
+    loop stops, rather than always enumerating the entire keyspace."""
+    store = RedisTenantStore("redis://fake")
+
+    await store.set("t1", "store-1")
+    await store.set("t2", "store-2")
+    await store.set("t3", "store-3")
+
+    result = await store.list_tenant_ids(limit=2)
+
+    assert len(result) == 2
+    assert set(result).issubset({"t1", "t2", "t3"})
+
+
+@pytest.mark.asyncio
 async def test_model_registry_round_trip(patched_redis):
     reg = RedisModelRegistry("redis://fake")
 

@@ -22,6 +22,10 @@ class FakeOpenFGAClient:
         self.delete_store_error: Exception | None = None
         FakeOpenFGAClient.instances.append(self)
 
+    @classmethod
+    def for_tenant(cls, *, api_url, store_id=None, model_id=None, **kwargs):
+        return cls(api_url=api_url, store_id=store_id, model_id=model_id)
+
     async def create_store(self, name):
         self.create_store_calls.append(name)
         if self.create_store_error is not None:

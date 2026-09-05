@@ -228,3 +228,119 @@ async def test_from_parent_does_not_grant_access_to_unrelated_document(hierarchy
     await authz.grant(alice, "viewer", folder.to_resource())
     # No `parent` tuple linking `other_doc` to `folder` — must stay denied.
     assert await authz.can(Document.viewer, alice, other_doc) is False
+
+
+# ----------------------------------------------------------------------
+# ARCH2-13: intersection, exclude, and multi-pair from_parent — fake
+# parity with the real generator's new rewrite shapes.
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def intersection_exclude_registry():
+    class Doc(ResourceModel):
+        type = "arch2_13_doc"
+
+        editor = Relation("editor")
+        verified = Relation("verified")
+        banned = Relation("banned")
+        access = Relation("access", intersection=["editor", "verified"], subjects=[])
+        viewer = Relation("viewer", exclude="banned")
+
+    reg = ResourceModelRegistry()
+    reg.register(Doc)
+    return reg, Doc
+
+
+@pytest.mark.asyncio
+async def test_intersection_requires_all_named_relations(intersection_exclude_registry):
+    reg, Doc = intersection_exclude_registry
+    authz = make_fake_authz(model_registry=reg)
+
+    alice = Identity(id="user:alice")
+    doc = Doc(id="d1")
+
+    assert await authz.can(Doc.access, alice, doc) is False
+
+    await authz.grant(alice, "editor", doc.to_resource())
+    assert await authz.can(Doc.access, alice, doc) is False  # editor only, not verified yet
+
+    await authz.grant(alice, "verified", doc.to_resource())
+    assert await authz.can(Doc.access, alice, doc) is True  # both now held
+
+
+@pytest.mark.asyncio
+async def test_exclude_revokes_access_even_with_direct_grant(intersection_exclude_registry):
+    reg, Doc = intersection_exclude_registry
+    authz = make_fake_authz(model_registry=reg)
+
+    alice = Identity(id="user:alice")
+    doc = Doc(id="d1")
+
+    await authz.grant(alice, "viewer", doc.to_resource())
+    assert await authz.can(Doc.viewer, alice, doc) is True
+
+    await authz.grant(alice, "banned", doc.to_resource())
+    assert await authz.can(Doc.viewer, alice, doc) is False  # banned overrides direct viewer grant
+
+
+@pytest.fixture
+def multi_from_parent_registry():
+    class Folder(ResourceModel):
+        type = "arch2_13_folder"
+        viewer = Relation("viewer")
+
+    class Workspace(ResourceModel):
+        type = "arch2_13_workspace"
+        viewer = Relation("viewer")
+
+    class Document(ResourceModel):
+        type = "arch2_13_multi_parent_doc"
+        parent_folder = Relation("parent_folder", subjects=["arch2_13_folder"])
+        parent_workspace = Relation("parent_workspace", subjects=["arch2_13_workspace"])
+        viewer = Relation(
+            "viewer",
+            from_parent=[("parent_folder", "viewer"), ("parent_workspace", "viewer")],
+        )
+
+    reg = ResourceModelRegistry()
+    reg.register(Folder)
+    reg.register(Workspace)
+    reg.register(Document)
+    return reg, Folder, Workspace, Document
+
+
+@pytest.mark.asyncio
+async def test_multi_from_parent_grants_via_either_parent(multi_from_parent_registry):
+    reg, Folder, Workspace, Document = multi_from_parent_registry
+    authz = make_fake_authz(model_registry=reg)
+
+    alice = Identity(id="user:alice")  # viewer via folder only
+    bob = Identity(id="user:bob")  # viewer via workspace only
+    carol = Identity(id="user:carol")  # viewer via neither
+
+    doc = Document(id="d1")
+    folder = Folder(id="f1")
+    workspace = Workspace(id="w1")
+
+    await authz.grant(alice, "viewer", folder.to_resource())
+    await authz.grant(bob, "viewer", workspace.to_resource())
+
+    await authz._engine.fga_client.write_tuples(
+        writes=[
+            {
+                "user": "arch2_13_folder:f1",
+                "relation": "parent_folder",
+                "object": "arch2_13_multi_parent_doc:d1",
+            },
+            {
+                "user": "arch2_13_workspace:w1",
+                "relation": "parent_workspace",
+                "object": "arch2_13_multi_parent_doc:d1",
+            },
+        ]
+    )
+
+    assert await authz.can(Document.viewer, alice, doc) is True
+    assert await authz.can(Document.viewer, bob, doc) is True
+    assert await authz.can(Document.viewer, carol, doc) is False

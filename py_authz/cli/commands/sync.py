@@ -1,3 +1,5 @@
+import json
+
 from py_authz.cli.config import get_env
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.core.model_sync import ModelSync
@@ -10,6 +12,7 @@ async def sync_command(
     api_url: str | None = None,
     model_id: str | None = None,
     force: bool = False,
+    json_output: bool = False,
 ):
     # Resolve config (CLI args take precedence over env)
     store_id = store_id or get_env("FGA_STORE_ID", required=True)
@@ -27,4 +30,11 @@ async def sync_command(
     syncer = ModelSync(client, validator=validator)
     new_model_id = await syncer.sync(force=force)
 
-    print(f"Active model: {new_model_id}")
+    if json_output:
+        # Opt-in machine-readable output for CI pipelines (see DX2-15) —
+        # the human-readable line below was the only shape available
+        # before, and free-text like "Active model: ..." has to be
+        # line-parsed by any caller that wants the model ID back.
+        print(json.dumps({"store_id": store_id, "active_model_id": new_model_id}))
+    else:
+        print(f"Active model: {new_model_id}")

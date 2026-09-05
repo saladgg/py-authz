@@ -25,8 +25,10 @@ class StubValidator:
         self._payload = payload or {"sub": "me"}
         self._error = error
         self._identity = identity or Identity(id="user:me")
+        self.seen_tokens: list[str] = []
 
     async def validate(self, token: str):
+        self.seen_tokens.append(token)
         if self._error:
             raise self._error
         return self._payload
@@ -115,6 +117,23 @@ async def test_middleware_raises_503_when_identity_provider_unavailable():
         await middleware.dispatch(_Req(), _call_next)
 
     assert exc_info.value.status_code == 503
+
+
+def test_middleware_extracts_token_containing_a_space():
+    """
+    Regression test: extraction used to be `auth_header.split(" ")[1]`,
+    which silently truncated a token containing a space (not spec-
+    mandated, but possible) to just its first segment. Now
+    `.removeprefix("Bearer ")`, which keeps the whole remainder.
+    """
+    validator = StubValidator()
+    app = _build_app(validator)
+    client = TestClient(app)
+
+    res = client.get("/whoami", headers={"Authorization": "Bearer token with spaces"})
+
+    assert res.status_code == 200
+    assert validator.seen_tokens == ["token with spaces"]
 
 
 @pytest.mark.asyncio

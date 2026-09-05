@@ -21,7 +21,15 @@ classifiers = [
 
 dependencies = [
   "openfga-sdk>=0.10.4",
-  "httpx>=0.28.1",
+  # Upper-bounded at <1 (see SEC2-10): httpx is identity/crypto-adjacent
+  # here (it carries every OpenFGA/JWKS HTTP call) and, while still pre-
+  # 1.0, has kept a stable public API across the whole 0.x series this
+  # project has tracked — the bound exists specifically to stop an
+  # eventual 1.0 (which upstream has signaled will revisit some defaults)
+  # from silently reaching a downstream `pip install` unreviewed.
+  # Dependabot (SEC2-8) will still flag a new 0.x release quickly either
+  # way.
+  "httpx>=0.28.1,<1",
   "attrs>=26.1.0"
 ]
 
@@ -46,7 +54,14 @@ cli = [
 ]
 
 keycloak = [
-  "pyjwt[crypto]>=2.13.0"
+  # Upper-bounded at <3 (see SEC2-10): PyJWT does JWT/JWKS signature
+  # verification directly (the actual identity boundary — see SEC-2's
+  # hardcoded `ALGORITHMS = ["RS256"]` allow-list), and its 1.x -> 2.x
+  # jump changed `decode()`'s default verification behavior; a future
+  # major is exactly the kind of unreviewed change this library
+  # shouldn't let a downstream resolver pick up silently. Dependabot
+  # (SEC2-8) will still flag a new 2.x release quickly.
+  "pyjwt[crypto]>=2.13.0,<3"
 ]
 
 all = [
@@ -56,7 +71,7 @@ all = [
   "redis>=8.1.0",
   "asyncpg>=0.31.0",
   "anyio>=4.14.2",
-  "pyjwt[crypto]>=2.13.0"
+  "pyjwt[crypto]>=2.13.0,<3"
 ]
 
 test = [
@@ -73,6 +88,9 @@ dev = [
   "ruff>=0.16.5",
   "mypy>=2.3.1",
   "pre-commit>=4.6.2",
+  # Dependency-vulnerability scanning (see SEC2-8) — run via `make audit`
+  # / `.github/workflows/ci.yml`'s `Audit dependencies` step.
+  "pip-audit>=2.10.1",
 ]
 
 [project.scripts]
@@ -108,7 +126,19 @@ py_authz = ["storage/sql/*.sql", "py.typed"]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+# `S` (flake8-bandit-equivalent) added per SEC2-8. Findings: 663 `S101`
+# ("use of `assert`") across `tests/**`, which is standard/expected
+# practice in a pytest suite — silenced below via `per-file-ignores`
+# rather than dropped from `select` repo-wide, so a real bandit-class
+# finding introduced under `tests/` (e.g. a hardcoded secret, `S105`)
+# still surfaces. The single non-test hit, `core/enforcement.py`'s
+# `assert self.cache is not None` in `_check_and_cache()`, is a
+# type-narrowing invariant already guarded by its caller — silenced
+# inline with `# noqa: S101` there instead of widening this ignore.
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

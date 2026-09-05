@@ -6,6 +6,7 @@ Reuses the fake-`jwt`-module bootstrap from `test_keycloak` so this runs
 correctly whether or not PyJWT is actually installed.
 """
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -273,3 +274,155 @@ def test_to_identity_carries_full_payload_as_attributes():
 
     assert identity.id == "user:abc"
     assert identity.attributes == {"sub": "abc", "tenant_id": "acme"}
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for DX2-9: an optional `leeway` constructor
+# parameter, threaded through to `jwt.decode`, tolerating clock skew
+# between this service and the IdP.
+# ----------------------------------------------------------------------
+
+
+def _install_leeway_aware_fake_decode(monkeypatch, *, expired_by: float):
+    """
+    Monkeypatch `jwt.decode` to mimic real PyJWT's `exp`/`leeway`
+    semantics for a token that expired `expired_by` seconds ago —
+    without depending on whether the real, cryptography-backed PyJWT or
+    this test module's own fake stub (`test_keycloak._install_fake_jwt`)
+    happens to be the one installed under `sys.modules["jwt"]` in this
+    session (collection order-dependent). This is the same
+    monkeypatched-`jwt.decode` pattern
+    `test_validate_raises_clear_message_on_audience_mismatch` above
+    already uses; it exercises exactly the thing DX2-9 changed —
+    `OIDCJWTValidator.validate()` must actually forward its `leeway` to
+    `jwt.decode(..., leeway=...)` — without re-testing PyJWT's own
+    already-well-tested `exp` arithmetic.
+    """
+
+    def fake_decode(token, key, *, leeway=0, **kwargs):
+        if expired_by > leeway:
+            raise jwt.ExpiredSignatureError("Signature has expired")
+        return {"sub": "alice"}
+
+    monkeypatch.setattr(jwt, "decode", fake_decode)
+
+
+@pytest.mark.asyncio
+async def test_token_just_outside_default_leeway_rejected_with_leeway_zero(
+    monkeypatch, patch_async_client
+):
+    patch_async_client(
+        RoutedHTTPClient({"https://auth.example.com/keys": {"keys": [{"kid": "k1"}]}})
+    )
+    monkeypatch.setattr(jwt, "get_unverified_header", lambda t: {"kid": "k1"})
+    _install_leeway_aware_fake_decode(monkeypatch, expired_by=30)
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+        leeway=0,  # the default — explicit here for clarity
+    )
+
+    with pytest.raises(AuthenticationError, match="expired"):
+        await validator.validate("some-token")
+
+
+@pytest.mark.asyncio
+async def test_token_just_outside_default_leeway_accepted_with_generous_leeway(
+    monkeypatch, patch_async_client
+):
+    """A token that expired 30s ago is rejected with the default
+    `leeway=0` (see the sibling test above) but accepted once `leeway` is
+    set generously enough to cover that drift — confirming
+    `OIDCJWTValidator.__init__`'s `leeway` param actually reaches
+    `jwt.decode`."""
+    patch_async_client(
+        RoutedHTTPClient({"https://auth.example.com/keys": {"keys": [{"kid": "k1"}]}})
+    )
+    monkeypatch.setattr(jwt, "get_unverified_header", lambda t: {"kid": "k1"})
+    _install_leeway_aware_fake_decode(monkeypatch, expired_by=30)
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+        leeway=60,
+    )
+
+    payload = await validator.validate("some-token")
+    assert payload["sub"] == "alice"
+
+
+# ----------------------------------------------------------------------
+# Regression coverage for the thundering-herd fix on `_get_jwks()`:
+# concurrent callers during a cache-miss (cold start, or right after a
+# key rotation invalidates the cache) must not each fire their own fetch
+# against the IdP.
+# ----------------------------------------------------------------------
+
+
+class _SlowCountingHTTPClient:
+    """Fake `httpx.AsyncClient` whose `get()` yields control (simulating
+    real network latency) before responding, so concurrently-scheduled
+    callers actually get a chance to race — and counts how many times it
+    was actually called."""
+
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+        self.call_count = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+    async def get(self, url):
+        self.call_count += 1
+        await asyncio.sleep(0.01)
+        return _FakeResponse(self._data)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_start_calls_only_fetch_jwks_once(patch_async_client):
+    http = _SlowCountingHTTPClient({"keys": [{"kid": "k1"}]})
+    patch_async_client(http)
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+    )
+
+    results = await asyncio.gather(*(validator._get_jwks() for _ in range(10)))
+
+    assert http.call_count == 1
+    assert all(r == {"keys": [{"kid": "k1"}]} for r in results)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_force_refresh_calls_only_fetch_jwks_once(patch_async_client):
+    """Same thundering-herd guard, but for the post-key-rotation forced
+    refresh path (multiple concurrent callers hitting an unrecognized
+    `kid` at once)."""
+    http = _SlowCountingHTTPClient({"keys": [{"kid": "k2"}]})
+    patch_async_client(http)
+
+    validator = OIDCJWTValidator(
+        issuer="https://auth.example.com",
+        audience="aud",
+        jwks_url="https://auth.example.com/keys",
+    )
+    # Prime the cache so `force_refresh=True` below exercises the
+    # refresh path, not the cold-start path already covered above.
+    await validator._get_jwks()
+    assert http.call_count == 1
+
+    results = await asyncio.gather(*(validator._get_jwks(force_refresh=True) for _ in range(10)))
+
+    # One caller performs the actual forced refetch; the rest, having
+    # waited on the lock, see the cooldown already consumed and reuse
+    # its result instead of each refetching.
+    assert http.call_count == 2
+    assert all(r == {"keys": [{"kid": "k2"}]} for r in results)

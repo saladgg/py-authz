@@ -2,7 +2,7 @@ import pytest
 
 from py_authz.api import Authz
 from py_authz.core.enforcement import AuthzEngine
-from py_authz.core.types import Identity
+from py_authz.core.types import Identity, Resource
 from py_authz.modeling import Relation, ResourceModel
 from tests.conftest import MockOpenFGAClient
 
@@ -29,6 +29,46 @@ async def test_can_with_relation_rejects_non_resource_model():
 
     with pytest.raises(TypeError, match="ResourceModel"):
         await authz.can(Doc.view, Identity(id="user:1"), "not-a-model")
+
+
+# ----------------------------------------------------------------------
+# ARCH2-22: `can()`'s `Relation` branch accepts a plain `Resource` too,
+# matching `grant`/`revoke`'s existing dual support for either shape.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_can_with_relation_and_matching_plain_resource():
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(allowed=True), cache=None)
+    authz = Authz(engine)
+
+    result = await authz.can(Doc.view, Identity(id="user:1"), Resource(type="document", id="42"))
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_can_with_relation_rejects_mismatched_plain_resource_type():
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(), cache=None)
+    authz = Authz(engine)
+
+    with pytest.raises(TypeError, match="does not match"):
+        await authz.can(Doc.view, Identity(id="user:1"), Resource(type="folder", id="42"))
+
+
+@pytest.mark.asyncio
+async def test_can_with_unbound_relation_accepts_any_plain_resource_type():
+    """An unbound `Relation` (`resource_cls is None`) has nothing to
+    check a plain `Resource`'s `.type` against, so any `Resource` is
+    accepted as-is — mirroring `list_objects()`'s handling of unbound
+    relations."""
+    unbound = Relation("viewer")
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(allowed=True), cache=None)
+    authz = Authz(engine)
+
+    result = await authz.can(unbound, Identity(id="user:1"), Resource(type="folder", id="1"))
+
+    assert result is True
 
 
 # ----------------------------------------------------------------------

@@ -15,8 +15,9 @@ class InMemoryPg:
     async def set(self, tenant_id, store_id):
         self._data[tenant_id] = store_id
 
-    async def list_tenant_ids(self):
-        return list(self._data.keys())
+    async def list_tenant_ids(self, *, limit=None, offset=0):
+        ids = sorted(self._data.keys())[offset:]
+        return ids[:limit] if limit is not None else ids
 
 
 class InMemoryRedis:
@@ -101,6 +102,21 @@ async def test_list_tenant_ids_delegates_to_postgres():
     store = HybridTenantStore(pg_store=pg, redis_store=InMemoryRedis())
 
     assert set(await store.list_tenant_ids()) == {"t1", "t2"}
+
+
+@pytest.mark.asyncio
+async def test_list_tenant_ids_forwards_limit_and_offset_to_postgres():
+    """REL2-17: pagination kwargs pass straight through to the
+    Postgres-backed source of truth."""
+    pg = InMemoryPg()
+    await pg.set("t1", "store-1")
+    await pg.set("t2", "store-2")
+    await pg.set("t3", "store-3")
+
+    store = HybridTenantStore(pg_store=pg, redis_store=InMemoryRedis())
+
+    assert await store.list_tenant_ids(limit=2) == ["t1", "t2"]
+    assert await store.list_tenant_ids(limit=2, offset=2) == ["t3"]
 
 
 # ----------------------------------------------------------------------

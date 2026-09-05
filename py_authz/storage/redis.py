@@ -49,7 +49,7 @@ class RedisTenantStore:
         """
         await self.client.set(f"tenant:{tenant_id}:store", store_id, ex=ex)
 
-    async def list_tenant_ids(self) -> list[str]:
+    async def list_tenant_ids(self, *, limit: int | None = None) -> list[str]:
         """
         Enumerate every tenant this store knows about via `SCAN` (not
         `KEYS` — `SCAN` doesn't block the server on a large keyspace).
@@ -58,6 +58,17 @@ class RedisTenantStore:
         least once with a TTL still unexpired — prefer
         `HybridTenantStore.list_tenant_ids()` (delegating to Postgres,
         the source of truth) when composing the two.
+
+        Args:
+            limit: Stop after collecting this many tenant ids instead of
+                scanning the entire keyspace — bounds how much this call
+                loads into memory for a large keyspace (see REL2-17).
+                `None` (the default) preserves the previous behavior of
+                returning every tenant. No `offset` equivalent is offered:
+                `SCAN` makes no ordering guarantee across calls, so an
+                offset here couldn't reliably mean "skip the same N
+                results as last time" the way it does for
+                `PostgresTenantStore.list_tenant_ids()`.
         """
         prefix = "tenant:"
         suffix = ":store"
@@ -66,6 +77,8 @@ class RedisTenantStore:
         async for key in self.client.scan_iter(match=f"{prefix}*{suffix}"):
             key_str = key.decode() if isinstance(key, bytes) else key
             tenant_ids.append(key_str[len(prefix) : -len(suffix)])
+            if limit is not None and len(tenant_ids) >= limit:
+                break
 
         return tenant_ids
 

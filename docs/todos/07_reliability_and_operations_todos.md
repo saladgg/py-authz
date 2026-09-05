@@ -4,8 +4,9 @@ Execution checklist for
 [`07_reliability_and_operations.md`](07_reliability_and_operations.md).
 IDs match that file.
 
-> **Status (2026-09-02):** Tiers 0–2 shipped (`REL2-1` through `REL2-12`).
-> Only Tier 3 (low-effort operational polish) remains open.
+> **Status (2026-09-05):** All tiers shipped — Tiers 0–2 (`REL2-1`
+> through `REL2-12`) on 2026-09-02, and Tier 3 (`REL2-13` through
+> `REL2-17`) on 2026-09-05. Nothing left open in this file.
 
 ---
 
@@ -83,26 +84,51 @@ IDs match that file.
   build` line.** Pinned to the actual current released versions
   (`python-semantic-release==10.6.2 build==1.6.0`, checked live via `uvx`).
 
-## Tier 3 — Low-effort operational polish (batch together)
+## Tier 3 — Low-effort operational polish (batch together) ✅
 
-- [ ] **REL2-13** — replace `.pre-commit-config.yaml`'s `black`/`isort`
+- [x] **REL2-13** — replace `.pre-commit-config.yaml`'s `black`/`isort`
   hooks with `ruff format`/`ruff check --fix`, matching the Makefile.
-- [ ] **REL2-14** — add a Redis readiness poll (`redis-cli ping`) to
+  `.pre-commit-config.yaml` now mirrors `ruff-pre-commit` at `v0.16.5`
+  (matching the `ruff>=0.16.5` pin in `pyproject.toml`) with the standard
+  `ruff --fix` + `ruff-format` hooks; the `black`/`isort` entries are gone.
+- [x] **REL2-14** — add a Redis readiness poll (`redis-cli ping`) to
   `make test-integration`'s wait loop, alongside the existing OpenFGA/
-  Keycloak/Postgres checks.
-- [ ] **REL2-15** — add native `healthcheck:` blocks to every service in
-  `docker-compose.yml`.
-- [ ] **REL2-16** — guard `enforce()`'s structured log calls with
+  Keycloak/Postgres checks. New `docker exec redis redis-cli ping`
+  polling loop added between the Keycloak and Postgres checks, same
+  60-retry/1s-sleep style as the others.
+- [x] **REL2-15** — add native `healthcheck:` blocks to every service in
+  `docker-compose.yml`. `openfga` uses `grpc_health_probe` (the image ships
+  no shell/curl/wget, but does ship this binary, confirmed live);
+  `keycloak` uses a bash `/dev/tcp` probe against its management-interface
+  `/health/ready` endpoint (also no curl in that image, confirmed live);
+  `redis` uses `redis-cli ping`; `postgres` uses `pg_isready`. All four
+  confirmed working against real containers before landing.
+- [x] **REL2-16** — guard `enforce()`'s structured log calls with
   `logger.isEnabledFor(logging.INFO)` before building/serializing the
-  payload.
-- [ ] **REL2-17** — ship an optional retention/partitioning migration (or
+  payload. Both `logger.info(json.dumps(...))` call sites in `enforce()`
+  (the cache-hit branch and the post-upstream-check branch) are now
+  wrapped in `if logger.isEnabledFor(logging.INFO):`, with no change to
+  what's logged when INFO is enabled.
+- [x] **REL2-17** — ship an optional retention/partitioning migration (or
   documentation pointer) for `audit_logs`; add cursor/offset pagination to
-  `list_tenant_ids()` if/when needed.
+  `list_tenant_ids()` if/when needed. New
+  `py_authz/storage/sql/audit_logs_retention.example.sql` (not applied by
+  `apply_schema()`) documents a periodic-delete query and a native-
+  partitioning migration sketch, linked from `0003_audit_logs.sql`'s
+  existing scope-disclosure comment.
+  `PostgresTenantStore.list_tenant_ids()` gained `limit`/`offset` keyword
+  arguments (SQL `LIMIT`/`OFFSET`, `None`/`0` defaults preserving the old
+  unconditional behavior); `HybridTenantStore.list_tenant_ids()` forwards
+  both straight through to its Postgres backend; `RedisTenantStore.
+  list_tenant_ids()` gained a `limit` that stops its `SCAN` loop early
+  (no `offset` there — `SCAN` gives no cross-call ordering guarantee for
+  one to mean anything); `InMemoryTenantStore` gained matching `limit`/
+  `offset` support for test/dev parity. New tests cover pagination on all
+  four.
 
 ---
 
 ## Next step
 
-Tiers 0–2 are shipped. What's left is Tier 3 — low-effort operational
-polish (`REL2-13` through `REL2-17`), all small and independent, safe to
-batch together in any order.
+Nothing is left open in this file — all four tiers (`REL2-1` through
+`REL2-17`) are shipped.

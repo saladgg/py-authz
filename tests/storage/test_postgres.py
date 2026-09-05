@@ -68,7 +68,14 @@ class FakePool:
 
     def _apply_fetch_all(self, query, args):
         if "FROM tenants" in query:
-            return [{"tenant_id": tid} for tid in sorted(self.tenants)]
+            ids = sorted(self.tenants)
+            if "LIMIT" in query and "OFFSET" in query:
+                limit, offset = args
+                ids = ids[offset : offset + limit]
+            elif "OFFSET" in query:
+                (offset,) = args
+                ids = ids[offset:]
+            return [{"tenant_id": tid} for tid in ids]
         return []
 
 
@@ -128,6 +135,23 @@ async def test_tenant_store_list_tenant_ids(patched_asyncpg):
     await store.set("t1", "store-1")
 
     assert await store.list_tenant_ids() == ["t1", "t2"]
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_list_tenant_ids_paginates_with_limit_and_offset(patched_asyncpg):
+    """REL2-17: offset/limit pagination so a large tenant table doesn't
+    have to be loaded into memory in one call."""
+    store = PostgresTenantStore(dsn="postgres://fake")
+    await store.connect()
+
+    for tid in ["t3", "t1", "t4", "t2"]:
+        await store.set(tid, f"store-{tid}")
+
+    assert await store.list_tenant_ids(limit=2) == ["t1", "t2"]
+    assert await store.list_tenant_ids(limit=2, offset=2) == ["t3", "t4"]
+    assert await store.list_tenant_ids(limit=2, offset=4) == []
+    # offset alone (no limit) still returns everything from that point on.
+    assert await store.list_tenant_ids(offset=1) == ["t2", "t3", "t4"]
 
 
 @pytest.mark.asyncio
