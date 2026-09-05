@@ -26,7 +26,13 @@ class KeycloakAuthMiddleware(BaseHTTPMiddleware):
         if not auth_header or not auth_header.startswith("Bearer "):
             return await call_next(request)
 
-        token = auth_header.split(" ")[1]
+        # `.removeprefix(...)` rather than `.split(" ")[1]` — the latter
+        # produced an empty (and confusingly-wrong) token on any header
+        # with irregular whitespace or a token that itself contains a
+        # space (neither is spec-mandated, just possible). Safe either
+        # way (a mangled token still fails cleanly via
+        # `AuthenticationError` below), just a clearer failure mode.
+        token = auth_header.removeprefix("Bearer ")
 
         try:
             payload = await self.validator.validate(token)

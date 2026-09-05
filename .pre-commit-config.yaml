@@ -1,19 +1,23 @@
 repos:
-  - repo: https://github.com/psf/black
-    rev: 24.4.2
-    hooks:
-      - id: black
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.2
+    rev: v0.16.5
     hooks:
       - id: ruff
         args: ["--fix"]
-  - repo: https://github.com/PyCQA/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
+      - id: ruff-format
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: end-of-file-fixer
       - id: trailing-whitespace
+  # Secret-scanning hook (see SEC2-8): catches a hardcoded credential/key
+  # before it's committed, not after. `pip-audit` (dependency-vulnerability
+  # scanning, the other half of SEC2-8) runs as a CI step instead (see
+  # `.github/workflows/ci.yml`'s `Audit dependencies` step) — CI already
+  # runs on every push/PR, whereas this repo doesn't run `pre-commit`
+  # itself in CI, so a scanner that must actually gate merges belongs
+  # there rather than in a hook devs can skip locally.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

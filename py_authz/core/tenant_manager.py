@@ -1,3 +1,4 @@
+import json
 import re
 from contextlib import asynccontextmanager
 
@@ -75,7 +76,7 @@ class TenantManager:
                 f"Invalid tenant_id {tenant_id!r}: must match {self._tenant_id_pattern.pattern!r}"
             )
 
-        logger.info(f"provision_start tenant={tenant_id}")
+        logger.info(json.dumps({"event": "provision_start", "tenant": tenant_id}))
         existing = await self.tenant_store.get(tenant_id)
         if existing:
             return existing
@@ -87,11 +88,7 @@ class TenantManager:
             if existing:
                 return existing
 
-            client = OpenFGAClient(
-                api_url=self.api_url,
-                store_id=None,
-                model_id=None,
-            )
+            client = OpenFGAClient.for_tenant(api_url=self.api_url)
             # Assigned only once `create_store()` succeeds. Referencing an
             # unassigned `store_id` in the log line below used to raise
             # `UnboundLocalError` when `create_store()` itself failed,
@@ -106,10 +103,26 @@ class TenantManager:
 
                 await self.tenant_store.set(tenant_id, store_id)
 
-                logger.info(f"provision_success tenant={tenant_id} store_id={store_id}")
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "provision_success",
+                            "tenant": tenant_id,
+                            "store_id": store_id,
+                        }
+                    )
+                )
                 return store_id
             except Exception:
-                logger.exception(f"provision_failed tenant={tenant_id} store_id={store_id}")
+                logger.exception(
+                    json.dumps(
+                        {
+                            "event": "provision_failed",
+                            "tenant": tenant_id,
+                            "store_id": store_id,
+                        }
+                    )
+                )
                 if store_id is not None:
                     # `create_store()` succeeded but a later step (model
                     # sync, persisting the mapping) failed — clean up the
@@ -120,7 +133,13 @@ class TenantManager:
                         await client.delete_store(store_id)
                     except Exception:
                         logger.exception(
-                            f"provision_cleanup_failed tenant={tenant_id} store_id={store_id}"
+                            json.dumps(
+                                {
+                                    "event": "provision_cleanup_failed",
+                                    "tenant": tenant_id,
+                                    "store_id": store_id,
+                                }
+                            )
                         )
                 raise
             finally:

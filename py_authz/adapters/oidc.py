@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Any
 
@@ -41,6 +42,7 @@ class OIDCJWTValidator:
         *,
         jwks_url: str | None = None,
         jwks_refresh_cooldown: float = 60.0,
+        leeway: float = 0,
     ):
         """
         Args:
@@ -62,9 +64,21 @@ class OIDCJWTValidator:
                 an unrecognized `kid` — see `_get_jwks`). Prevents a client
                 sending arbitrary/garbage `kid` values from forcing
                 unlimited refetches against the provider's JWKS endpoint.
+
+            leeway (float):
+                Clock-skew tolerance, in seconds, applied to `exp`/`nbf`/
+                `iat` validation (passed straight through to `jwt.decode`).
+                PyJWT's own default is `0` — no tolerance at all — which
+                means any real clock drift between this service and the
+                IdP produces intermittent, hard-to-diagnose token
+                rejections right at expiry boundaries (see DX2-9). Left at
+                `0` here too, since the right value is deployment-specific;
+                set it explicitly (e.g. `30`) once you've measured your
+                actual clock drift.
         """
         self.issuer = issuer.rstrip("/")
         self.audience = audience
+        self.leeway = leeway
 
         self._explicit_jwks_url = jwks_url
         self._discovery: dict[str, Any] | None = None
@@ -72,6 +86,16 @@ class OIDCJWTValidator:
         self._jwks: dict[str, Any] | None = None
         self._jwks_refresh_cooldown = jwks_refresh_cooldown
         self._last_refresh_at: float | None = None
+
+        # Guards the cold-start (and post-key-rotation forced-refresh)
+        # JWKS fetch: without it, N concurrent `validate()` calls that all
+        # observe `self._jwks is None` (e.g. at process startup, or right
+        # after every cached key is invalidated by a rotation) each fire
+        # their own `_fetch_jwks()` against the IdP instead of one caller
+        # fetching and the rest reusing the result — a thundering herd.
+        # Mirrors `MultiTenantAuthz._resolution_lock`'s check-then-act
+        # double-checked-locking shape in `api.py`.
+        self._jwks_lock = asyncio.Lock()
 
     # -------------------------------------------------------------------
     # Discovery + JWKS Fetching
@@ -131,23 +155,37 @@ class OIDCJWTValidator:
         the initial cache fill, so the *first* forced refresh right after
         startup is never blocked) so they can't be triggered more often
         than that, regardless of how many mismatched `kid`s arrive.
+
+        Concurrent callers that would otherwise each trigger their own
+        fetch (cold start, or right after a rotation invalidates the
+        cache) are serialized behind `_jwks_lock` instead — see DX2-9's
+        thundering-herd fix. The cheap "anything to do at all" check
+        happens once before taking the lock so a cache *hit* (the
+        overwhelmingly common case) never pays for it.
         """
-        if not force_refresh:
-            if self._jwks is None:
-                self._jwks = await self._fetch_jwks()
+        if not force_refresh and self._jwks is not None:
             return self._jwks
 
-        now = time.monotonic()
-        cooldown_elapsed = (
-            self._last_refresh_at is None
-            or (now - self._last_refresh_at) >= self._jwks_refresh_cooldown
-        )
+        async with self._jwks_lock:
+            if not force_refresh:
+                # Re-check: another caller may have finished the exact
+                # fetch this one was about to make while we were waiting
+                # for the lock.
+                if self._jwks is None:
+                    self._jwks = await self._fetch_jwks()
+                return self._jwks
 
-        if self._jwks is None or cooldown_elapsed:
-            self._jwks = await self._fetch_jwks()
-            self._last_refresh_at = now
+            now = time.monotonic()
+            cooldown_elapsed = (
+                self._last_refresh_at is None
+                or (now - self._last_refresh_at) >= self._jwks_refresh_cooldown
+            )
 
-        return self._jwks
+            if self._jwks is None or cooldown_elapsed:
+                self._jwks = await self._fetch_jwks()
+                self._last_refresh_at = now
+
+            return self._jwks
 
     @staticmethod
     def _find_key(jwks: dict[str, Any], kid: str) -> dict[str, Any] | None:
@@ -205,6 +243,7 @@ class OIDCJWTValidator:
                 algorithms=self.ALGORITHMS,
                 audience=self.audience,
                 issuer=self.issuer,
+                leeway=self.leeway,
             )
 
             return payload

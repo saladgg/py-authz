@@ -70,6 +70,10 @@ format-check: ## Check formatting without changes
 lint: ## Run linter and type checker
 	uv run mypy
 
+.PHONY: audit
+audit: ## Scan dependencies for known vulnerabilities (see SEC2-8)
+	uv run pip-audit
+
 # ----------------------------------------------------------
 # Testing
 # ----------------------------------------------------------
@@ -81,13 +85,17 @@ test: ## Run test suite with coverage
 .PHONY: test-integration
 test-integration: ## Run tests/live against a real OpenFGA + Keycloak + Redis + Postgres stack (docker compose)
 	docker compose up -d openfga keycloak redis postgres
-	@echo "Waiting for OpenFGA + Keycloak + Postgres to become reachable..."
+	@echo "Waiting for OpenFGA + Keycloak + Redis + Postgres to become reachable..."
 	@i=0; until curl -sf http://localhost:8082/healthz >/dev/null 2>&1; do \
 		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "OpenFGA did not become healthy in time"; exit 1; fi; \
 		sleep 1; \
 	done
 	@i=0; until curl -sf http://localhost:8081/realms/py-authz/.well-known/openid-configuration >/dev/null 2>&1; do \
 		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "Keycloak did not become reachable in time"; exit 1; fi; \
+		sleep 1; \
+	done
+	@i=0; until docker exec redis redis-cli ping >/dev/null 2>&1; do \
+		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "Redis did not become ready in time"; exit 1; fi; \
 		sleep 1; \
 	done
 	@i=0; until docker exec postgres pg_isready -U py_authz >/dev/null 2>&1; do \
@@ -147,5 +155,3 @@ docker-down: ## Stop services and remove volumes
 docker-clean: ## Stop, remove orphans, and prune the builder cache
 	docker compose down -v --remove-orphans
 	docker builder prune -f
-
-

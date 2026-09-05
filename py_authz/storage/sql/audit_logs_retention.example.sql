@@ -1,0 +1,76 @@
+-- OPTIONAL maintenance helper for `audit_logs` (see REL2-17).
+--
+-- NOT applied by `py_authz.storage.schema.apply_schema()` and not part of
+-- `SCHEMA_FILES` — this file is a documented starting point for an
+-- operator to adapt and run through their own migration/runbook tooling,
+-- not something this library runs implicitly. `0003_audit_logs.sql`
+-- already discloses that `audit_logs` "grows without bound under normal
+-- operation" and that retention/partitioning is deliberately out of scope
+-- for the bundled schema; this file is the promised pointer for an
+-- adopter who does need one, once the table has grown large enough that
+-- it matters.
+--
+-- Two options, roughly in order of effort:
+--
+-- 1. Periodic delete (simplest — works on the table as shipped).
+--    Run on a schedule (cron, a scheduled CI job, pg_cron, ...) with
+--    whatever retention window your compliance/storage requirements need.
+--    `idx_audit_logs_tenant_timestamp` (from 0003) does NOT cover this
+--    query's predicate (it's not on "timestamp" alone) — add the index
+--    below first if you'll run this regularly against a large table:
+--
+--    CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp
+--        ON audit_logs ("timestamp");
+--
+--    -- Delete everything older than 90 days, one bounded batch at a
+--    -- time (avoids one huge delete taking a long-held lock):
+--    DELETE FROM audit_logs
+--    WHERE id IN (
+--        SELECT id FROM audit_logs
+--        WHERE "timestamp" < now() - interval '90 days'
+--        LIMIT 10000
+--    );
+--    -- Repeat until it deletes 0 rows.
+--
+-- 2. Native partitioning (more setup, much cheaper to prune later — a
+--    `DROP TABLE`/`DETACH PARTITION` on an old partition is instant,
+--    unlike a `DELETE` that has to visit every matching row). Requires
+--    recreating `audit_logs` as a partitioned table (Postgres doesn't
+--    support converting an existing plain table in place) — do this as
+--    a one-time, reviewed migration, ideally on a fresh table before it
+--    has much data, or via a rename + backfill if it already does:
+--
+--    CREATE TABLE audit_logs_partitioned (
+--        id BIGSERIAL,
+--        "timestamp" TIMESTAMPTZ NOT NULL,
+--        tenant_id TEXT,
+--        user_id TEXT NOT NULL,
+--        action TEXT NOT NULL,
+--        resource TEXT NOT NULL,
+--        allowed BOOLEAN NOT NULL,
+--        reason TEXT,
+--        reason_data JSONB,
+--        request_id TEXT,
+--        PRIMARY KEY (id, "timestamp")
+--    ) PARTITION BY RANGE ("timestamp");
+--
+--    CREATE TABLE audit_logs_2026_09
+--        PARTITION OF audit_logs_partitioned
+--        FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+--    -- ... one partition per month, created ahead of time (a cron job,
+--    -- or an extension like `pg_partman`, can automate creating future
+--    -- partitions and dropping/archiving old ones).
+--
+--    CREATE INDEX ON audit_logs_partitioned (tenant_id, "timestamp" DESC);
+--
+--    -- Backfill, then swap the names in a single transaction:
+--    INSERT INTO audit_logs_partitioned SELECT * FROM audit_logs;
+--    BEGIN;
+--      ALTER TABLE audit_logs RENAME TO audit_logs_old;
+--      ALTER TABLE audit_logs_partitioned RENAME TO audit_logs;
+--    COMMIT;
+--    -- Drop `audit_logs_old` once you've verified the swap.
+--
+-- `PostgresAuditLogger` itself needs no code changes for either option —
+-- it only ever appends rows and never assumes anything about the table's
+-- physical layout.

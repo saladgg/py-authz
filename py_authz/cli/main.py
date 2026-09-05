@@ -2,6 +2,7 @@ import argparse
 import functools
 import logging
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 import anyio
 
@@ -41,29 +42,93 @@ def _exit_code_for(exc: AuthzError) -> int:
     return 1
 
 
+def _package_version() -> str:
+    """
+    `importlib.metadata.version('py-authz')` — falls back to a clearly
+    labeled placeholder in a source checkout that was never `pip
+    install`-ed (editable or otherwise), e.g. running `python -m
+    py_authz.cli.main` straight out of a git clone with no build step,
+    rather than letting `--version` itself crash (see DX2-13).
+    """
+    try:
+        return version("py-authz")
+    except PackageNotFoundError:
+        return "unknown (not installed)"
+
+
+# Every env var any CLI command falls back to, for `--help`'s epilog
+# (see DX2-16) — kept as one list so the epilog and any future
+# per-argument `help=` text can't drift out of sync with each other.
+_ENV_VARS = """\
+Environment variables (used as fallbacks — see "Config precedence" below):
+  FGA_STORE_ID        OpenFGA store ID                 (sync)
+  FGA_API_URL         OpenFGA API base URL              (sync, migrate)
+  FGA_MODEL_ID        OpenFGA authorization model ID    (sync)
+  TENANT_STORE_CONN   Postgres DSN / Redis URL          (migrate --backend postgres|redis)
+"""
+
+_EPILOG = f"""\
+Examples:
+  # Generate the OpenFGA schema from your registered models
+  py-authz generate-model --module myapp.authz.models --output model.json
+
+  # Diff + sync to a running OpenFGA instance
+  py-authz sync --module myapp.authz.models --api-url http://localhost:8082 --store-id $STORE_ID
+
+  # Roll the current model out to every known tenant, previewing first
+  py-authz migrate --module myapp.authz.models --all-tenants --dry-run
+  py-authz migrate --module myapp.authz.models --all-tenants --yes
+
+  # Migrate just one tenant, with a machine-readable summary for CI
+  py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json
+
+{_ENV_VARS}
+Config precedence: an explicit CLI flag always wins over its matching env
+var above (e.g. `--api-url` overrides $FGA_API_URL); a required value
+missing from both raises a ConfigurationError (exit code 2).
+"""
+
+
 def main():
-    parser = argparse.ArgumentParser(prog="py-authz")
+    parser = argparse.ArgumentParser(
+        prog="py-authz",
+        description="CLI tooling for py-authz: generate, sync, and migrate OpenFGA models.",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"py-authz {_package_version()}",
+    )
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Enable debug-level logging (e.g. tenant provisioning/migration progress)",
     )
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", help="Subcommand to run")
 
     # -------------------------------------------------
     # generate-model
     # -------------------------------------------------
-    gen_parser = subparsers.add_parser("generate-model")
+    gen_parser = subparsers.add_parser(
+        "generate-model",
+        help="Generate the OpenFGA authorization model JSON from registered Python models",
+        description="Generate the OpenFGA authorization model JSON from registered Python models.",
+        epilog="Example:\n  py-authz generate-model --module myapp.authz.models -o model.json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     gen_parser.add_argument(
         "--output",
         "-o",
-        help="Output file (default: stdout)",
+        help="Output file to write the generated model JSON to (default: stdout)",
         default=None,
     )
     gen_parser.add_argument(
         "--module",
-        help="Python module path containing authz models",
+        help="Python module path to import first, so its @ResourceModel classes register "
+        "(e.g. myapp.authz.models)",
         required=False,
     )
     gen_parser.add_argument(
@@ -76,11 +141,34 @@ def main():
     # sync
     # -------------------------------------------------
 
-    sync_parser = subparsers.add_parser("sync")
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Diff the current model against OpenFGA and upload it if it changed",
+        description="Diff the current model against a running OpenFGA instance and upload it "
+        "only if it changed.",
+        epilog=(
+            "Example:\n"
+            "  py-authz sync --module myapp.authz.models --api-url http://localhost:8082 "
+            "--store-id $STORE_ID\n\n" + _ENV_VARS
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    sync_parser.add_argument("--store-id", required=False)
-    sync_parser.add_argument("--api-url", required=False)
-    sync_parser.add_argument("--model-id", required=False)
+    sync_parser.add_argument(
+        "--store-id",
+        required=False,
+        help="OpenFGA store ID (env: FGA_STORE_ID)",
+    )
+    sync_parser.add_argument(
+        "--api-url",
+        required=False,
+        help="OpenFGA API base URL, e.g. http://localhost:8082 (env: FGA_API_URL)",
+    )
+    sync_parser.add_argument(
+        "--model-id",
+        required=False,
+        help="Current authorization model ID, used to detect drift (env: FGA_MODEL_ID)",
+    )
     sync_parser.add_argument(
         "--force",
         action="store_true",
@@ -88,16 +176,40 @@ def main():
     )
     sync_parser.add_argument(
         "--module",
-        help="Python module path containing authz models",
+        help="Python module path to import first, so its @ResourceModel classes register "
+        "(e.g. myapp.authz.models)",
         required=False,
+    )
+    sync_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Print a machine-readable JSON summary instead of a human-readable line",
     )
 
     # -------------------------------------------------
     # migrate
     # -------------------------------------------------
 
-    migrate_parser = subparsers.add_parser("migrate", help="Roll a model change out across tenants")
-    migrate_parser.add_argument("--api-url", required=False)
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Roll a model change out across tenants",
+        description="Roll the current model out across one or all tenants known to a "
+        "tenant-store backend.",
+        epilog=(
+            "Examples:\n"
+            "  py-authz migrate --module myapp.authz.models --all-tenants --dry-run\n"
+            "  py-authz migrate --module myapp.authz.models --all-tenants --yes\n"
+            "  py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json\n\n"
+            + _ENV_VARS
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    migrate_parser.add_argument(
+        "--api-url",
+        required=False,
+        help="OpenFGA API base URL, e.g. http://localhost:8082 (env: FGA_API_URL)",
+    )
     migrate_parser.add_argument(
         "--backend",
         choices=["memory", "postgres", "redis"],
@@ -112,7 +224,7 @@ def main():
         "--conn",
         required=False,
         help=(
-            "Connection string for --backend (Postgres DSN or Redis URL); "
+            "Connection string for --backend postgres|redis (Postgres DSN or Redis URL); "
             "falls back to the TENANT_STORE_CONN env var"
         ),
     )
@@ -129,7 +241,8 @@ def main():
     )
     migrate_parser.add_argument(
         "--module",
-        help="Python module path containing authz models",
+        help="Python module path to import first, so its @ResourceModel classes register "
+        "(e.g. myapp.authz.models)",
         required=False,
     )
     migrate_parser.add_argument(
@@ -144,6 +257,12 @@ def main():
             "Skip the confirmation prompt for --all-tenants. Required when "
             "running non-interactively (no TTY, e.g. in CI)"
         ),
+    )
+    migrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Print a machine-readable JSON summary instead of human-readable lines",
     )
 
     args = parser.parse_args()
@@ -180,6 +299,7 @@ def main():
                     api_url=args.api_url,
                     model_id=args.model_id,
                     force=args.force,
+                    json_output=args.json_output,
                 )
             )
 
@@ -197,6 +317,7 @@ def main():
                     tenant_ids=args.tenant_ids,
                     dry_run=args.dry_run,
                     yes=args.yes,
+                    json_output=args.json_output,
                 )
             )
 

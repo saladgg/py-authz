@@ -105,7 +105,28 @@ def test_main_sync_invokes_sync_command(patch_cli_entry):
     )
 
     assert patch_cli_entry["sync"] == [
-        {"store_id": "s", "api_url": "http://fake", "model_id": "m", "force": True}
+        {
+            "store_id": "s",
+            "api_url": "http://fake",
+            "model_id": "m",
+            "force": True,
+            "json_output": False,
+        }
+    ]
+
+
+def test_main_sync_json_flag_forwards_json_output(patch_cli_entry):
+    """Regression test for DX2-15: `--json` must reach `sync_command`."""
+    _run_main(["sync", "--api-url", "http://fake", "--store-id", "s", "--json"])
+
+    assert patch_cli_entry["sync"] == [
+        {
+            "store_id": "s",
+            "api_url": "http://fake",
+            "model_id": None,
+            "force": False,
+            "json_output": True,
+        }
     ]
 
 
@@ -131,6 +152,7 @@ def test_main_migrate_invokes_migrate_command(patch_cli_entry):
             "tenant_ids": None,
             "dry_run": False,
             "yes": False,
+            "json_output": False,
         }
     ]
 
@@ -146,6 +168,7 @@ def test_main_migrate_with_specific_tenants(patch_cli_entry):
             "tenant_ids": ["t1", "t2"],
             "dry_run": False,
             "yes": False,
+            "json_output": False,
         }
     ]
 
@@ -161,6 +184,24 @@ def test_main_migrate_forwards_dry_run_and_yes_flags(patch_cli_entry):
             "tenant_ids": None,
             "dry_run": True,
             "yes": True,
+            "json_output": False,
+        }
+    ]
+
+
+def test_main_migrate_json_flag_forwards_json_output(patch_cli_entry):
+    """Regression test for DX2-15: `--json` must reach `migrate_command`."""
+    _run_main(["migrate", "--tenant", "t1", "--api-url", "http://fake", "--json"])
+
+    assert patch_cli_entry["migrate"] == [
+        {
+            "api_url": "http://fake",
+            "backend": "memory",
+            "conn": None,
+            "tenant_ids": ["t1"],
+            "dry_run": False,
+            "yes": False,
+            "json_output": True,
         }
     ]
 
@@ -178,6 +219,19 @@ def test_main_migrate_loads_module_when_provided(patch_cli_entry):
     _run_main(["migrate", "--all-tenants", "--module", "some.module"])
 
     assert patch_cli_entry["load_module"] == ["some.module"]
+
+
+def test_main_version_flag_prints_version_and_exits_cleanly(patch_cli_entry, capsys):
+    """
+    Regression test for DX2-13: `--version` must actually work (it used
+    to raise "unrecognized arguments: --version") and exit with code 0.
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main(["--version"])
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "py-authz" in captured.out
 
 
 def test_main_no_command_prints_help(patch_cli_entry, capsys):

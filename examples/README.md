@@ -23,14 +23,15 @@ them without rebuilding context.
 | `10_unit_testing.py`      | `make_fake_authz()` — unit-test authz without OpenFGA       |
 | `11_hierarchical_permissions.py` | `Relation(from_parent=...)` — a folder viewer inherits document viewer |
 | `12_multitenant_fastapi.py` | `MultiTenantAuthz` + FastAPI together — `Authz` resolved per request by tenant |
+| `13_fail_open_fastapi.py` | `fail_open=True` — a route that stays available during an OpenFGA outage, contrasted with the fail-closed default |
 
 ## Prerequisites
 
 **OpenFGA running locally.** From the repo root:
 
 ```bash
-docker compose up -d openfga        # starts OpenFGA on :8080
-curl http://localhost:8080/healthz  # sanity check
+docker compose up -d openfga        # starts OpenFGA on :8082
+curl http://localhost:8082/healthz  # sanity check
 ```
 
 Note: the bundled `openfga` service uses an in-memory store, so data is wiped
@@ -121,6 +122,13 @@ uv run uvicorn examples.12_multitenant_fastapi:app --reload
 # then:
 curl -H "X-Tenant-ID: acme" -H "X-User-Id: alice" http://localhost:8000/documents/report
 curl -H "X-Tenant-ID: globex" -H "X-User-Id: alice" http://localhost:8000/documents/report  # → 403
+
+# fail_open=True: a fail-closed and a fail-open route side by side —
+# stop OpenFGA (`docker compose stop openfga`) to see them diverge
+uv run uvicorn examples.13_fail_open_fastapi:app --reload
+# then:
+curl -H "X-User-Id: alice" http://localhost:8000/documents/roadmap
+curl -H "X-User-Id: alice" http://localhost:8000/documents/roadmap/lenient
 ```
 
 ## How the pieces fit

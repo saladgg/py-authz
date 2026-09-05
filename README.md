@@ -4,8 +4,8 @@
 [![Release](https://github.com/saladgg/py-authz/actions/workflows/release.yml/badge.svg)](https://github.com/saladgg/py-authz/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-blueviolet.svg)](CHANGELOG.md)
-[![Status](https://img.shields.io/badge/status-production-brightgreen.svg)](https://pypi.org/project/py-authz/)
+[![Version](https://img.shields.io/badge/version-1.4.0-blueviolet.svg)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/status-not%20yet%20on%20PyPI-lightgrey.svg)](https://github.com/saladgg/py-authz/releases)
 [![OpenFGA](https://img.shields.io/badge/OpenFGA-compatible-6c5ce7.svg)](https://openfga.dev)
 [![Keycloak](https://img.shields.io/badge/Keycloak-JWT-7c69ef.svg)](https://www.keycloak.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-adapter-009688.svg)](https://fastapi.tiangolo.com)
@@ -117,10 +117,10 @@ Requires **Python 3.13+**.
 > configured for `git`, e.g. via SSH or a PAT):
 >
 > ```bash
-> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v1.2.0"
+> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v1.4.0"
 > ```
 >
-> Swap `[all]` for any extra below, and `v1.2.0` for the tag you want
+> Swap `[all]` for any extra below, and `v1.4.0` for the tag you want
 > (see [Releases](https://github.com/saladgg/py-authz/releases)).
 
 ```bash
@@ -154,7 +154,7 @@ You will also need an OpenFGA instance. A dev compose file is bundled:
 
 ```bash
 docker compose up -d openfga
-curl http://localhost:8080/healthz
+curl http://localhost:8082/healthz
 ```
 
 ---
@@ -343,22 +343,46 @@ Apply model migrations across every tenant:
 ```python
 from py_authz.core.migrations_manager import MigrationManager
 
-await MigrationManager(store, client_factory).apply_all()
+manager = MigrationManager(
+    api_url=os.environ["FGA_API_URL"],
+    tenant_store=my_tenant_store,  # e.g. PostgresTenantStore
+    model_registry=my_model_registry,  # e.g. PostgresModelRegistry
+)
+result = await manager.migrate_all(tenant_ids)  # or list_tenant_ids() for "all tenants"
+# result.succeeded: dict[tenant_id, model_id]; result.failed: dict[tenant_id, Exception]
 ```
+
+Or, more commonly, via the CLI's `migrate` command (below) instead of calling
+`MigrationManager` directly.
 
 ---
 
 ## CLI
 
-Installed as the `py-authz` script (requires the `cli` extra):
+Installed as the `py-authz` script (requires the `cli` extra). Run `py-authz
+--help` or `py-authz <command> --help` for the full flag list, or
+`py-authz --version` to check the installed version.
 
 ```bash
 # Generate the OpenFGA schema from your registered models
 py-authz generate-model --module myapp.authz.models --output model.json
 
 # Diff + sync to a running OpenFGA instance
-py-authz sync --module myapp.authz.models --api-url http://localhost:8080 --store-id $STORE_ID
+py-authz sync --module myapp.authz.models --api-url http://localhost:8082 --store-id $STORE_ID
+
+# Roll the current model out across every known tenant (preview first, then confirm)
+py-authz migrate --module myapp.authz.models --all-tenants --dry-run
+py-authz migrate --module myapp.authz.models --all-tenants --yes
+
+# Or just one tenant, with a machine-readable JSON summary for CI
+py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json
 ```
+
+Every command accepts its config either as a CLI flag or via an environment
+variable (a flag always wins) — `--store-id`/`FGA_STORE_ID`,
+`--api-url`/`FGA_API_URL`, `--model-id`/`FGA_MODEL_ID`, and `migrate
+--conn`/`TENANT_STORE_CONN`. See `py-authz <command> --help` for the exact
+list per command.
 
 ---
 
@@ -394,20 +418,11 @@ py-authz/
 ```bash
 make venv            # .venv with Python 3.13 (via uv)
 make install-dev     # install all dependencies including dev tools
-make format          # ruff format + ruff check --fix
-make format-check    # ruff format --check
-make lint            # mypy
-make test            # pytest with coverage
 ```
 
-Pre-commit hooks run `black`, `ruff`, `isort`, `end-of-file-fixer`, and `trailing-whitespace` on commit.
-
-**Conventions:**
-
-- Async-only — every public method is a coroutine.
-- Line length 100, ruff rules `E, F, I, UP, B, C4, SIM`.
-- All custom exceptions inherit from `AuthzError` in [`core/exceptions.py`](py_authz/core/exceptions.py).
-- Optional dependencies are loaded on-demand via [`utils/deps.py`](py_authz/utils/deps.py) with helpful `ImportError` messages.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup,
+conventions, testing, and PR workflow. Found a security issue? See
+[`SECURITY.md`](SECURITY.md) instead of opening a public issue.
 
 ---
 

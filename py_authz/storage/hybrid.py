@@ -44,14 +44,17 @@ class HybridTenantStore:
         await self.pg.set(tenant_id, store_id)
         await self._redis_set(tenant_id, store_id)
 
-    async def list_tenant_ids(self) -> list[str]:
+    async def list_tenant_ids(self, *, limit: int | None = None, offset: int = 0) -> list[str]:
         """
         Delegates to Postgres — the source of truth. Redis is a
         TTL-bounded cache of individual lookups and is not guaranteed to
         have ever seen every tenant, so it can't be used to enumerate
         them.
+
+        `limit`/`offset` are forwarded as-is to
+        `PostgresTenantStore.list_tenant_ids()` (see REL2-17).
         """
-        return await self.pg.list_tenant_ids()
+        return await self.pg.list_tenant_ids(limit=limit, offset=offset)
 
     async def _redis_get(self, tenant_id: str) -> str | None:
         try:

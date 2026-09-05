@@ -1,6 +1,7 @@
 from typing import Any
 
-from py_authz.modeling.base import Relation, ResourceModel
+from py_authz.core.exceptions import ModelValidationError
+from py_authz.modeling.base import Relation, ResourceModel, from_parent_pairs
 from py_authz.modeling.registry import registry
 
 # -------------------------------------------------------------------
@@ -18,6 +19,11 @@ class OpenFGAModelGenerator:
         - unions
         - computed usersets (inherits)
         - custom subject types
+        - parent-relation inheritance (from_parent), single or multiple
+          parent relations (tupleToUserset)
+        - intersections (AND of named relations)
+        - exclusions (base relation-def MINUS a named relation, i.e.
+          OpenFGA's difference rewrite)
     """
 
     # -------------------------------------------------------------------
@@ -99,7 +105,20 @@ class OpenFGAModelGenerator:
             - direct relations (this)
             - unions
             - inherited/computed relations (alias of union)
-            - parent-relation inheritance (tupleToUserset)
+            - parent-relation inheritance (tupleToUserset), one or many
+              parent relations
+            - intersections (AND of named relations)
+            - exclusions (base relation-def MINUS a named relation)
+
+        Every part below other than `exclude` becomes one child of an
+        (implicit, single-child-collapsed) `union` — i.e. they're all
+        ORed together, including `intersection` (which nests as just
+        another child, matching OpenFGA's own grammar where
+        `intersection` can appear as a child of `union`). `exclude` is
+        different: OpenFGA's `difference` rewrite is a two-operand
+        `base`/`subtract` pair, so it wraps the *entire* rewrite built
+        from everything else rather than being one more child in the
+        list — see `Relation.__init__`'s `exclude` docstring.
         """
         parts: list[dict[str, Any]] = []
 
@@ -129,10 +148,29 @@ class OpenFGAModelGenerator:
             )
 
         # -------------------------------------------------
-        # Parent-relation inheritance (tupleToUserset)
+        # Intersections (AND of named same-object relations)
         # -------------------------------------------------
-        if rel.from_parent:
-            tupleset_relation, computed_relation = rel.from_parent
+        if rel.intersection:
+            if len(rel.intersection) < 2:
+                raise ModelValidationError(
+                    f"Relation '{rel.name}' has intersection={rel.intersection!r} "
+                    "with fewer than 2 relations — intersection (AND) requires "
+                    "at least 2 relation names to combine"
+                )
+            parts.append(
+                {
+                    "intersection": {
+                        "child": [
+                            {"computedUserset": {"relation": name}} for name in rel.intersection
+                        ]
+                    }
+                }
+            )
+
+        # -------------------------------------------------
+        # Parent-relation inheritance (tupleToUserset), one child per pair
+        # -------------------------------------------------
+        for tupleset_relation, computed_relation in from_parent_pairs(rel.from_parent):
             parts.append(
                 {
                     "tupleToUserset": {
@@ -141,6 +179,32 @@ class OpenFGAModelGenerator:
                     }
                 }
             )
+
+        # -------------------------------------------------
+        # Exclusion (difference: base MINUS excluded relation)
+        # -------------------------------------------------
+        if rel.exclude:
+            if rel.exclude == rel.name:
+                raise ModelValidationError(f"Relation '{rel.name}' cannot exclude itself")
+            if rel.exclude in (*rel.union, *rel.inherits, *rel.intersection):
+                raise ModelValidationError(
+                    f"Relation '{rel.name}' both includes and excludes "
+                    f"'{rel.exclude}' — contradictory rewrite"
+                )
+            if not parts:
+                raise ModelValidationError(
+                    f"Relation '{rel.name}' has exclude={rel.exclude!r} but no "
+                    "base relation-def (subjects/union/inherits/intersection/"
+                    "from_parent) to subtract it from"
+                )
+
+            base = parts[0] if len(parts) == 1 else {"union": {"child": parts}}
+            return {
+                "difference": {
+                    "base": base,
+                    "subtract": {"computedUserset": {"relation": rel.exclude}},
+                }
+            }
 
         # -------------------------------------------------
         # Final shape

@@ -40,7 +40,7 @@ instance. A dev compose file is bundled in the repo:
 
 ```bash
 docker compose up -d openfga
-curl http://localhost:8080/healthz
+curl http://localhost:8082/healthz
 ```
 
 > The compose service uses OpenFGA's in-memory datastore, so it loses all data
@@ -73,10 +73,42 @@ registry.register(Document)
 ```
 
 `union=[...]` is the simplest form of inheritance: "owner implies editor"
-means anyone with `owner` automatically satisfies an `editor` check. Use
-`inherits=[...]` when the implication comes from another object (e.g. a
-document inheriting its folder's viewers). `subjects=[...]` (default
-`["user"]`) declares which subject types can hold the relation.
+means anyone who holds `owner` *on this same object* automatically
+satisfies an `editor` check too (OpenFGA's `computedUserset`).
+`inherits=[...]` is currently just an alias of `union` — same shape, same
+rewrite — kept only for backward compatibility with older models; don't
+reach for it to mean "inherit from a *different*, parent object".
+
+For that cross-object case — e.g. a document inheriting its folder's
+viewers — use `from_parent=(tupleset_relation, computed_relation)`
+instead (OpenFGA's `tupleToUserset`):
+
+```python
+class Folder(ResourceModel):
+    type = "folder"
+    viewer = Relation("viewer")
+
+
+class Document(ResourceModel):
+    type = "document"
+
+    # Which folder this document lives in (populated by writing a tuple
+    # with the folder as `user` and the document as `object`).
+    parent = Relation("parent", subjects=["folder"])
+
+    # A viewer of the parent folder is a viewer of this document too.
+    viewer = Relation(
+        "viewer",
+        from_parent=("parent", "viewer"),
+        subjects=["user"],  # from_parent alone defaults subjects to []
+    )
+```
+
+See [`examples/11_hierarchical_permissions.py`](../examples/11_hierarchical_permissions.py)
+for a complete, runnable version of this. `subjects=[...]` (default
+`["user"]`, or `[]` when `from_parent` is set with no explicit `subjects`
+— a purely-inherited relation isn't directly assignable by default)
+declares which subject types can hold the relation directly.
 
 You must call `registry.register(Cls)` on every model — the metaclass only
 binds relation names to the class; it doesn't register the class itself.
@@ -98,7 +130,7 @@ from myapp.authz import models  # noqa: F401 — registers models
 
 async def bootstrap():
     client = OpenFGAClient(
-        api_url=os.environ["FGA_API_URL"],  # http://localhost:8080
+        api_url=os.environ["FGA_API_URL"],  # http://localhost:8082
         store_id=None,  # we'll create one
         model_id=None,
     )

@@ -50,3 +50,15 @@ async def test_list_tenant_ids_returns_every_known_tenant():
     await store.set("t2", "store-2")
 
     assert set(await store.list_tenant_ids()) == {"t1", "t2"}
+
+
+@pytest.mark.asyncio
+async def test_list_tenant_ids_supports_limit_and_offset():
+    """REL2-17: pagination kwargs for a large tenant set."""
+    store = InMemoryTenantStore()
+
+    for tid in ["t3", "t1", "t2"]:
+        await store.set(tid, f"store-{tid}")
+
+    assert await store.list_tenant_ids(limit=2) == ["t1", "t2"]
+    assert await store.list_tenant_ids(limit=2, offset=2) == ["t3"]

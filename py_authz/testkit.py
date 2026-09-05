@@ -8,21 +8,25 @@ Lets users unit-test authz code without booting OpenFGA. The fake honors:
       is accepted identically, matching the real generator: see
       ``modeling/base.py``'s ``Relation`` docstring)
     - parent-relation inheritance declared via ``Relation(from_parent=...)``
-      (e.g. ``viewer = Relation("viewer", from_parent=("parent", "viewer"))``)
+      (e.g. ``viewer = Relation("viewer", from_parent=("parent", "viewer"))``),
+      including multiple parent relations ORed together
+      (``from_parent=[("parent_a", "viewer"), ("parent_b", "viewer")]``)
+    - intersections (``Relation(intersection=["editor", "verified"])``)
+    - exclusions (``Relation(exclude="banned")``)
     - per-request contextual tuples on check / list_objects
 
-It does NOT implement the full OpenFGA evaluation engine (no userset rewrites
-beyond unions and `from_parent`-style tuple-to-userset, no conditions/ABAC).
-For those, spin up a real OpenFGA instance — this fake covers the common
-RBAC (+ single-level hierarchy) patterns that dominate unit-test surface
-area.
+It does NOT implement the full OpenFGA evaluation engine (no conditions/ABAC,
+no nested intersection/difference beyond one level). For anything more
+elaborate, spin up a real OpenFGA instance — this fake covers the common
+RBAC (+ hierarchy/intersection/exclusion) patterns that dominate unit-test
+surface area.
 """
 
 from __future__ import annotations
 
 from py_authz.api import Authz
 from py_authz.core.enforcement import AuthzEngine
-from py_authz.modeling.base import Relation, ResourceModel
+from py_authz.modeling.base import Relation, ResourceModel, from_parent_pairs
 from py_authz.modeling.registry import ResourceModelRegistry
 from py_authz.modeling.registry import registry as default_registry
 
@@ -120,8 +124,38 @@ class InMemoryFGAClient:
             return False
         seen.add(key)
 
+        obj_type = obj.split(":", 1)[0]
+        model = self._lookup_model(obj_type)
+        rel = self._lookup_relation(model, relation) if model is not None else None
+
+        base_holds = self._base_holds(user, relation, obj, extra, seen, key, rel)
+
+        if not base_holds:
+            return False
+
+        # Exclusion (OpenFGA `difference`): even if the base relation-def
+        # holds, `exclude` revokes it — mirrors
+        # `OpenFGAModelGenerator._build_relation()`'s `difference` rewrite,
+        # which wraps the *entire* base, not just one branch of it.
+        return not (
+            rel is not None and rel.exclude and self._check(user, rel.exclude, obj, extra, seen)
+        )
+
+    def _base_holds(
+        self,
+        user: str,
+        relation: str,
+        obj: str,
+        extra: set[tuple[str, str, str]],
+        seen: set[tuple[str, str, str]],
+        key: tuple[str, str, str],
+        rel: Relation | None,
+    ) -> bool:
         if key in self._tuples or key in extra:
             return True
+
+        if rel is None:
+            return False
 
         # Walk union/inherits edges from the model registry: if `relation`
         # is the union of {a, b}, holding any of those on `obj` implies
@@ -130,26 +164,24 @@ class InMemoryFGAClient:
         # exact same `computedUserset` rewrite, so the fake must too, or
         # a model using `inherits=` would behave correctly against real
         # OpenFGA but incorrectly (falsely denied) here.
-        obj_type = obj.split(":", 1)[0]
-        model = self._lookup_model(obj_type)
-        if model is None:
-            return False
-
-        rel = self._lookup_relation(model, relation)
-        if rel is None:
-            return False
-
         same_object_parents = (*rel.union, *rel.inherits)
         if any(self._check(user, parent, obj, extra, seen) for parent in same_object_parents):
+            return True
+
+        # Intersection (AND of named same-object relations): holds only
+        # if every named relation holds.
+        if rel.intersection and all(
+            self._check(user, name, obj, extra, seen) for name in rel.intersection
+        ):
             return True
 
         # Walk parent-relation inheritance (tupleToUserset): if `obj`'s
         # `tupleset_relation` points at some parent object(s), the user
         # holds `relation` on `obj` if they hold `computed_relation` on
-        # any of those parents.
-        if rel.from_parent:
-            tupleset_relation, computed_relation = rel.from_parent
-            all_tuples = self._tuples | extra
+        # any of those parents. One or many `(tupleset_relation,
+        # computed_relation)` pairs, ORed together.
+        all_tuples = self._tuples | extra
+        for tupleset_relation, computed_relation in from_parent_pairs(rel.from_parent):
             parents = {u for u, r, o in all_tuples if r == tupleset_relation and o == obj}
             if any(self._check(user, computed_relation, parent, extra, seen) for parent in parents):
                 return True

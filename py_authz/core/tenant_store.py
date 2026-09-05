@@ -12,6 +12,13 @@ class TenantStore(Protocol):
 
     async def list_tenant_ids(self) -> list[str]: ...
 
+    # Note: `PostgresTenantStore`/`HybridTenantStore` additionally accept
+    # optional `limit`/`offset` keyword arguments for pagination (see
+    # REL2-17) — omitted from this Protocol since every real caller in
+    # this repo (`MigrationManager`, `TenantManager`) enumerates the full
+    # set with a bare `list_tenant_ids()` call, which every implementation
+    # (including these extended ones) still supports unchanged.
+
 
 # Temp class
 class InMemoryTenantStore:
@@ -24,5 +31,6 @@ class InMemoryTenantStore:
     async def set(self, tenant_id: str, store_id: str) -> None:
         self._data[tenant_id] = store_id
 
-    async def list_tenant_ids(self) -> list[str]:
-        return list(self._data.keys())
+    async def list_tenant_ids(self, *, limit: int | None = None, offset: int = 0) -> list[str]:
+        ids = sorted(self._data.keys())[offset:]
+        return ids[:limit] if limit is not None else ids

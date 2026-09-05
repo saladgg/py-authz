@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime
 
@@ -215,21 +216,27 @@ class AuthzEngine:
                 cache_hit = True
                 duration = (time.time() - start) * 1000
 
-                logger.info(
-                    json.dumps(
-                        {
-                            "event": "authz_check",
-                            "request_id": get_request_id(),
-                            "tenant": getattr(self.fga_client, "store_id", None),
-                            "user": request.identity.id,
-                            "relation": request.action,
-                            "resource": request.resource.to_fga_object(),
-                            "allowed": cached,
-                            "cache_hit": True,
-                            "latency_ms": round(duration, 2),
-                        }
+                # Building/serializing this payload has a real cost
+                # (attribute lookups, `json.dumps`) on a hot path meant to
+                # run on every authorization decision — skip it entirely
+                # when INFO logging is disabled and nothing would consume
+                # the result (see REL2-16).
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        json.dumps(
+                            {
+                                "event": "authz_check",
+                                "request_id": get_request_id(),
+                                "tenant": getattr(self.fga_client, "store_id", None),
+                                "user": request.identity.id,
+                                "relation": request.action,
+                                "resource": request.resource.to_fga_object(),
+                                "allowed": cached,
+                                "cache_hit": True,
+                                "latency_ms": round(duration, 2),
+                            }
+                        )
                     )
-                )
 
                 self._record_metrics(allowed=cached, cache_hit=True, duration_ms=duration)
                 self._audit_decision(request, cached, cache_hit=True)
@@ -252,21 +259,25 @@ class AuthzEngine:
         # -------------------------------------------------
         # 4. Logging (AFTER decision)
         # -------------------------------------------------
-        logger.info(
-            json.dumps(
-                {
-                    "event": "authz_check",
-                    "request_id": get_request_id(),
-                    "tenant": getattr(self.fga_client, "store_id", None),
-                    "user": request.identity.id,
-                    "relation": request.action,
-                    "resource": request.resource.to_fga_object(),
-                    "allowed": allowed,
-                    "cache_hit": cache_hit,
-                    "latency_ms": round(duration, 2),
-                }
+        # Same guard as the cache-hit branch above (REL2-16) — this line
+        # runs on every uncached/live-checked `enforce()` call, so skip
+        # building/serializing the payload when INFO logging is disabled.
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "authz_check",
+                        "request_id": get_request_id(),
+                        "tenant": getattr(self.fga_client, "store_id", None),
+                        "user": request.identity.id,
+                        "relation": request.action,
+                        "resource": request.resource.to_fga_object(),
+                        "allowed": allowed,
+                        "cache_hit": cache_hit,
+                        "latency_ms": round(duration, 2),
+                    }
+                )
             )
-        )
 
         self._record_metrics(allowed=allowed, cache_hit=cache_hit, duration_ms=duration)
 
@@ -323,8 +334,10 @@ class AuthzEngine:
         self, request: AuthzRequest, cache_key: str, contextual: list[dict] | None
     ) -> bool:
         # Only ever called by `_check_upstream()` after it has already
-        # confirmed `self.cache` is configured.
-        assert self.cache is not None
+        # confirmed `self.cache` is configured. Type-narrowing invariant,
+        # not a security boundary — noqa'd rather than widening the
+        # `S101` per-file-ignore to non-test code (see SEC2-8).
+        assert self.cache is not None  # noqa: S101
 
         allowed = await self.fga_client.check(
             user=request.identity.id,

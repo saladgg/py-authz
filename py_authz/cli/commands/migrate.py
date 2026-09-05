@@ -1,3 +1,4 @@
+import json
 import sys
 
 from py_authz.cli.config import get_env
@@ -68,6 +69,7 @@ async def migrate_command(
     tenant_ids: list[str] | None = None,
     dry_run: bool = False,
     yes: bool = False,
+    json_output: bool = False,
 ) -> None:
     """
     Roll the current model out across tenants via `MigrationManager`.
@@ -85,6 +87,10 @@ async def migrate_command(
             persisting anything (see REL2-10).
         yes: skip the confirmation prompt for `--all-tenants`. Required
             in a non-interactive context (no TTY) — see below.
+        json_output: print one machine-readable JSON summary to stdout
+            instead of the free-text, per-tenant lines below (see
+            DX2-15) — meant for CI pipelines that want structured
+            per-tenant results without line-parsing free text.
     """
     api_url = api_url or get_env("FGA_API_URL", required=True)
 
@@ -95,7 +101,10 @@ async def migrate_command(
         ids = tenant_ids if tenant_ids else await tenant_store.list_tenant_ids()
 
         if not ids:
-            print("No tenants found — nothing to migrate.")
+            if json_output:
+                print(json.dumps({"tenants_found": 0, "succeeded": {}, "failed": {}}))
+            else:
+                print("No tenants found — nothing to migrate.")
             return
 
         if not dry_run and all_tenants_mode and not yes:
@@ -118,7 +127,10 @@ async def migrate_command(
                 f"About to migrate {len(ids)} tenant(s) to the current model. Continue? [y/N] "
             )
             if confirmation.strip().lower() not in ("y", "yes"):
-                print("Aborted.")
+                if json_output:
+                    print(json.dumps({"aborted": True}))
+                else:
+                    print("Aborted.")
                 return
 
         manager = MigrationManager(
@@ -129,17 +141,32 @@ async def migrate_command(
 
         if dry_run:
             changes = await manager.dry_run_all(ids)
-            for tenant_id, would_change in changes.items():
-                print(f"{tenant_id}: {'would migrate' if would_change else 'no change'}")
+            if json_output:
+                print(json.dumps({"dry_run": True, "changes": changes}))
+            else:
+                for tenant_id, would_change in changes.items():
+                    print(f"{tenant_id}: {'would migrate' if would_change else 'no change'}")
             return
 
         result = await manager.migrate_all(ids)
 
-        for tenant_id, model_id in result.succeeded.items():
-            print(f"{tenant_id}: {model_id}")
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "succeeded": result.succeeded,
+                        "failed": {
+                            tenant_id: str(error) for tenant_id, error in result.failed.items()
+                        },
+                    }
+                )
+            )
+        else:
+            for tenant_id, model_id in result.succeeded.items():
+                print(f"{tenant_id}: {model_id}")
 
-        for tenant_id, error in result.failed.items():
-            print(f"{tenant_id}: FAILED - {error}", file=sys.stderr)
+            for tenant_id, error in result.failed.items():
+                print(f"{tenant_id}: FAILED - {error}", file=sys.stderr)
 
         if result.failed:
             raise ExternalServiceError(

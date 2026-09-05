@@ -55,6 +55,61 @@ async def test_check_success():
 
 
 # -------------------------------------------------------------------
+# for_tenant() factory (ARCH2-20)
+# -------------------------------------------------------------------
+
+
+def test_for_tenant_builds_equivalent_client():
+    """
+    `OpenFGAClient.for_tenant(...)` builds a client indistinguishable
+    from the equivalent direct `OpenFGAClient(...)` call — same
+    attributes, both directions defaulted the same way — so the three
+    tenant-lifecycle call sites (`TenantManager`, `MultiTenantAuthz`,
+    `MigrationManager`) that now route through it get an identical
+    client to what they built by hand before.
+    """
+    via_factory = OpenFGAClient.for_tenant(
+        api_url="http://fake/",
+        store_id="store-1",
+        model_id="model-1",
+    )
+    via_ctor = OpenFGAClient(
+        api_url="http://fake/",
+        store_id="store-1",
+        model_id="model-1",
+    )
+
+    assert via_factory.api_url == via_ctor.api_url == "http://fake"
+    assert via_factory.store_id == via_ctor.store_id == "store-1"
+    assert via_factory.model_id == via_ctor.model_id == "model-1"
+    assert via_factory.timeout == via_ctor.timeout
+    assert via_factory.max_retries == via_ctor.max_retries
+
+
+def test_for_tenant_defaults_store_and_model_id_to_none():
+    """
+    `TenantManager.provision()` calls `for_tenant()` with only `api_url`
+    — before a store exists, `store_id`/`model_id` aren't known yet.
+    """
+    client = OpenFGAClient.for_tenant(api_url="http://fake")
+
+    assert client.store_id is None
+    assert client.model_id is None
+
+
+def test_for_tenant_accepts_injected_http_client():
+    http_client = SuccessClient()
+
+    client = OpenFGAClient.for_tenant(
+        api_url="http://fake",
+        store_id="store-1",
+        http_client=http_client,
+    )
+
+    assert client._client is http_client
+
+
+# -------------------------------------------------------------------
 # Timeout Handling
 # -------------------------------------------------------------------
 

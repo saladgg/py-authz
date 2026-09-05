@@ -6,15 +6,24 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default (see SEC2-7): every job only ever needs to read
+# repo contents to check out and run lint/tests — nothing here pushes
+# commits, creates releases, or needs any other scope. Narrow further
+# per-job only where a job genuinely needs more (contrast `release.yml`,
+# which holds `contents: write` and, for its PyPI publish job,
+# `id-token: write`).
+permissions:
+  contents: read
+
 jobs:
   lint-test:
     name: Lint & Test
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 
@@ -27,6 +36,9 @@ jobs:
       - name: Lint
         run: make lint
 
+      - name: Audit dependencies
+        run: make audit
+
       - name: Test
         run: make test
 
@@ -35,9 +47,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 

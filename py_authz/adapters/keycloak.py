@@ -24,6 +24,7 @@ class KeycloakJWTValidator(OIDCJWTValidator):
         audience: str,
         *,
         jwks_refresh_cooldown: float = 60.0,
+        leeway: float = 0,
     ):
         """
         Args:
@@ -37,6 +38,10 @@ class KeycloakJWTValidator(OIDCJWTValidator):
             jwks_refresh_cooldown (float):
                 Minimum seconds between forced JWKS refetches — see
                 `OIDCJWTValidator._get_jwks`.
+
+            leeway (float):
+                Clock-skew tolerance, in seconds, for `exp`/`nbf`/`iat`
+                validation — see `OIDCJWTValidator.__init__` (DX2-9).
         """
         issuer = issuer.rstrip("/")
         super().__init__(
@@ -44,6 +49,7 @@ class KeycloakJWTValidator(OIDCJWTValidator):
             audience,
             jwks_url=f"{issuer}/protocol/openid-connect/certs",
             jwks_refresh_cooldown=jwks_refresh_cooldown,
+            leeway=leeway,
         )
         # Preserved as a plain attribute (rather than only living inside
         # the base class's `_explicit_jwks_url`) since it was public API

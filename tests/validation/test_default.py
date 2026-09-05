@@ -1,6 +1,9 @@
 import pytest
 
 from py_authz.core.exceptions import ModelValidationError
+from py_authz.modeling.base import Relation, ResourceModel
+from py_authz.modeling.generator import OpenFGAModelGenerator
+from py_authz.modeling.registry import registry
 from py_authz.validation.default import DefaultModelValidator, detect_cycles
 
 
@@ -84,6 +87,63 @@ def test_validate_rejects_non_dict_relation(validator):
 
     with pytest.raises(ModelValidationError, match="Invalid relation format"):
         validator.validate(model)
+
+
+def test_validate_accepts_bare_intersection_rewrite(validator):
+    """
+    Regression test for ARCH2-13: a bare `intersection` rewrite (the
+    shape `Relation(intersection=[...], subjects=[])` generates) must be
+    accepted as a valid rewrite by the basic shape check, not rejected
+    as "no valid rewrite" just because it isn't `this`/`union`/
+    `computedUserset`/`tupleToUserset`.
+    """
+    model = {
+        "type_definitions": [
+            {
+                "type": "document",
+                "relations": {
+                    "editor": {"this": {}},
+                    "verified": {"this": {}},
+                    "access": {
+                        "intersection": {
+                            "child": [
+                                {"computedUserset": {"relation": "editor"}},
+                                {"computedUserset": {"relation": "verified"}},
+                            ]
+                        }
+                    },
+                },
+            },
+        ],
+    }
+
+    validator.validate(model)
+
+
+def test_validate_accepts_bare_difference_rewrite(validator):
+    """
+    Regression test for ARCH2-13: a bare `difference` rewrite (the shape
+    `Relation(exclude=...)` generates) must be accepted as a valid
+    rewrite by the basic shape check.
+    """
+    model = {
+        "type_definitions": [
+            {
+                "type": "document",
+                "relations": {
+                    "banned": {"this": {}},
+                    "viewer": {
+                        "difference": {
+                            "base": {"this": {}},
+                            "subtract": {"computedUserset": {"relation": "banned"}},
+                        }
+                    },
+                },
+            },
+        ],
+    }
+
+    validator.validate(model)
 
 
 def test_validate_rejects_relation_without_known_rewrite(validator):
@@ -227,3 +287,149 @@ def test_validate_raises_on_circular_relations_end_to_end(validator):
 
     with pytest.raises(ModelValidationError, match="Circular"):
         validator.validate(model)
+
+
+# ----------------------------------------------------------------------
+# ARCH2-13: `_referenced_relations()` already recursed into
+# `intersection`/`difference` shapes (added for ARCH-3), but the real
+# generator could never actually *produce* them — these confirm the
+# generator's real `intersection`/`difference`/multi-`from_parent` output
+# is what gets walked here, not a hand-built stand-in for it, and that
+# cycle detection reachable only through those branches is caught.
+# ----------------------------------------------------------------------
+
+
+def _generated_relations(*models: type[ResourceModel]) -> dict:
+    """
+    Register `models` on the process-global `registry` (the same
+    singleton `OpenFGAModelGenerator` always reads from — it has no
+    injectable-registry seam), generate the *real* model JSON, then
+    deregister them again so a deliberately-cyclic test type here can
+    never leak into an unrelated test's `generate()`/`validate()` call
+    later in the same session.
+    """
+    for model in models:
+        registry.register(model)
+    try:
+        model_json = OpenFGAModelGenerator().generate()
+    finally:
+        for model in models:
+            del registry._models[model.type]
+    types = {t["type"]: t for t in model_json["type_definitions"]}
+    # Merge every registered type's relations (each type's own namespace)
+    # for the one type under test — cycle detection operates per type.
+    return {t: types[t]["relations"] for t in (m.type for m in models)}
+
+
+def test_cycle_reachable_only_through_intersection_branch_is_detected():
+    """`a`'s rewrite is a bare `intersection` of `b`/`c` (no `this`); `b`
+    unions back to `a` — a cycle reachable only by recursing into
+    `intersection`'s `child` list."""
+
+    class CycleIntersectionDoc(ResourceModel):
+        type = "cycle_intersection_doc"
+
+        a = Relation("a", intersection=["b", "c"], subjects=[])
+        b = Relation("b", union=["a"])
+        c = Relation("c")
+
+    # `subjects=[]` alone falls back to `["user"]` (see
+    # `test_build_relation_returns_empty_when_no_parts` in
+    # tests/modeling/test_generator_extended.py) — set directly so `a`'s
+    # rewrite is a *bare* `intersection`, not `this OR intersection`.
+    CycleIntersectionDoc.a.subjects = []
+
+    relations = _generated_relations(CycleIntersectionDoc)["cycle_intersection_doc"]
+
+    # Confirm real generator output actually took the intersection shape
+    # (not a hand-built stand-in).
+    assert "intersection" in relations["a"]
+
+    with pytest.raises(ModelValidationError, match="Circular"):
+        detect_cycles(relations)
+
+
+def test_cycle_reachable_only_through_difference_branch_is_detected():
+    """`viewer`'s rewrite is a `difference` (this OR editor, MINUS
+    revoked); `editor` unions back to `viewer` — a cycle reachable only
+    by recursing into `difference`'s `base`."""
+
+    class CycleDifferenceDoc(ResourceModel):
+        type = "cycle_difference_doc"
+
+        viewer = Relation("viewer", union=["editor"], exclude="revoked")
+        editor = Relation("editor", union=["viewer"])
+        revoked = Relation("revoked")
+
+    relations = _generated_relations(CycleDifferenceDoc)["cycle_difference_doc"]
+
+    assert "difference" in relations["viewer"]
+
+    with pytest.raises(ModelValidationError, match="Circular"):
+        detect_cycles(relations)
+
+
+def test_cycle_alongside_multi_from_parent_branch_is_still_detected():
+    """`viewer` unions `editor` (closing a cycle) AND is also reachable
+    via two `from_parent` pairs — confirms the multiple `tupleToUserset`
+    children (correctly ignored as cross-type references) don't hide the
+    same-type cycle sitting alongside them in the same `union`."""
+
+    class MultiParentCycleDoc(ResourceModel):
+        type = "multi_parent_cycle_doc"
+
+        parent_folder = Relation("parent_folder", subjects=["folder"])
+        parent_workspace = Relation("parent_workspace", subjects=["workspace"])
+        viewer = Relation(
+            "viewer",
+            union=["editor"],
+            from_parent=[("parent_folder", "viewer"), ("parent_workspace", "viewer")],
+        )
+        editor = Relation("editor", union=["viewer"])
+
+    relations = _generated_relations(MultiParentCycleDoc)["multi_parent_cycle_doc"]
+
+    child = relations["viewer"]["union"]["child"]
+    tuple_to_userset_children = [c for c in child if "tupleToUserset" in c]
+    assert len(tuple_to_userset_children) == 2
+
+    with pytest.raises(ModelValidationError, match="Circular"):
+        detect_cycles(relations)
+
+
+def test_intersection_exclude_and_multi_from_parent_pass_full_validator_when_acyclic():
+    """The happy path, end to end through `DefaultModelValidator.validate()`:
+    a model actually using intersection/exclude/multi-from_parent, with no
+    cycle, passes validation."""
+
+    class Folder(ResourceModel):
+        type = "acyclic_arch2_13_folder"
+        viewer = Relation("viewer")
+
+    class Workspace(ResourceModel):
+        type = "acyclic_arch2_13_workspace"
+        viewer = Relation("viewer")
+
+    class Doc(ResourceModel):
+        type = "acyclic_arch2_13_doc"
+
+        parent_folder = Relation("parent_folder", subjects=["acyclic_arch2_13_folder"])
+        parent_workspace = Relation("parent_workspace", subjects=["acyclic_arch2_13_workspace"])
+        editor = Relation("editor")
+        verified = Relation("verified")
+        banned = Relation("banned")
+        access = Relation("access", intersection=["editor", "verified"], exclude="banned")
+        viewer = Relation(
+            "viewer",
+            from_parent=[("parent_folder", "viewer"), ("parent_workspace", "viewer")],
+        )
+
+    for model in (Folder, Workspace, Doc):
+        registry.register(model)
+
+    try:
+        validator = DefaultModelValidator()
+        validator.validate(OpenFGAModelGenerator().generate())
+    finally:
+        for model in (Folder, Workspace, Doc):
+            del registry._models[model.type]

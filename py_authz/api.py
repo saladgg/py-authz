@@ -129,6 +129,13 @@ class Authz:
             - string actions ("viewer")
             - Relation objects (Document.view)
 
+        When `action` is a `Relation`, `resource` accepts either the
+        matching `ResourceModel` instance (e.g. `Document(id="42")`) or a
+        plain `Resource` whose `.type` matches `action.resource_cls.type`
+        — the same dual support `grant`/`revoke` already have (see
+        ARCH2-22). A `Resource` with a mismatched `.type` (or any other
+        object) raises `TypeError`.
+
         Args:
             context (Optional[dict]):
                 ABAC context forwarded to OpenFGA conditions.
@@ -146,8 +153,26 @@ class Authz:
 
             if isinstance(resource, ResourceModel):
                 resource_obj = resource.to_resource()
+            elif isinstance(resource, Resource):
+                # Accept a plain `Resource` too, matching
+                # `grant`/`revoke`'s existing dual support for either
+                # shape (see ARCH2-22 — this used to be `can()`-only
+                # asymmetry, with no reason for the two to differ). Only
+                # when `relation` is bound to a `ResourceModel` class do
+                # we have anything to check it against; an unbound
+                # `Relation` (never assigned as a class attribute) can't
+                # verify a type match, so any `Resource` is accepted as-is
+                # (same as `list_objects()`'s handling of unbound
+                # relations).
+                if action.resource_cls is not None and resource.type != action.resource_cls.type:
+                    raise TypeError(
+                        f"Resource type {resource.type!r} does not match "
+                        f"{action.name!r}'s bound resource type "
+                        f"{action.resource_cls.type!r}"
+                    )
+                resource_obj = resource
             else:
-                raise TypeError("Resource must be a ResourceModel instance")
+                raise TypeError("Resource must be a ResourceModel or Resource instance")
 
         # -------------------------------------------------
         # String-based API (backward compatibility)
@@ -557,7 +582,7 @@ class MultiTenantAuthz:
             # Auto-provision tenant
             store_id = await self.tenant_manager.provision(tenant_id)
 
-        client = OpenFGAClient(
+        client = OpenFGAClient.for_tenant(
             api_url=self.api_url,
             store_id=store_id,
             model_id=self.model_id,
