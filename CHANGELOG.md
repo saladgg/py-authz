@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-09-05)
+
+### Features
+
+- Close out second-pass audit (Tiers 3-6 across backlogs 05-08)
+  ([#10](https://github.com/saladgg/py-authz/pull/10),
+  [`dba7cc7`](https://github.com/saladgg/py-authz/commit/dba7cc7c0aa9c2107277414f3f023775c1b99f66))
+
+
 ## v1.4.0 (2026-09-02)
 
 ### Features
