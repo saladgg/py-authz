@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-09-07)
+
+### Features
+
+- Control-plane API + Next.js control panel (docs/todos/09, CP-1..CP-19)
+  ([#16](https://github.com/saladgg/py-authz/pull/16),
+  [`ee34bd3`](https://github.com/saladgg/py-authz/commit/ee34bd34a69ffbd67eb6ff114c8edd617b1b6e10))
+
+
 ## v1.5.0 (2026-09-05)
 
 ### Features
