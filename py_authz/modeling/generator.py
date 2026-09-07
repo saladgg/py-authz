@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import Any
 
 from py_authz.core.exceptions import ModelValidationError
@@ -30,29 +31,44 @@ class OpenFGAModelGenerator:
     # Public API
     # -------------------------------------------------------------------
 
-    def generate(self) -> dict[str, Any]:
+    def generate(self, *, models: Iterable[type[ResourceModel]] | None = None) -> dict[str, Any]:
         """
         Generate full OpenFGA model.
+
+        Args:
+            models: Explicit set of `ResourceModel` classes to generate
+                types for, instead of everything registered in the global
+                `py_authz.modeling.registry.registry` singleton. `None`
+                (the default, and the only behavior before this argument
+                existed) reads that global registry, same as always — an
+                adopter's own models registered via `registry.register(...)`
+                are unaffected either way. Pass an explicit iterable for a
+                model that must never be mixed into (or read from) that
+                shared registry, e.g. a second, independent model synced
+                to its own OpenFGA store (see the control-plane API's
+                dogfooded RBAC model, `control_plane/rbac_model.py`).
 
         Returns:
             dict: OpenFGA model JSON
         """
         return {
             "schema_version": "1.1",
-            "type_definitions": self._generate_types(),
+            "type_definitions": self._generate_types(models),
         }
 
     # -------------------------------------------------------------------
     # Type generation
     # -------------------------------------------------------------------
 
-    def _generate_types(self) -> list[dict[str, Any]]:
+    def _generate_types(
+        self, models: Iterable[type[ResourceModel]] | None = None
+    ) -> list[dict[str, Any]]:
         types: list[dict[str, Any]] = []
 
         # Always include base user type
         types.append({"type": "user"})
 
-        for model in registry.all():
+        for model in models if models is not None else registry.all():
             types.append(self._generate_type(model))
 
         return types
@@ -227,11 +243,12 @@ class OpenFGAModelGenerator:
 # -------------------------------------------------------------------
 
 
-def generate_model() -> dict[str, Any]:
+def generate_model(*, models: Iterable[type[ResourceModel]] | None = None) -> dict[str, Any]:
     """
-    Generate OpenFGA model from all registered ResourceModels.
+    Generate OpenFGA model from all registered ResourceModels, or from an
+    explicit `models` iterable — see `OpenFGAModelGenerator.generate()`.
 
     Returns:
         dict: OpenFGA model JSON
     """
-    return OpenFGAModelGenerator().generate()
+    return OpenFGAModelGenerator().generate(models=models)

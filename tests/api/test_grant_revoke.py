@@ -356,3 +356,73 @@ async def test_grant_without_audit_logger_or_metrics_does_not_raise(
     # Neither audit_logger nor metrics configured — record_write() must
     # be a safe no-op, not raise.
     await authz.grant(identity, "viewer", resource)
+
+
+# -------------------------------------------------------------------
+# `reason`/`actor` (CP-8: a control-plane API's mandatory manual
+# grant/revoke justification, and attributing the operator that
+# performed a grant on someone else's behalf).
+# -------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grant_reason_lands_in_audit_event(mock_fga_client, identity, resource):
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None, audit_logger=audit)
+    authz = Authz(engine)
+
+    await authz.grant(identity, "viewer", resource, reason="onboarding ticket #123")
+    await engine.flush_audit_logs()
+
+    event = audit.events[0]
+    assert event.reason == "onboarding ticket #123"
+    assert event.reason_data["reason"] == "onboarding ticket #123"
+
+
+@pytest.mark.asyncio
+async def test_grant_actor_recorded_without_changing_subject(mock_fga_client, identity, resource):
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None, audit_logger=audit)
+    authz = Authz(engine)
+    operator = Identity(id="user:operator-1")
+
+    await authz.grant(identity, "viewer", resource, reason="manual grant", actor=operator)
+    await engine.flush_audit_logs()
+
+    event = audit.events[0]
+    # The tuple's subject stays `identity` — the operator performing the
+    # grant is recorded in `reason_data`, not swapped in as `user_id`.
+    assert event.user_id == identity.id
+    assert event.reason_data["actor"] == operator.id
+
+
+@pytest.mark.asyncio
+async def test_revoke_reason_and_actor_recorded(mock_fga_client, identity, resource):
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None, audit_logger=audit)
+    authz = Authz(engine)
+    operator = Identity(id="user:operator-2")
+
+    await authz.revoke(identity, "viewer", resource, reason="offboarding", actor=operator)
+    await engine.flush_audit_logs()
+
+    event = audit.events[0]
+    assert event.reason == "offboarding"
+    assert event.reason_data["actor"] == operator.id
+
+
+@pytest.mark.asyncio
+async def test_grant_without_reason_keeps_default_reason_string(
+    mock_fga_client, identity, resource
+):
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None, audit_logger=audit)
+    authz = Authz(engine)
+
+    await authz.grant(identity, "viewer", resource)
+    await engine.flush_audit_logs()
+
+    event = audit.events[0]
+    assert event.reason == "grant via Authz.grant"
+    assert "reason" not in event.reason_data
+    assert "actor" not in event.reason_data

@@ -119,3 +119,61 @@ class RedisCache(BaseCache):
         Should be called on application shutdown.
         """
         await self._client.aclose()
+
+    # ------------------------------------------------------------------
+    # Introspection / bulk invalidation (CP-9)
+    # ------------------------------------------------------------------
+    #
+    # `BaseCache`'s own interface is deliberately single-key (`get`/`set`/
+    # `delete`) or clear-everything (`clear`) — there was no "how many
+    # keys are cached" or "invalidate every key matching this fragment"
+    # short of a full `clear()`. Both are Redis-specific (an in-memory
+    # cache has no cross-process introspection story worth building), and
+    # both reuse `clear()`'s existing `SCAN`-based approach rather than
+    # `DBSIZE` (counts the whole keyspace, not just this cache's prefix)
+    # or `KEYS` (blocks the server on a large keyspace).
+
+    async def count_keys(self, *, fragment: str = "") -> int:
+        """
+        Count keys under this cache's prefix, optionally narrowed to
+        those also containing `fragment` (e.g. a tenant's `cache_namespace`
+        or an `AuthzRequest.identity_prefix(...)` result).
+        """
+        pattern = f"{self._prefix}*{fragment}*" if fragment else f"{self._prefix}*"
+        count = 0
+        async for _ in self._client.scan_iter(match=pattern):
+            count += 1
+        return count
+
+    async def delete_by_fragment(self, fragment: str) -> int:
+        """
+        Bulk-delete every key under this cache's prefix that also
+        contains `fragment` — the "invalidate all cached decisions for
+        this user/tenant" pattern `docs/architecture.md`'s Caching
+        section already documents as the recommended approach, shipped
+        here as reusable library code instead of every adopter
+        hand-rolling the same `SCAN` loop.
+
+        `fragment` is matched anywhere in the key, not just as a prefix,
+        since `AuthzEngine`'s `cache_namespace` (a tenant's `store_id`)
+        comes *before* `AuthzRequest.cache_key()`'s own fields in the
+        stored key (`f"{cache_namespace}:{key}"`), while
+        `AuthzRequest.identity_prefix(...)` describes a fragment that
+        starts partway through the same key for a namespaced cache — a
+        pure prefix match can't express "this tenant AND this user"
+        without the caller pre-concatenating both. Pass a non-empty,
+        sufficiently specific `fragment` — an empty one would match (and
+        delete) every key this cache owns, same as `clear()`.
+
+        Returns:
+            int: number of keys deleted.
+        """
+        if not fragment:
+            raise ValueError("fragment must be non-empty — use clear() to delete everything")
+
+        pattern = f"{self._prefix}*{fragment}*"
+        deleted = 0
+        async for key in self._client.scan_iter(match=pattern):
+            await self._client.delete(key)
+            deleted += 1
+        return deleted

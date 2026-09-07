@@ -300,11 +300,41 @@ class Authz:
         syncer = ModelSync(self._engine.fga_client)  # type: ignore[arg-type]
         return await syncer.sync()
 
+    async def read_tuples(
+        self,
+        *,
+        user: str | None = None,
+        relation: str | None = None,
+        object: str | None = None,
+        page_size: int | None = None,
+        continuation_token: str | None = None,
+    ) -> dict:
+        """
+        Read relationship tuples matching a (partial) filter — see
+        `OpenFGAClient.read_tuples()`. Exposed here (rather than only on
+        the raw client) because a "what relationships actually exist"
+        query — e.g. a control-plane relationship explorer (CP-8) — is a
+        `py-authz` consumer operation in its own right, not something
+        that should require reaching into `Authz`'s internals for.
+        Part of `FGAClientProtocol`, so this works against
+        `testkit.InMemoryFGAClient` too, not just a real `OpenFGAClient`.
+        """
+        return await self._engine.fga_client.read_tuples(
+            user=user,
+            relation=relation,
+            object=object,
+            page_size=page_size,
+            continuation_token=continuation_token,
+        )
+
     async def grant(
         self,
         identity,
         relation: str,
         resource,
+        *,
+        reason: str | None = None,
+        actor: Identity | None = None,
     ) -> None:
         """
         Grant a relation between a user and resource.
@@ -319,6 +349,18 @@ class Authz:
         a short cache TTL, or `AuthzEngine.invalidate(...)` directly for
         relations you know are affected, if that matters for your use
         case.
+
+        Args:
+            reason (Optional[str]):
+                Optional justification for this grant, recorded in the
+                audit event's `reason_data` — e.g. a control-plane API's
+                mandatory "why" field on a manual grant (see CP-8).
+
+            actor (Optional[Identity]):
+                Optional identity performing this grant on `identity`'s
+                behalf (e.g. an operator), if different from `identity`
+                itself — recorded in the audit event's `reason_data`
+                without changing whose relation was granted.
         """
         await self._engine.fga_client.write_tuples(
             writes=[
@@ -334,6 +376,8 @@ class Authz:
             relation=relation,
             resource_object=_to_fga_object(resource),
             operation="grant",
+            reason=reason,
+            actor=actor,
         )
         await self._invalidate_cache(identity, relation, resource)
 
@@ -342,13 +386,17 @@ class Authz:
         identity,
         relation: str,
         resource,
+        *,
+        reason: str | None = None,
+        actor: Identity | None = None,
     ) -> None:
         """
         Revoke a relation.
 
         See `grant`'s docstring — invalidates the cache entry for this
         exact (identity, relation, resource) triple only, not other
-        relations implied by it through the model.
+        relations implied by it through the model. `reason`/`actor` are
+        also as `grant`'s.
         """
         await self._engine.fga_client.write_tuples(
             writes=[],
@@ -365,6 +413,8 @@ class Authz:
             relation=relation,
             resource_object=_to_fga_object(resource),
             operation="revoke",
+            reason=reason,
+            actor=actor,
         )
         await self._invalidate_cache(identity, relation, resource)
 

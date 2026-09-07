@@ -416,6 +416,8 @@ class AuthzEngine:
         relation: str,
         resource_object: str,
         operation: str,
+        reason: str | None = None,
+        actor: Identity | None = None,
     ) -> None:
         """
         Record metrics and an audit event for a direct tuple write.
@@ -432,12 +434,33 @@ class AuthzEngine:
             relation: The relation granted/revoked.
             resource_object: The OpenFGA object string ("<type>:<id>").
             operation: `"grant"` or `"revoke"`.
+            reason: Optional human-readable justification for this
+                write, folded into `reason_data` (and used as the audit
+                event's top-level `reason` string, in place of the
+                generic default). A caller that requires operators to
+                explain a manual grant/revoke — e.g. a control-plane API
+                (see CP-8) — passes this through from that mandatory
+                field, rather than only having `operation`/`relation` to
+                go on later.
+            actor: Optional identity that *performed* this write, when it
+                differs from `identity` (the write's subject) — e.g. an
+                operator granting `alice` a relation on `alice`'s behalf.
+                Recorded as `reason_data["actor"]`; `event.user_id` stays
+                `identity.id` (the subject), matching every other audit
+                event's convention of `user_id` naming the tuple's
+                subject, not the caller.
         """
         if self.metrics:
             self.metrics.incr(f"authz_{operation}_total")
 
         if not self.audit_logger:
             return
+
+        reason_data = {"operation": operation, "relation": relation}
+        if reason is not None:
+            reason_data["reason"] = reason
+        if actor is not None:
+            reason_data["actor"] = actor.id
 
         event = AuditEvent(
             timestamp=datetime.now(),
@@ -446,11 +469,8 @@ class AuthzEngine:
             action=relation,
             resource=resource_object,
             allowed=True,
-            reason=f"{operation} via Authz.{operation}",
-            reason_data={
-                "operation": operation,
-                "relation": relation,
-            },
+            reason=reason or f"{operation} via Authz.{operation}",
+            reason_data=reason_data,
             request_id=get_request_id(),
         )
         self._dispatch_audit_event(event)

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from py_authz.clients.openfga import OpenFGAClient
@@ -15,9 +16,30 @@ class ModelSync:
         - idempotent sync
     """
 
-    def __init__(self, fga_client: OpenFGAClient, validator: DefaultModelValidator | None = None):
+    def __init__(
+        self,
+        fga_client: OpenFGAClient,
+        validator: DefaultModelValidator | None = None,
+        *,
+        model_factory: Callable[[], dict[str, Any]] | None = None,
+    ):
+        """
+        Args:
+            model_factory: Zero-argument callable returning the model to
+                sync. Defaults to `generate_model` (reads the global
+                `py_authz.modeling.registry.registry` singleton, same as
+                always). Pass e.g. `functools.partial(generate_model,
+                models=MY_MODELS)` (or any other zero-arg callable) to
+                sync a model built from an explicit set of `ResourceModel`
+                classes instead — what lets a second, independent model
+                (e.g. the control-plane API's dogfooded RBAC model,
+                `control_plane/rbac_model.py`) reuse this class's
+                diff/idempotent-sync logic without registering into (or
+                reading from) that shared global registry.
+        """
         self.fga_client = fga_client
         self.validator = validator
+        self._model_factory = model_factory or generate_model
         #: Set by `sync()`: whether the just-completed call actually
         #: uploaded a new model (`True`) or found the current one already
         #: matched and reused it (`False`). `None` before `sync()` is ever
@@ -43,7 +65,7 @@ class ModelSync:
         Returns:
             str: active model_id
         """
-        new_model = generate_model()
+        new_model = self._model_factory()
         if self.validator:
             self.validator.validate(new_model)
 

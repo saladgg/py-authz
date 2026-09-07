@@ -26,3 +26,20 @@ async def test_set_overwrites_existing_model():
     await reg.set("t1", "model-2")
 
     assert await reg.get("t1") == "model-2"
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_mapping():
+    reg = InMemoryModelRegistry()
+    await reg.set("t1", "model-1")
+
+    await reg.delete("t1")
+
+    assert await reg.get("t1") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_tenant_is_a_noop():
+    reg = InMemoryModelRegistry()
+
+    await reg.delete("never-existed")  # must not raise

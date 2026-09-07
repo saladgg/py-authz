@@ -25,6 +25,33 @@ def doc_registry():
 
 
 @pytest.mark.asyncio
+async def test_read_tuples_filters_by_each_field(doc_registry):
+    reg, Document = doc_registry
+    authz = make_fake_authz(model_registry=reg)
+    alice = Identity(id="user:alice")
+    bob = Identity(id="user:bob")
+
+    await authz.grant(alice, "owner", Document(id="d1"))
+    await authz.grant(bob, "viewer", Document(id="d2"))
+
+    all_tuples = await authz._engine.fga_client.read_tuples()
+    assert len(all_tuples["tuples"]) == 2
+    assert all_tuples["continuation_token"] is None
+
+    by_user = await authz._engine.fga_client.read_tuples(user="user:alice")
+    assert by_user["tuples"] == [
+        {"user": "user:alice", "relation": "owner", "object": "document:d1", "timestamp": None}
+    ]
+
+    by_object = await authz._engine.fga_client.read_tuples(object="document:d2")
+    assert len(by_object["tuples"]) == 1
+    assert by_object["tuples"][0]["user"] == "user:bob"
+
+    none_match = await authz._engine.fga_client.read_tuples(relation="editor")
+    assert none_match["tuples"] == []
+
+
+@pytest.mark.asyncio
 async def test_grant_check_revoke_roundtrip(doc_registry):
     reg, Document = doc_registry
     authz = make_fake_authz(model_registry=reg)

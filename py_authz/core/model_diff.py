@@ -109,6 +109,64 @@ class ModelDiffer:
         return json.dumps(canonical, sort_keys=True)
 
     @classmethod
+    def summarize_diff(cls, old_model: dict[str, Any] | None, new_model: dict[str, Any]) -> str:
+        """
+        Human-readable, type/relation-level summary of what changed
+        between `old_model` (`None` for "no previous model at all" —
+        e.g. a tenant's first-ever sync) and `new_model`. Unlike
+        `is_equal()` (a bare boolean) or `normalize()` (an opaque
+        canonical string meant for equality comparison, not for a
+        person to read), this reports which types/relations were added
+        or removed — e.g. for a `model_versions.change_summary` column
+        (see the control-plane API's `POST /models/sync`, CP-6) — without
+        inventing a second diffing implementation: it reuses the same
+        `type_definitions`/`relations` structure `normalize()` reads,
+        just reports names instead of collapsing everything to one
+        equal/not-equal string.
+
+        Only reports type/relation *names* added or removed, not
+        changes to a relation's rewrite rule (e.g. an existing relation
+        gaining a `from_parent`) — a full field-level diff of OpenFGA's
+        rewrite-tree JSON is out of scope for a one-line summary column;
+        `schema_json` on the same row holds the complete before/after
+        model for anyone who needs that.
+        """
+        if old_model is None:
+            types = sorted(t["type"] for t in new_model.get("type_definitions", []))
+            return f"initial model: types={types}"
+
+        def _relations_by_type(model: dict[str, Any]) -> dict[str, set[str]]:
+            return {
+                t["type"]: set(t.get("relations", {}).keys())
+                for t in model.get("type_definitions", [])
+            }
+
+        old_relations = _relations_by_type(old_model)
+        new_relations = _relations_by_type(new_model)
+
+        added_types = sorted(set(new_relations) - set(old_relations))
+        removed_types = sorted(set(old_relations) - set(new_relations))
+
+        relation_changes = []
+        for type_name in sorted(set(old_relations) & set(new_relations)):
+            added = sorted(new_relations[type_name] - old_relations[type_name])
+            removed = sorted(old_relations[type_name] - new_relations[type_name])
+            if added:
+                relation_changes.append(f"{type_name}: +{added}")
+            if removed:
+                relation_changes.append(f"{type_name}: -{removed}")
+
+        parts = []
+        if added_types:
+            parts.append(f"added types={added_types}")
+        if removed_types:
+            parts.append(f"removed types={removed_types}")
+        if relation_changes:
+            parts.append(f"relations: {'; '.join(relation_changes)}")
+
+        return "; ".join(parts) if parts else "schema unchanged at the type/relation-name level"
+
+    @classmethod
     def is_equal(
         cls,
         model_a: dict[str, Any],

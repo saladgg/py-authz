@@ -26,10 +26,23 @@ _SQL_DIR = Path(__file__).parent / "sql"
 
 #: Applied in this order — later files may (in principle) reference
 #: earlier tables, though none currently do.
+#:
+#: 0004-0008 back the control-plane API (`py_authz/control_plane/`) —
+#: `operators`, `service_accounts`, `model_versions`, `control_plane_jobs`,
+#: and an extra index on `audit_logs`. They live in the same Postgres
+#: instance and are applied the same way as 0001-0003 (see the
+#: control-panel architecture doc, §2.2): no new database to operate, and
+#: `apply_schema()` remains the one call that gets a fresh dev/test
+#: database ready, control-plane tables included.
 SCHEMA_FILES = (
     "0001_tenants.sql",
     "0002_tenant_models.sql",
     "0003_audit_logs.sql",
+    "0004_operators.sql",
+    "0005_service_accounts.sql",
+    "0006_model_versions.sql",
+    "0007_control_plane_jobs.sql",
+    "0008_audit_logs_timestamp_idx.sql",
 )
 
 

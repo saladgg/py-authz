@@ -104,6 +104,16 @@ class PostgresTenantStore:
                 store_id,
             )
 
+    async def delete(self, tenant_id: str) -> None:
+        """
+        Remove `tenant_id`'s mapping (see CP-4's `TenantManager.
+        deprovision()`). Idempotent — deleting an unknown `tenant_id` is
+        a no-op, matching `TenantStore.delete()`'s contract.
+        """
+        pool = self._require_pool()
+        async with pool.acquire(timeout=self.command_timeout) as conn:
+            await conn.execute("DELETE FROM tenants WHERE tenant_id = $1", tenant_id)
+
     async def list_tenant_ids(self, *, limit: int | None = None, offset: int = 0) -> list[str]:
         """
         Args:
@@ -200,3 +210,9 @@ class PostgresModelRegistry:
                 tenant_id,
                 model_id,
             )
+
+    async def delete(self, tenant_id: str) -> None:
+        """See `PostgresTenantStore.delete()` (CP-4/CP-6). Idempotent."""
+        pool = self._require_pool()
+        async with pool.acquire(timeout=self.command_timeout) as conn:
+            await conn.execute("DELETE FROM tenant_models WHERE tenant_id = $1", tenant_id)

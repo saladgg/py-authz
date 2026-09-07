@@ -305,3 +305,93 @@ async def test_provision_honors_custom_tenant_id_pattern():
 
     with pytest.raises(InvalidAuthzRequest):
         await mgr.provision("not-matching")
+
+
+# -------------------------------------------------------------------
+# deprovision() (CP-4)
+# -------------------------------------------------------------------
+
+
+class FakeModelRegistry:
+    def __init__(self):
+        self.data: dict[str, str] = {}
+        self.delete_calls: list[str] = []
+
+    async def set(self, tenant_id, model_id):
+        self.data[tenant_id] = model_id
+
+    async def delete(self, tenant_id):
+        self.delete_calls.append(tenant_id)
+        self.data.pop(tenant_id, None)
+
+
+@pytest.mark.asyncio
+async def test_deprovision_deletes_store_and_mapping():
+    store = InMemoryTenantStore()
+    await store.set("t1", "store-1")
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    await mgr.deprovision("t1")
+
+    assert await store.get("t1") is None
+    client = FakeOpenFGAClient.instances[0]
+    assert client.delete_store_calls == ["store-1"]
+    assert client.aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_deprovision_also_cleans_model_registry_when_given():
+    store = InMemoryTenantStore()
+    await store.set("t1", "store-1")
+    registry = FakeModelRegistry()
+    await registry.set("t1", "model-1")
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    await mgr.deprovision("t1", model_registry=registry)
+
+    assert registry.delete_calls == ["t1"]
+    assert "t1" not in registry.data
+
+
+@pytest.mark.asyncio
+async def test_deprovision_unknown_tenant_is_a_noop():
+    store = InMemoryTenantStore()
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    await mgr.deprovision("never-provisioned")
+
+    assert FakeOpenFGAClient.instances == []  # never even constructed a client
+
+
+@pytest.mark.asyncio
+async def test_deprovision_rejects_invalid_tenant_id():
+    store = InMemoryTenantStore()
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    with pytest.raises(InvalidAuthzRequest):
+        await mgr.deprovision("../etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_deprovision_leaves_mapping_intact_if_store_deletion_fails():
+    store = InMemoryTenantStore()
+    await store.set("t1", "store-1")
+    mgr = TenantManager(api_url="http://fake", tenant_store=store)
+
+    # Prime a client whose delete_store() will raise, by provisioning
+    # first isn't needed — deprovision constructs its own client via the
+    # patched FakeOpenFGAClient; configure the *next* instance to fail.
+    original_delete_store = FakeOpenFGAClient.delete_store
+
+    async def failing_delete_store(self, store_id):
+        raise RuntimeError("openfga unreachable")
+
+    FakeOpenFGAClient.delete_store = failing_delete_store
+    try:
+        with pytest.raises(RuntimeError, match="openfga unreachable"):
+            await mgr.deprovision("t1")
+    finally:
+        FakeOpenFGAClient.delete_store = original_delete_store
+
+    # The tenant is left exactly as provisioned — safe to retry.
+    assert await store.get("t1") == "store-1"

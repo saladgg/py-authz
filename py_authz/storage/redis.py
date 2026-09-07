@@ -49,6 +49,10 @@ class RedisTenantStore:
         """
         await self.client.set(f"tenant:{tenant_id}:store", store_id, ex=ex)
 
+    async def delete(self, tenant_id: str) -> None:
+        """See `PostgresTenantStore.delete()` (CP-4). Idempotent."""
+        await self.client.delete(f"tenant:{tenant_id}:store")
+
     async def list_tenant_ids(self, *, limit: int | None = None) -> list[str]:
         """
         Enumerate every tenant this store knows about via `SCAN` (not
@@ -110,6 +114,10 @@ class RedisModelRegistry:
 
     async def set(self, tenant_id: str, model_id: str, ex: int | None = None) -> None:
         await self.client.set(f"tenant:{tenant_id}:model", model_id, ex=ex)
+
+    async def delete(self, tenant_id: str) -> None:
+        """See `PostgresTenantStore.delete()` (CP-4/CP-6). Idempotent."""
+        await self.client.delete(f"tenant:{tenant_id}:model")
 
     async def close(self) -> None:
         """See `RedisTenantStore.close()` (REL2-8)."""

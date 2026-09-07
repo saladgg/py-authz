@@ -251,3 +251,24 @@ sizing, and a pinned release toolchain), and `08`'s cache/IdP fail-safety
 findings (a cache outage can no longer take down `enforce()`, and a
 token with no `kid` header fails cleanly instead of crashing). See each
 backlog's own todos file for the per-item detail.
+
+## New feature backlog: `09`, a Next.js control panel (filed 2026-09-05)
+
+Unlike `01`–`08`, `09` isn't a defect audit — it's a gap analysis and
+architecture proposal for something that doesn't exist yet: a web-based
+control panel for operating a py-authz deployment (tenants, authorization
+models, migrations, audit trail, and — the headline ask — service
+accounts/machine identities, which the library has zero scaffolding for
+today). It found that **the library has no HTTP management surface of
+any kind** — every management operation (tenant provisioning, model
+sync, cross-tenant migration, audit logging) is Python-API-only or
+CLI-only — and no operator-authentication/RBAC concept distinct from an
+end-user `Identity`. The proposed architecture is a new control-plane API
+(a thin HTTP shell around the existing `Authz`/`MultiTenantAuthz`/
+`TenantManager`/`ModelSync`/`MigrationManager` classes, reusing them
+rather than reimplementing anything) plus a separate Next.js frontend
+that talks only to that API.
+
+| Pair | Topic | Status stamp lives in |
+| ---- | ----- | --------------------- |
+| 09 | Control panel & service accounts — HTTP management API design, operator auth/RBAC (dogfooding py-authz on itself), service-account/machine-identity support, tenant/model/migration/audit management screens, and the Next.js frontend architecture | [`09_control_panel_todos.md`](09_control_panel_todos.md) — **filed 2026-09-05; fully shipped the same day, all four tiers (CP-1 through CP-19) — the control-plane API backend (`py_authz/control_plane/`), rate-limited and secrets-hardened, plus the Next.js frontend (`control-panel/`, all 9 screens). Verified end-to-end against a real running deployment (real OpenFGA/Keycloak/Postgres/Redis + a real browser-shaped OIDC login), which caught and fixed one real bug (an audit-log tenant filter matching against the wrong identifier). Nothing left open in this backlog** |
