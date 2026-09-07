@@ -15,6 +15,9 @@ class InMemoryPg:
     async def set(self, tenant_id, store_id):
         self._data[tenant_id] = store_id
 
+    async def delete(self, tenant_id):
+        self._data.pop(tenant_id, None)
+
     async def list_tenant_ids(self, *, limit=None, offset=0):
         ids = sorted(self._data.keys())[offset:]
         return ids[:limit] if limit is not None else ids
@@ -40,6 +43,9 @@ class InMemoryRedis:
     async def set(self, key, value, ex=None):
         self._data[key] = value.encode() if isinstance(value, str) else value
         self.set_calls.append((key, value, ex))
+
+    async def delete(self, key):
+        self._data.pop(key, None)
 
 
 @pytest.mark.asyncio
@@ -162,6 +168,9 @@ class RaisingRedis:
     async def set(self, key, value, ex=None):
         raise ConnectionError("redis unavailable")
 
+    async def delete(self, key):
+        raise ConnectionError("redis unavailable")
+
 
 # ----------------------------------------------------------------------
 # Regression coverage for REL2-2: Redis is advisory, never load-bearing —
@@ -233,3 +242,35 @@ async def test_hybrid_store_composes_with_real_redis_tenant_store(real_redis_ten
     # touching Postgres again.
     pg._data.clear()
     assert await store.get("t1") == "store-1"
+
+
+# ----------------------------------------------------------------------
+# delete() (CP-4)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_from_both_pg_and_redis():
+    pg = InMemoryPg()
+    await pg.set("t1", "store-1")
+    redis = InMemoryRedis()
+    redis._data["t1"] = b"store-1"
+    store = HybridTenantStore(pg_store=pg, redis_store=redis)
+
+    await store.delete("t1")
+
+    assert await pg.get("t1") is None
+    assert "t1" not in redis._data
+
+
+@pytest.mark.asyncio
+async def test_delete_succeeds_when_redis_delete_raises():
+    """Redis stays advisory on delete too — a Postgres-side delete must
+    not be masked by a Redis blip (see REL2-2)."""
+    pg = InMemoryPg()
+    await pg.set("t1", "store-1")
+    store = HybridTenantStore(pg_store=pg, redis_store=RaisingRedis())
+
+    await store.delete("t1")  # must not raise
+
+    assert await pg.get("t1") is None

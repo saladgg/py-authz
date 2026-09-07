@@ -143,6 +143,25 @@ class AuthzRequest:
         fields = (self.identity.id, self.action, self.resource.type, self.resource.id)
         return "|".join(f"{len(field)}:{field}" for field in fields)
 
+    @staticmethod
+    def identity_prefix(identity_id: str) -> str:
+        """
+        The leading fragment `cache_key()` always produces for a given
+        `identity_id`, regardless of action/resource — i.e. every cache
+        key for that identity starts with this string. Exposed as a
+        public helper (rather than making callers reconstruct
+        `cache_key()`'s length-prefixing scheme by hand) so a bulk
+        "invalidate every cached decision for this user" operation — e.g.
+        a cache backend's `delete_by_prefix()` (see `RedisCache`, CP-9) —
+        can build the right prefix without depending on `cache_key()`'s
+        internal format beyond "it starts with this".
+
+        Does NOT include any `cache_namespace` an `AuthzEngine` may have
+        applied on top (see `_scoped_cache_key`) — prepend that
+        separately if the cache is namespaced (e.g. per-tenant).
+        """
+        return f"{len(identity_id)}:{identity_id}|"
+
     def is_cacheable(self) -> bool:
         """
         Per-request state (context, contextual tuples) makes results

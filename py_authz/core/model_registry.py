@@ -10,6 +10,11 @@ class ModelRegistry(Protocol):
 
     async def set(self, tenant_id: str, model_id: str) -> None: ...
 
+    async def delete(self, tenant_id: str) -> None: ...
+
+    # `delete()` (added for CP-4/CP-6) is idempotent, same contract as
+    # `TenantStore.delete()`.
+
 
 class InMemoryModelRegistry:
     def __init__(self):
@@ -20,3 +25,6 @@ class InMemoryModelRegistry:
 
     async def set(self, tenant_id: str, model_id: str) -> None:
         self._data[tenant_id] = model_id
+
+    async def delete(self, tenant_id: str) -> None:
+        self._data.pop(tenant_id, None)

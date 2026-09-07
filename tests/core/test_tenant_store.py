@@ -62,3 +62,20 @@ async def test_list_tenant_ids_supports_limit_and_offset():
 
     assert await store.list_tenant_ids(limit=2) == ["t1", "t2"]
     assert await store.list_tenant_ids(limit=2, offset=2) == ["t3"]
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_mapping():
+    store = InMemoryTenantStore()
+    await store.set("t1", "store-1")
+
+    await store.delete("t1")
+
+    assert await store.get("t1") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_tenant_is_a_noop():
+    store = InMemoryTenantStore()
+
+    await store.delete("never-existed")  # must not raise

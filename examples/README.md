@@ -24,6 +24,7 @@ them without rebuilding context.
 | `11_hierarchical_permissions.py` | `Relation(from_parent=...)` — a folder viewer inherits document viewer |
 | `12_multitenant_fastapi.py` | `MultiTenantAuthz` + FastAPI together — `Authz` resolved per request by tenant |
 | `13_fail_open_fastapi.py` | `fail_open=True` — a route that stays available during an OpenFGA outage, contrasted with the fail-closed default |
+| `14_control_plane_api.py` | `py_authz.control_plane` — the optional HTTP management API (tenants, models, migrations, service accounts, audit, RBAC); see `docs/control_plane.md` |
 
 ## Prerequisites
 
@@ -129,6 +130,12 @@ uv run uvicorn examples.13_fail_open_fastapi:app --reload
 # then:
 curl -H "X-User-Id: alice" http://localhost:8000/documents/roadmap
 curl -H "X-User-Id: alice" http://localhost:8000/documents/roadmap/lenient
+
+# Control-plane API: the optional HTTP management API — needs OpenFGA +
+# Postgres + Redis + Keycloak all running (`docker compose up -d openfga
+# keycloak redis postgres`) and several env vars; see `docs/control_plane.md`
+# for the full setup (RBAC store creation, break-glass bootstrap, tokens)
+uv run uvicorn examples.14_control_plane_api:app --reload
 ```
 
 ## How the pieces fit

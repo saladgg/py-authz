@@ -25,6 +25,9 @@ class FakeAsyncRedis:
         self.store[key] = value.encode() if isinstance(value, str) else value
         self.set_calls.append((key, value, ex))
 
+    async def delete(self, key):
+        self.store.pop(key, None)
+
     async def scan_iter(self, match=None):
         import fnmatch
 
@@ -208,3 +211,28 @@ async def test_tenant_store_close_closes_underlying_client(patched_redis):
     await store.close()
 
     assert injected.closed is True
+
+
+# ----------------------------------------------------------------------
+# delete() (CP-4)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_delete_removes_mapping(patched_redis):
+    store = RedisTenantStore(url="redis://fake")
+    await store.set("t1", "store-1")
+
+    await store.delete("t1")
+
+    assert await store.get("t1") is None
+
+
+@pytest.mark.asyncio
+async def test_model_registry_delete_removes_mapping(patched_redis):
+    reg = RedisModelRegistry(url="redis://fake")
+    await reg.set("t1", "model-1")
+
+    await reg.delete("t1")
+
+    assert await reg.get("t1") is None

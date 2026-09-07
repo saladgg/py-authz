@@ -409,6 +409,76 @@ class OpenFGAClient:
 
         return list(res.get("objects", []))
 
+    async def read_tuples(
+        self,
+        *,
+        user: str | None = None,
+        relation: str | None = None,
+        object: str | None = None,
+        page_size: int | None = None,
+        continuation_token: str | None = None,
+    ) -> dict:
+        """
+        Read relationship tuples matching a (partial) filter, via
+        OpenFGA's `POST /stores/{id}/read`.
+
+        This is the inverse of `check()`/`list_objects()`: those answer
+        "can/does user X hold relation Y on object Z", this answers "what
+        tuples actually exist" — e.g. "who has `viewer` on
+        `document:roadmap`" (`relation`+`object`, no `user`) or "what does
+        `user:alice` hold, full stop" (`user` only). At least one of
+        `user`/`relation`/`object` should normally be given — OpenFGA
+        accepts an empty filter too, but that means "every tuple in the
+        store" and is rarely what a caller actually wants.
+
+        Args:
+            user: Restrict to tuples for this user (e.g. "user:alice").
+            relation: Restrict to tuples with this relation.
+            object: Restrict to tuples on this object (e.g.
+                "document:roadmap"), or just a type ("document:") to
+                match every object of that type.
+            page_size: Max tuples to return in this page (OpenFGA's own
+                default/cap applies if omitted).
+            continuation_token: Resume a previous call's next page — pass
+                back the `continuation_token` from that call's result.
+
+        Returns:
+            dict: `{"tuples": [{"user", "relation", "object",
+            "timestamp"}, ...], "continuation_token": str | None}` — an
+            empty/`None` `continuation_token` means there are no more
+            pages.
+        """
+        tuple_key = {
+            k: v
+            for k, v in {"user": user, "relation": relation, "object": object}.items()
+            if v is not None
+        }
+
+        payload: dict = {}
+        if tuple_key:
+            payload["tuple_key"] = tuple_key
+        if page_size:
+            payload["page_size"] = page_size
+        if continuation_token:
+            payload["continuation_token"] = continuation_token
+
+        res = await self._post(f"/stores/{self.store_id}/read", json=payload)
+
+        tuples = [
+            {
+                "user": t["key"]["user"],
+                "relation": t["key"]["relation"],
+                "object": t["key"]["object"],
+                "timestamp": t.get("timestamp"),
+            }
+            for t in res.get("tuples", [])
+        ]
+
+        return {
+            "tuples": tuples,
+            "continuation_token": res.get("continuation_token") or None,
+        }
+
     async def write_tuples(
         self,
         writes: list[dict],

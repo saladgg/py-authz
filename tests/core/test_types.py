@@ -16,6 +16,21 @@ def test_cache_key():
     assert req.cache_key() == "6:user:1|4:view|3:doc|3:123"
 
 
+def test_identity_prefix_matches_cache_key_leading_fragment():
+    """`AuthzRequest.identity_prefix()` (added for CP-9's bulk
+    cache-invalidation-by-user) must produce exactly the leading fragment
+    `cache_key()` itself would, for the same identity."""
+    user = Identity(id="user:1")
+    resource = Resource(type="doc", id="123")
+    req = AuthzRequest(identity=user, action="view", resource=resource)
+
+    assert req.cache_key().startswith(AuthzRequest.identity_prefix("user:1"))
+
+
+def test_identity_prefix_distinguishes_different_length_ids():
+    assert AuthzRequest.identity_prefix("user:1") != AuthzRequest.identity_prefix("user:12")
+
+
 def test_cache_key_is_injective_across_colon_boundaries():
     """
     Regression test for SEC2-1: a naive ":".join(...) cache key is NOT

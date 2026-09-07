@@ -56,6 +56,12 @@ class FakePool:
         elif "INSERT INTO tenant_models" in query:
             tenant_id, model_id = args
             self.tenant_models[tenant_id] = model_id
+        elif "DELETE FROM tenants" in query:
+            (tenant_id,) = args
+            self.tenants.pop(tenant_id, None)
+        elif "DELETE FROM tenant_models" in query:
+            (tenant_id,) = args
+            self.tenant_models.pop(tenant_id, None)
 
     def _apply_fetch(self, query, args):
         if "FROM tenants" in query:
@@ -276,3 +282,38 @@ async def test_model_registry_forwards_pool_sizing_and_timeout(patched_asyncpg):
 
     await registry.get("t1")
     assert patched_asyncpg.acquire_timeouts == [2.5]
+
+
+# ----------------------------------------------------------------------
+# delete() (CP-4)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_delete_removes_mapping(patched_asyncpg):
+    store = PostgresTenantStore(dsn="postgres://fake")
+    await store.connect()
+    await store.set("t1", "store-1")
+
+    await store.delete("t1")
+
+    assert await store.get("t1") is None
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_delete_unknown_tenant_is_a_noop(patched_asyncpg):
+    store = PostgresTenantStore(dsn="postgres://fake")
+    await store.connect()
+
+    await store.delete("never-existed")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_model_registry_delete_removes_mapping(patched_asyncpg):
+    registry = PostgresModelRegistry(dsn="postgres://fake")
+    await registry.connect()
+    await registry.set("t1", "model-1")
+
+    await registry.delete("t1")
+
+    assert await registry.get("t1") is None

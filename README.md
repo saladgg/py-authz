@@ -31,6 +31,7 @@
 - [Keycloak JWT Validation](#keycloak-jwt-validation)
 - [Caching](#caching)
 - [Multi-Tenancy](#multi-tenancy)
+- [Control-Plane API](#control-plane-api)
 - [CLI](#cli)
 - [Project Layout](#project-layout)
 - [Development](#development)
@@ -55,6 +56,7 @@
 - **Retry & resilience** — the OpenFGA HTTP client uses `httpx` with exponential backoff on transient errors.
 - **Strong typing** — full `mypy` coverage and `ruff` (E, F, I, UP, B, C4, SIM) on every push.
 - **CLI tooling** — `py-authz generate-model` and `py-authz sync` for CI pipelines.
+- **Control-plane API + web UI** — optional FastAPI service (`py_authz.control_plane`) for operating a deployment over HTTP: tenant CRUD, model sync/rollback, migrations, audit querying, service accounts, and a dogfooded operator RBAC model — plus a Next.js frontend (`control-panel/`) on top of it.
 
 ---
 
@@ -141,6 +143,10 @@ pip install "py-authz[cli]"
 
 # Everything
 pip install "py-authz[all]"
+
+# Control-plane API (FastAPI + Postgres + Redis + PyJWT + argon2-cffi) —
+# separate from `[all]`; see [Control-Plane API](#control-plane-api).
+pip install "py-authz[control-plane]"
 ```
 
 Using [`uv`](https://github.com/astral-sh/uv) (recommended for development):
@@ -357,6 +363,45 @@ Or, more commonly, via the CLI's `migrate` command (below) instead of calling
 
 ---
 
+## Control-Plane API
+
+`py_authz.control_plane` is an optional FastAPI service for operating a
+py-authz deployment over HTTP — everything `MultiTenantAuthz`/
+`TenantManager`/`ModelSync`/`MigrationManager` already do, exposed as
+routes, plus the pieces the library never had on its own: service
+accounts (machine identities, argon2-hashed secrets), operator
+authentication/RBAC (dogfooded on py-authz itself — a `system`/`tenant`
+`owner → admin → operator → auditor → viewer` role chain), model version
+history/rollback, and audit-log querying.
+
+```bash
+pip install "py-authz[control-plane]"
+```
+
+```python
+from py_authz.control_plane.app import create_app
+
+app = create_app()  # reads ControlPlaneSettings.from_env()
+```
+
+A [`control-panel/`](control-panel/) Next.js frontend sits on top of it —
+a BFF (Backend-for-Frontend) session (the browser holds one httpOnly
+cookie, never a raw token) covering every screen: tenants, authorization
+models, migrations, service accounts, operators & roles, audit log,
+relationship explorer, and cache.
+
+See [`docs/control_plane.md`](docs/control_plane.md) for a full
+walkthrough (dev stack, RBAC store, break-glass bootstrap, curl examples
+for every route, then running the frontend on top),
+[`examples/14_control_plane_api.py`](examples/14_control_plane_api.py)
+for the runnable half of the backend, and
+[`control-panel/README.md`](control-panel/README.md) for the frontend's
+own architecture. This feature (backend and frontend both) is tracked as
+fully shipped in
+[`docs/todos/09_control_panel_todos.md`](docs/todos/09_control_panel_todos.md).
+
+---
+
 ## CLI
 
 Installed as the `py-authz` script (requires the `cli` extra). Run `py-authz
@@ -401,12 +446,14 @@ py-authz/
 │   ├── adapters/             # FastAPI, Keycloak integrations
 │   ├── validation/           # Request validation hooks
 │   ├── cli/                  # py-authz CLI (env-var config via cli/config.py)
+│   ├── control_plane/        # Optional FastAPI management API (tenants, models, service accounts, RBAC)
 │   └── utils/                # deps loader, logging, retry
 ├── tests/                    # Mirrors source layout; pytest-asyncio auto mode
 ├── examples/                 # Runnable end-to-end examples
+├── control-panel/            # Next.js frontend for py_authz.control_plane (separate deployable)
 ├── docs/                     # Getting started + architecture notes
 ├── .github/workflows/        # CI + semantic-release
-├── docker-compose.yml        # Dev OpenFGA instance
+├── docker-compose.yml        # Dev OpenFGA/Keycloak/Redis/Postgres stack
 ├── Makefile                  # venv / install / format / lint / test
 └── pyproject.toml
 ```

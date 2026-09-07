@@ -71,6 +71,27 @@ class InMemoryFGAClient:
         for t in deletes or []:
             self._tuples.discard((t["user"], t["relation"], t["object"]))
 
+    async def read_tuples(
+        self,
+        *,
+        user: str | None = None,
+        relation: str | None = None,
+        object: str | None = None,
+        page_size: int | None = None,  # noqa: ARG002 — accepted for parity, no real paging
+        continuation_token: str | None = None,  # noqa: ARG002 — ditto
+    ) -> dict:
+        """See `OpenFGAClient.read_tuples()` — same filter/return shape,
+        minus real pagination (this fake never has enough tuples for it
+        to matter)."""
+        matches = [
+            {"user": u, "relation": r, "object": o, "timestamp": None}
+            for (u, r, o) in sorted(self._tuples)
+            if (user is None or u == user)
+            and (relation is None or r == relation)
+            and (object is None or o == object)
+        ]
+        return {"tuples": matches, "continuation_token": None}
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------

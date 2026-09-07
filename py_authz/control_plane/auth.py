@@ -1,0 +1,313 @@
+"""
+Operator authentication + dogfooded RBAC + service-account scope checks
+(CP-2, CP-3).
+
+Every non-`/health` route in this API depends on one of the dependency
+factories below (`require_system_role`/`require_tenant_role`), which:
+
+    1. resolve the caller's `CurrentPrincipal` — either an operator (an
+       OIDC bearer token, verified via `OIDCJWTValidator`) or a service
+       account (a `Bearer pasa_<id>.<secret>` token, verified against
+       `service_accounts.secret_hash`) — see `get_current_principal()`;
+    2. for a service account, check its coarse-grained scopes *first*
+       (`service_account_scope`) — before anything per-tenant;
+    3. run the actual `authz.can(...)` check against the RBAC store,
+       exactly like any other `py-authz` consumer would.
+
+Nothing here reimplements authorization — it's the same `Authz.can()`
+surface as every other route in this API's underlying library.
+"""
+
+from dataclasses import dataclass
+
+from fastapi import HTTPException, Request
+
+from py_authz.control_plane.rbac_model import ROLE_CHAIN, SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.security import parse_account_id, verify_secret
+from py_authz.core.exceptions import AuthenticationError, AuthorizationDenied, InvalidAuthzRequest
+from py_authz.core.types import Identity, Resource
+
+
+@dataclass(frozen=True)
+class CurrentPrincipal:
+    """The authenticated caller of a control-plane API request — either
+    kind of principal this API accepts."""
+
+    identity: Identity
+    kind: str  # "operator" | "service_account"
+    scopes: tuple[str, ...] = ()
+
+
+def _bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise AuthenticationError("Missing or malformed Authorization header")
+    return token
+
+
+async def _authenticate_operator(request: Request, token: str) -> CurrentPrincipal:
+    validator = request.app.state.oidc_validator
+    payload = await validator.validate(token)
+    identity = validator.to_identity(payload)
+
+    operator_store = request.app.state.operator_store
+    await operator_store.record_login(subject=payload.get("sub"), email=payload.get("email"))
+
+    bootstrapper = request.app.state.bootstrapper
+    await bootstrapper.maybe_bootstrap(identity)
+
+    return CurrentPrincipal(identity=identity, kind="operator")
+
+
+async def _authenticate_service_account(
+    request: Request, token: str, account_id: str
+) -> CurrentPrincipal:
+    # account_id is already known-non-None here — the sole call site
+    # (get_current_principal) only takes this branch after confirming
+    # parse_account_id(token) matched, so re-parsing/re-checking it here
+    # would be dead code.
+
+    # CP-16: checked *before* touching the store/argon2 — a locked-out
+    # id is refused immediately, without doing the (deliberately
+    # expensive, see `security._HASHER`) verify work on every attempt.
+    rate_limiter = request.app.state.service_account_rate_limiter
+    if await rate_limiter.is_locked_out(account_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed authentication attempts for this service account "
+            "— try again later",
+        )
+
+    store = request.app.state.service_account_store
+    record = await store.get(account_id)
+    if record is None or record.is_revoked or not verify_secret(token, record.secret_hash):
+        await rate_limiter.record_failure(account_id)
+        raise AuthenticationError("Invalid or revoked service-account secret")
+
+    await rate_limiter.record_success(account_id)
+    await store.touch_last_used(account_id)
+
+    identity = Identity(
+        id=f"service:{record.name}",
+        attributes={
+            "kind": "service_account",
+            "scopes": record.scopes,
+            "service_account_id": record.id,
+        },
+    )
+    return CurrentPrincipal(identity=identity, kind="service_account", scopes=tuple(record.scopes))
+
+
+async def get_current_principal(request: Request) -> CurrentPrincipal:
+    """
+    Resolve the caller from `Authorization: Bearer <token>`.
+
+    Dispatch between the two credential shapes is unambiguous and cheap:
+    a service-account secret always starts with `security.SECRET_PREFIX`
+    (an operator's OIDC JWT never does — JWTs are `.`-delimited base64,
+    never that literal prefix), so there's no need to try one path,
+    catch a failure, and fall back to the other.
+
+    Stashes the resolved principal on `request.state.principal` — not
+    used by this module itself, but read by
+    `logging_middleware.install_request_logging()` (CP-18) so a request
+    log line can attribute the acting identity without every route
+    needing to plumb it through separately.
+    """
+    token = _bearer_token(request)
+    account_id = parse_account_id(token)
+    if account_id is not None:
+        principal = await _authenticate_service_account(request, token, account_id)
+    else:
+        principal = await _authenticate_operator(request, token)
+
+    request.state.principal = principal
+    return principal
+
+
+def _check_service_account_scope(principal: CurrentPrincipal, required_scope: str | None) -> None:
+    if principal.kind != "service_account" or required_scope is None:
+        return
+    if required_scope not in principal.scopes:
+        raise AuthorizationDenied(
+            f"service account {principal.identity.id!r} is missing required scope "
+            f"{required_scope!r}"
+        )
+
+
+async def _check_rbac(
+    request: Request, principal: CurrentPrincipal, min_relation: str, resource: Resource
+) -> None:
+    rbac_authz = request.app.state.rbac_authz
+    allowed = await rbac_authz.can(min_relation, principal.identity, resource)
+    if not allowed:
+        raise AuthorizationDenied(
+            f"{principal.identity.id!r} does not hold {min_relation!r} (or higher) on "
+            f"{resource.to_fga_object()!r}"
+        )
+
+
+def require_system_role(min_relation: str, *, service_account_scope: str | None = None):
+    """
+    FastAPI dependency: caller must hold `min_relation` (or anything
+    above it in `ROLE_CHAIN` — union semantics already make "holds
+    `owner`" imply "holds `viewer`", so a plain `can(min_relation, ...)`
+    check is all this needs) on the single `system:default` object.
+    """
+    if min_relation not in ROLE_CHAIN:
+        raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+
+    async def dependency(request: Request) -> CurrentPrincipal:
+        principal = await get_current_principal(request)
+        _check_service_account_scope(principal, service_account_scope)
+        resource = Resource(type=System.type, id=SYSTEM_OBJECT_ID)
+        await _check_rbac(request, principal, min_relation, resource)
+        return principal
+
+    return dependency
+
+
+def require_tenant_role(
+    min_relation: str,
+    *,
+    tenant_path_param: str = "tenant_id",
+    service_account_scope: str | None = None,
+):
+    """
+    FastAPI dependency: caller must hold `min_relation` (or higher) on
+    `tenant:<tenant_id>`, where `tenant_id` comes from the route's own
+    path parameter (`tenant_path_param`) — e.g. `@app.get("/tenants/{tenant_id}/...")`.
+
+    A `system`-scoped role also satisfies a tenant check *if* the
+    deployment models it that way — this implementation deliberately does
+    NOT auto-imply that (a `system#admin` does not automatically pass a
+    `tenant#admin` check) to keep the two scopes independent and
+    explicit; grant a role on the specific `tenant:<id>` object for every
+    tenant an operator should administer. (A future `Tenant` relation
+    could add `from_parent`-style inheritance from `system` if that
+    turns out to be the common case — not done here since it isn't
+    asked for and would need its own explicit design.)
+    """
+    if min_relation not in ROLE_CHAIN:
+        raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+
+    async def dependency(request: Request) -> CurrentPrincipal:
+        principal = await get_current_principal(request)
+        _check_service_account_scope(principal, service_account_scope)
+        tenant_id = request.path_params[tenant_path_param]
+        resource = Resource(type=Tenant.type, id=tenant_id)
+        await _check_rbac(request, principal, min_relation, resource)
+        return principal
+
+    return dependency
+
+
+def require_tenant_admin_or_system_owner(
+    *, tenant_path_param: str = "tenant_id", service_account_scope: str | None = None
+):
+    """
+    FastAPI dependency for the one action CP-4 explicitly gates on either
+    scope: deprovisioning a tenant is destructive enough that both "that
+    tenant's own admin" and "the deployment's system owner" should be
+    able to do it, without requiring the latter to also hold an explicit
+    per-tenant grant (see `require_tenant_role`'s docstring on why the
+    two scopes don't imply each other everywhere else).
+    """
+
+    async def dependency(request: Request) -> CurrentPrincipal:
+        principal = await get_current_principal(request)
+        _check_service_account_scope(principal, service_account_scope)
+
+        rbac_authz = request.app.state.rbac_authz
+        tenant_id = request.path_params[tenant_path_param]
+        tenant_resource = Resource(type=Tenant.type, id=tenant_id)
+        system_resource = Resource(type=System.type, id=SYSTEM_OBJECT_ID)
+
+        if await rbac_authz.can("admin", principal.identity, tenant_resource):
+            return principal
+        if await rbac_authz.can("owner", principal.identity, system_resource):
+            return principal
+
+        raise AuthorizationDenied(
+            f"{principal.identity.id!r} holds neither tenant:{tenant_id}#admin nor system#owner"
+        )
+
+    return dependency
+
+
+def require_tenant_role_from_query(
+    min_relation: str,
+    *,
+    query_param: str = "tenant_id",
+    service_account_scope: str | None = None,
+):
+    """
+    Same as `require_tenant_role`, but for the one route (`POST
+    /models/sync`, CP-6) whose target tenant is a query parameter rather
+    than a path segment — there's no single-tenant path to pull a
+    `tenant_id` path param from there.
+    """
+    if min_relation not in ROLE_CHAIN:
+        raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+
+    async def dependency(request: Request) -> CurrentPrincipal:
+        principal = await get_current_principal(request)
+        _check_service_account_scope(principal, service_account_scope)
+        tenant_id = request.query_params.get(query_param)
+        if not tenant_id:
+            raise InvalidAuthzRequest(f"{query_param!r} query parameter is required")
+        resource = Resource(type=Tenant.type, id=tenant_id)
+        await _check_rbac(request, principal, min_relation, resource)
+        return principal
+
+    return dependency
+
+
+def require_system_or_tenant_role_from_query(
+    min_relation: str,
+    *,
+    query_param: str = "tenant_id",
+    service_account_scope: str | None = None,
+):
+    """
+    FastAPI dependency for a route whose scope is optionally narrowed by
+    a `tenant_id` query parameter (e.g. `GET /audit-logs?tenant_id=...`):
+    when `tenant_id` is given, the caller must hold `min_relation` on
+    that specific `tenant:<id>`; when it's omitted (an unscoped,
+    across-every-tenant view), the caller must hold `min_relation` at
+    `system` scope instead. This is the one place the two scopes *do*
+    compose (contrast `require_tenant_role`'s docstring on why they
+    otherwise don't) — an unscoped query is inherently a system-wide
+    view, not a claim about any one tenant.
+    """
+    if min_relation not in ROLE_CHAIN:
+        raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+
+    async def dependency(request: Request) -> CurrentPrincipal:
+        principal = await get_current_principal(request)
+        _check_service_account_scope(principal, service_account_scope)
+        tenant_id = request.query_params.get(query_param)
+        resource = (
+            Resource(type=Tenant.type, id=tenant_id)
+            if tenant_id
+            else Resource(type=System.type, id=SYSTEM_OBJECT_ID)
+        )
+        await _check_rbac(request, principal, min_relation, resource)
+        return principal
+
+    return dependency
+
+
+async def effective_system_role(rbac_authz, identity: Identity) -> str | None:
+    """
+    The highest role (first hit walking `ROLE_CHAIN` from `owner` down)
+    `identity` holds on `system:default`, or `None` if none. Used by
+    `GET /auth/me` to report "effective roles" without the caller having
+    to issue one check per role name themselves.
+    """
+    resource = Resource(type=System.type, id=SYSTEM_OBJECT_ID)
+    for role in ROLE_CHAIN:
+        if await rbac_authz.can(role, identity, resource):
+            return role
+    return None

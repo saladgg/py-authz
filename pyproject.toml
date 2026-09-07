@@ -74,8 +74,26 @@ all = [
   "pyjwt[crypto]>=2.13.0,<3"
 ]
 
+control-plane = [
+  # The control-plane API (py_authz/control_plane/) is a FastAPI service
+  # that needs Postgres (its own new tables — operators, service_accounts,
+  # model_versions, control_plane_jobs — plus the tenant/model/audit
+  # tables every adopter already has), Redis (cache stats/invalidate,
+  # CP-9), and OIDC/Keycloak (operator login, CP-2) on top of what `all`
+  # already pulls in. `argon2-cffi` is control-plane-specific: it's the
+  # one place in this library that hashes/verifies a bearer secret
+  # directly (service-account credentials, CP-3) rather than delegating
+  # to an IdP.
+  {include-group = "fastapi"},
+  {include-group = "postgres"},
+  {include-group = "redis"},
+  {include-group = "keycloak"},
+  "argon2-cffi>=23.1.0",
+]
+
 test = [
   {include-group = "all"},
+  {include-group = "control-plane"},
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
   "pytest-asyncio>=1.4.0",
@@ -95,6 +113,10 @@ dev = [
 
 [project.scripts]
 py-authz = "py_authz.cli.main:main"
+# Requires the `control-plane` extra; importing this entry point without
+# it raises the same `pip install py-authz[control-plane]` guidance every
+# other optional-dependency gap in this library gives (see utils/deps.py).
+py-authz-control-plane = "py_authz.control_plane.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/saladgg/py-authz" # todo
@@ -136,6 +158,22 @@ line-length = 100
 # type-narrowing invariant already guarded by its caller — silenced
 # inline with `# noqa: S101` there instead of widening this ignore.
 select = ["E", "F", "I", "UP", "B", "C4", "SIM", "S"]
+
+# `Depends(...)`/`Query(...)`/etc. as a parameter default is FastAPI's own
+# documented dependency-injection idiom (`control_plane/routes/*.py`,
+# `adapters/fastapi.py`) — B008 ("no function calls in argument defaults")
+# would otherwise flag every single one, since ruff doesn't special-case
+# FastAPI's own callables by default.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.Path",
+  "fastapi.Body",
+  "fastapi.Header",
+  "fastapi.Cookie",
+  "fastapi.Security",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]

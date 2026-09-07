@@ -145,6 +145,86 @@ class TenantManager:
             finally:
                 await client.aclose()
 
+    async def deprovision(self, tenant_id: str, *, model_registry=None) -> None:
+        """
+        Deprovision a tenant: delete its real OpenFGA store, then remove
+        its `tenant_store` mapping (and, if `model_registry` is given,
+        its `tenant_models`-shaped row too).
+
+        Symmetric with `provision()`'s safety posture: `tenant_id` is
+        validated against the same pattern first (rejected before any
+        lookup or deletion is attempted), and start/success/failure are
+        logged the same way. Deprovisioning a `tenant_id` with no known
+        mapping is a no-op, not an error — matches `TenantStore.delete()`'s
+        idempotent contract.
+
+        The OpenFGA store is deleted *before* the tenant_store mapping is
+        removed: if store deletion fails, the tenant is left exactly as
+        provisioned (still resolvable, safe to retry) rather than in a
+        state where the mapping is gone but the real store — and
+        everything a caller might still expect to reach through it — is
+        not. This is not locked the way `provision()` is (no concurrent
+        "first deprovisioner wins" race to protect against beyond
+        `delete_store()`/`delete()`'s own idempotency): deprovisioning is
+        an explicit, operator-driven action, not something two concurrent
+        first-callers might both trigger for the same tenant the way
+        auto-provisioning can.
+
+        Args:
+            tenant_id: The tenant to deprovision.
+            model_registry: Optional `ModelRegistry`-shaped object (see
+                `core/model_registry.py`) whose row for `tenant_id`
+                should also be removed. Defaults to `None` for backward
+                compatibility with existing `TenantManager` construction,
+                which doesn't take one — an orphaned `tenant_models` row
+                left behind without it is harmless (nothing reads it once
+                `tenant_store` no longer resolves that `tenant_id`), just
+                not cleaned up.
+
+        Raises:
+            InvalidAuthzRequest: if `tenant_id` doesn't match
+                `tenant_id_pattern`.
+        """
+        if not self._tenant_id_pattern.fullmatch(tenant_id):
+            raise InvalidAuthzRequest(
+                f"Invalid tenant_id {tenant_id!r}: must match {self._tenant_id_pattern.pattern!r}"
+            )
+
+        logger.info(json.dumps({"event": "deprovision_start", "tenant": tenant_id}))
+
+        store_id = await self.tenant_store.get(tenant_id)
+        if not store_id:
+            logger.info(
+                json.dumps(
+                    {"event": "deprovision_noop", "tenant": tenant_id, "reason": "not_provisioned"}
+                )
+            )
+            return
+
+        client = OpenFGAClient.for_tenant(api_url=self.api_url, store_id=store_id)
+        try:
+            try:
+                await client.delete_store(store_id)
+            except Exception:
+                logger.exception(
+                    json.dumps(
+                        {"event": "deprovision_failed", "tenant": tenant_id, "store_id": store_id}
+                    )
+                )
+                raise
+
+            await self.tenant_store.delete(tenant_id)
+            if model_registry is not None:
+                await model_registry.delete(tenant_id)
+
+            logger.info(
+                json.dumps(
+                    {"event": "deprovision_success", "tenant": tenant_id, "store_id": store_id}
+                )
+            )
+        finally:
+            await client.aclose()
+
     @asynccontextmanager
     async def _provision_lock(self, tenant_id: str):
         if self.lock_manager is None:

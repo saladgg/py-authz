@@ -95,3 +95,28 @@ async def test_model_sync_force_always_uploads():
 
     assert model_id == "new-model-id"
     assert client.post_calls, "force=True must upload even when unchanged"
+
+
+@pytest.mark.asyncio
+async def test_model_sync_uses_custom_model_factory_instead_of_global_registry():
+    """
+    `model_factory` (added for the control-plane API's dogfooded RBAC
+    model, `control_plane/rbac_model.py`) lets `ModelSync` sync a model
+    built from an explicit set of `ResourceModel`s, without touching the
+    global `py_authz.modeling.registry.registry` singleton `generate_model()`
+    reads by default.
+    """
+    from py_authz.core.model_sync import ModelSync
+
+    custom_model = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "user"}, {"type": "widget"}],
+    }
+    client = MockFGAClient(existing_model=None)
+
+    sync = ModelSync(client, model_factory=lambda: custom_model)
+    model_id = await sync.sync()
+
+    assert model_id == "new-model-id"
+    _path, uploaded = client.post_calls[0]
+    assert uploaded == custom_model

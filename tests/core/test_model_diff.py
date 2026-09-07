@@ -160,3 +160,76 @@ def test_is_equal_still_false_when_union_child_content_actually_differs():
     }
 
     assert not ModelDiffer.is_equal(a, b)
+
+
+# ----------------------------------------------------------------------
+# summarize_diff() — human-readable type/relation-level summary (CP-6:
+# backs the control-plane API's model_versions.change_summary).
+# ----------------------------------------------------------------------
+
+
+def test_summarize_diff_with_no_previous_model():
+    new_model = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "user"}, {"type": "document", "relations": {"viewer": {}}}],
+    }
+
+    summary = ModelDiffer.summarize_diff(None, new_model)
+
+    assert "initial model" in summary
+    assert "document" in summary
+
+
+def test_summarize_diff_reports_added_type():
+    old_model = {"schema_version": "1.1", "type_definitions": [{"type": "user"}]}
+    new_model = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "user"}, {"type": "document", "relations": {"viewer": {}}}],
+    }
+
+    summary = ModelDiffer.summarize_diff(old_model, new_model)
+
+    assert "added types=['document']" in summary
+
+
+def test_summarize_diff_reports_removed_type():
+    old_model = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "user"}, {"type": "document", "relations": {}}],
+    }
+    new_model = {"schema_version": "1.1", "type_definitions": [{"type": "user"}]}
+
+    summary = ModelDiffer.summarize_diff(old_model, new_model)
+
+    assert "removed types=['document']" in summary
+
+
+def test_summarize_diff_reports_added_and_removed_relations_on_same_type():
+    old_model = {
+        "schema_version": "1.1",
+        "type_definitions": [
+            {"type": "document", "relations": {"owner": {}, "editor": {}}},
+        ],
+    }
+    new_model = {
+        "schema_version": "1.1",
+        "type_definitions": [
+            {"type": "document", "relations": {"owner": {}, "viewer": {}}},
+        ],
+    }
+
+    summary = ModelDiffer.summarize_diff(old_model, new_model)
+
+    assert "document: +['viewer']" in summary
+    assert "document: -['editor']" in summary
+
+
+def test_summarize_diff_no_change_reports_unchanged():
+    model = {
+        "schema_version": "1.1",
+        "type_definitions": [{"type": "document", "relations": {"owner": {}}}],
+    }
+
+    summary = ModelDiffer.summarize_diff(model, model)
+
+    assert summary == "schema unchanged at the type/relation-name level"

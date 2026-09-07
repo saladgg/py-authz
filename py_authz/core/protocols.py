@@ -44,3 +44,13 @@ class FGAClientProtocol(Protocol):
         writes: list[dict],
         deletes: list[dict] | None = None,
     ) -> None: ...
+
+    async def read_tuples(
+        self,
+        *,
+        user: str | None = None,
+        relation: str | None = None,
+        object: str | None = None,
+        page_size: int | None = None,
+        continuation_token: str | None = None,
+    ) -> dict: ...
