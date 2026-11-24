@@ -14,6 +14,21 @@
 SOURCE       := py_authz
 VENV_PYTHON  := .venv/bin/python
 
+# Connection settings for tests/live/ against the docker-compose stack
+# (ports match docker-compose.yml). Shared by test-integration/test-live.
+LIVE_ENV := \
+	FGA_API_URL=http://localhost:8082 \
+	KEYCLOAK_ISSUER=http://localhost:8081/realms/py-authz \
+	KEYCLOAK_AUDIENCE=py-authz-demo \
+	REDIS_URL=redis://localhost:6380/0 \
+	POSTGRES_DSN=postgres://py_authz:py_authz@localhost:5433/py_authz
+
+# Second interpreter CI's lint-test matrix runs (see .github/workflows/ci.yml).
+PY ?= 3.14
+
+# Where the control-plane API listens when run locally (run-control-plane).
+CONTROL_PLANE_URL ?= http://localhost:8000
+
 # ----------------------------------------------------------
 # Help
 # ----------------------------------------------------------
@@ -85,7 +100,10 @@ audit: ## Scan dependencies for known vulnerabilities (see SEC2-8)
 	uv run pip-audit --skip-editable
 
 .PHONY: check
-check: format-check lint audit test ## Run format-check + lint + audit + test — mirrors CI's lint-test job in one shot
+check: format-check lint audit test check-dist ## Mirror CI's lint-test job: format-check + lint + audit + test + check-dist
+
+.PHONY: check-all
+check-all: check panel-check ## Everything CI runs except the live integration job (Python + control panel)
 
 # ----------------------------------------------------------
 # Testing
@@ -104,8 +122,13 @@ test-cov-html: ## Run tests and generate an HTML coverage report at htmlcov/inde
 	uv run pytest --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
 
-.PHONY: test-integration
-test-integration: ## Run tests/live against a real OpenFGA + Keycloak + Redis + Postgres stack (docker compose)
+.PHONY: test-py
+test-py: ## Run the unit suite on another Python (default PY=3.14, as in CI's matrix), in its own venv
+	UV_PROJECT_ENVIRONMENT=.venv-py$(PY) uv run --locked --group dev --python $(PY) \
+		pytest --no-cov tests --ignore=tests/live
+
+.PHONY: services-up
+services-up: ## Start openfga + keycloak + redis + postgres (detached) and wait until each is ready
 	docker compose up -d openfga keycloak redis postgres
 	@echo "Waiting for OpenFGA + Keycloak + Redis + Postgres to become reachable..."
 	@i=0; until curl -sf http://localhost:8082/healthz >/dev/null 2>&1; do \
@@ -124,12 +147,13 @@ test-integration: ## Run tests/live against a real OpenFGA + Keycloak + Redis + 
 		i=$$((i+1)); if [ $$i -ge 60 ]; then echo "Postgres did not become ready in time"; exit 1; fi; \
 		sleep 1; \
 	done
-	FGA_API_URL=http://localhost:8082 \
-	KEYCLOAK_ISSUER=http://localhost:8081/realms/py-authz \
-	KEYCLOAK_AUDIENCE=py-authz-demo \
-	REDIS_URL=redis://localhost:6380/0 \
-	POSTGRES_DSN=postgres://py_authz:py_authz@localhost:5433/py_authz \
-	uv run pytest tests/live -q --no-cov
+
+.PHONY: test-integration
+test-integration: services-up test-live ## Start the docker-compose stack, then run tests/live against it (what CI runs)
+
+.PHONY: test-live
+test-live: ## Run tests/live against an already-running stack (see services-up) — no docker restart
+	$(LIVE_ENV) uv run pytest tests/live -q --no-cov
 
 
 # ----------------------------------------------------------
@@ -158,22 +182,27 @@ install-all: ## Install py-authz with every extra
 # ----------------------------------------------------------
 
 .PHONY: install-control-plane
-install-control-plane: ## Install only the control-plane API's own dependency group
+install-control-plane: ## Install the control-plane API's dependencies (the `control-plane` extra)
 	uv sync --extra control-plane
 
 .PHONY: run-control-plane
 run-control-plane: ## Run the control-plane API (dev/reload) against .env's §3 config — see docs/control_plane.md
 	uv run uvicorn examples.14_control_plane_api:app --reload
 
+.PHONY: control-plane-ready
+control-plane-ready: ## Probe a running control-plane API: /livez, then /readyz (503 + failing check if a dependency is down)
+	@curl -s -w "  [/livez %{http_code}]\n" $(CONTROL_PLANE_URL)/livez
+	@curl -s -w "  [/readyz %{http_code}]\n" $(CONTROL_PLANE_URL)/readyz
+
 # ----------------------------------------------------------
 # Control Panel (control-panel/) — the Next.js frontend for the
 # control-plane API above. Requires pnpm; see control-panel/README.md.
 # ----------------------------------------------------------
 
-.PHONY: panel-install panel-dev panel-build panel-lint
+.PHONY: panel-install panel-dev panel-build panel-lint panel-typecheck panel-test panel-audit panel-check
 
-panel-install: ## Install the control-panel frontend's dependencies
-	cd control-panel && pnpm install
+panel-install: ## Install the control-panel frontend's dependencies (exactly as locked)
+	cd control-panel && pnpm install --frozen-lockfile
 
 panel-dev: ## Run the control-panel frontend in dev mode (http://localhost:3001)
 	cd control-panel && pnpm dev
@@ -183,6 +212,17 @@ panel-build: ## Build the control-panel frontend for production
 
 panel-lint: ## Lint the control-panel frontend
 	cd control-panel && pnpm lint
+
+panel-typecheck: ## Type-check the control-panel frontend (tsc --noEmit)
+	cd control-panel && pnpm typecheck
+
+panel-test: ## Run the control-panel unit tests (vitest)
+	cd control-panel && pnpm test
+
+panel-audit: ## Scan the control-panel's production dependencies for known vulnerabilities
+	cd control-panel && pnpm audit --prod
+
+panel-check: panel-install panel-lint panel-typecheck panel-test panel-build panel-audit ## Mirror CI's control-panel job
 
 # ----------------------------------------------------------
 # Docker
