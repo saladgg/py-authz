@@ -14,7 +14,11 @@ stack, creating the RBAC store, break-glass bootstrap) — this file only covers
   `Authorization: Bearer <token>` when calling the control-plane API (`lib/api.ts`). Client JS never
   sees a bearer token or talks to the control-plane API directly.
 - **Auth flow**: `/api/auth/login` (redirect to Keycloak, PKCE) → `/api/auth/callback` (exchange code,
-  set session cookie) → `/api/auth/logout` (clear cookie). See `lib/oidc.ts`.
+  set session cookie) → `POST /api/auth/logout` (same-origin only: revoke the
+  refresh token, clear the cookie, end the IdP session). Sessions also carry a
+  sealed `issuedAt`, so the 8-hour lifetime is enforced server-side. Security
+  headers (CSP with `frame-ancestors 'none'`, etc.) are set per request in
+  `proxy.ts`. See `lib/oidc.ts`, `lib/session.ts`, `lib/security-headers.ts`.
 - **Route gating**: `proxy.ts` (Next.js 16's renamed `middleware.ts`) does a cheap, optimistic
   cookie-presence check before render; `(app)/layout.tsx` does the real check — a valid/refreshable
   session *and* a successful `GET /auth/me` against the control-plane API. Nav items are further
@@ -35,8 +39,10 @@ Requires the control-plane API running (`docs/control_plane.md` §6) and the dev
 (`docker compose up -d openfga keycloak redis postgres` from the repo root).
 
 ```bash
-pnpm build   # production build + typecheck
-pnpm lint    # eslint
+pnpm build      # production build
+pnpm lint       # eslint
+pnpm typecheck  # tsc --noEmit
+pnpm test       # vitest (lib/ + route handlers)
 ```
 
 ## Project layout

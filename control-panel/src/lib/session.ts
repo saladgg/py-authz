@@ -21,8 +21,21 @@ export const LOGIN_FLOW_COOKIE_MAX_AGE_SECONDS = 5 * 60;
 export interface Session {
   accessToken: string;
   refreshToken: string | null;
-  /** Epoch milliseconds. */
+  /** Access-token expiry, epoch milliseconds. */
   expiresAt: number;
+  /** When the user signed in, epoch milliseconds. Sealed inside the
+   * encrypted cookie so the absolute session lifetime is enforced
+   * server-side (SEC3-12) — not only by the cookie's `maxAge`, which a
+   * client holding a stolen cookie value simply ignores. */
+  issuedAt: number;
+}
+
+/** Absolute session lifetime, regardless of how long the IdP keeps
+ * refreshing tokens. */
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
+
+function isPastAbsoluteLifetime(session: Session): boolean {
+  return Date.now() - session.issuedAt > SESSION_MAX_AGE_SECONDS * 1000;
 }
 
 function isExpired(session: Session): boolean {
@@ -46,14 +59,22 @@ export async function readSession(): Promise<Session | null> {
 
   try {
     const parsed = JSON.parse(decrypted) as Partial<Session>;
-    if (typeof parsed.accessToken !== "string" || typeof parsed.expiresAt !== "number") {
+    if (
+      typeof parsed.accessToken !== "string" ||
+      typeof parsed.expiresAt !== "number" ||
+      // Sessions sealed before `issuedAt` existed are treated as expired
+      // (one forced re-login), never as "no lifetime limit".
+      typeof parsed.issuedAt !== "number"
+    ) {
       return null;
     }
-    return {
+    const session: Session = {
       accessToken: parsed.accessToken,
       refreshToken: parsed.refreshToken ?? null,
       expiresAt: parsed.expiresAt,
+      issuedAt: parsed.issuedAt,
     };
+    return isPastAbsoluteLifetime(session) ? null : session;
   } catch {
     return null;
   }
@@ -90,6 +111,8 @@ export async function getValidSession(): Promise<Session | null> {
       accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken ?? session.refreshToken,
       expiresAt: refreshed.expiresAt,
+      // A refresh never extends the absolute lifetime.
+      issuedAt: session.issuedAt,
     };
   } catch {
     return null; // refresh token itself expired/revoked — session is over
@@ -125,8 +148,9 @@ export async function writeSessionCookie(session: Session): Promise<void> {
     path: "/",
     // A Keycloak refresh token often outlives this by a lot — bound the
     // cookie itself to something finite regardless, so an abandoned
-    // browser tab doesn't stay silently authenticated indefinitely.
-    maxAge: 60 * 60 * 8,
+    // browser tab doesn't stay silently authenticated indefinitely. The
+    // same limit is enforced server-side from the sealed `issuedAt`.
+    maxAge: SESSION_MAX_AGE_SECONDS,
   });
 }
 

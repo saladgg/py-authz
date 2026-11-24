@@ -13,6 +13,7 @@ interface DiscoveryDocument {
   authorization_endpoint: string;
   token_endpoint: string;
   end_session_endpoint?: string;
+  revocation_endpoint?: string;
 }
 
 let cachedDiscovery: DiscoveryDocument | null = null;
@@ -131,6 +132,51 @@ export async function refreshTokens(args: {
   }
 
   return toTokenSet(await res.json());
+}
+
+/** Best-effort RFC 7009 revocation of a refresh token at logout
+ * (SEC3-12). Never throws — a logout must complete even if the IdP is
+ * unreachable; the cookie is cleared regardless. */
+export async function revokeRefreshToken(args: {
+  issuer: string;
+  clientId: string;
+  refreshToken: string;
+}): Promise<void> {
+  try {
+    const discovery = await getDiscovery(args.issuer);
+    if (!discovery.revocation_endpoint) return;
+    await fetch(discovery.revocation_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: args.clientId,
+        token: args.refreshToken,
+        token_type_hint: "refresh_token",
+      }),
+    });
+  } catch {
+    // best effort
+  }
+}
+
+/** RP-initiated logout URL, so signing out also ends the IdP's SSO
+ * session — otherwise the next "Sign in" silently re-authenticates.
+ * Returns null if the provider doesn't advertise one. */
+export async function buildEndSessionUrl(args: {
+  issuer: string;
+  clientId: string;
+  postLogoutRedirectUri: string;
+}): Promise<string | null> {
+  try {
+    const discovery = await getDiscovery(args.issuer);
+    if (!discovery.end_session_endpoint) return null;
+    const url = new URL(discovery.end_session_endpoint);
+    url.searchParams.set("client_id", args.clientId);
+    url.searchParams.set("post_logout_redirect_uri", args.postLogoutRedirectUri);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 /** Decode a JWT's payload without verifying it — the control-plane API

@@ -16,3 +16,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # Control panel (Next.js/React) — previously not covered at all, so
+  # frontend CVEs got no PRs (SEC3-15). `pnpm audit --prod` runs in CI
+  # (control-panel job) as the matching gate.
+  - package-ecosystem: "npm"
+    directory: "/control-panel"
+    schedule:
+      interval: "weekly"
