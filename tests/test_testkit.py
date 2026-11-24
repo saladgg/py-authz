@@ -420,7 +420,7 @@ def strict_authz(doc_registry):
 
 @pytest.mark.asyncio
 async def test_strict_rejects_an_undefined_user_type(strict_authz):
-    from py_authz.core.exceptions import ExternalServiceError
+    from py_authz.core.exceptions import UpstreamRequestRejected as ExternalServiceError
 
     authz, Document = strict_authz
     with pytest.raises(ExternalServiceError, match="type 'service' not found"):
@@ -431,7 +431,7 @@ async def test_strict_rejects_an_undefined_user_type(strict_authz):
 
 @pytest.mark.asyncio
 async def test_strict_rejects_undefined_types_and_relations(strict_authz):
-    from py_authz.core.exceptions import ExternalServiceError
+    from py_authz.core.exceptions import UpstreamRequestRejected as ExternalServiceError
     from py_authz.core.types import Resource
 
     authz, Document = strict_authz
@@ -444,7 +444,7 @@ async def test_strict_rejects_undefined_types_and_relations(strict_authz):
 
 @pytest.mark.asyncio
 async def test_strict_rejects_a_subject_type_the_relation_does_not_allow():
-    from py_authz.core.exceptions import ExternalServiceError
+    from py_authz.core.exceptions import UpstreamRequestRejected as ExternalServiceError
 
     class Team(ResourceModel):
         type = "team"
@@ -465,7 +465,7 @@ async def test_strict_rejects_a_subject_type_the_relation_does_not_allow():
 
 @pytest.mark.asyncio
 async def test_strict_rejects_duplicate_writes_and_missing_deletes_atomically(strict_authz):
-    from py_authz.core.exceptions import ExternalServiceError
+    from py_authz.core.exceptions import UpstreamRequestRejected as ExternalServiceError
 
     authz, Document = strict_authz
     client = authz._engine.fga_client

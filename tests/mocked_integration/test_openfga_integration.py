@@ -41,6 +41,10 @@ class ScriptedHTTPClient:
     def write_tuple(self, user: str, relation: str, obj: str) -> None:
         self.tuples.add((user, relation, obj))
 
+    async def request(self, method, path, json=None, **_kwargs):
+
+        return await self.post(path, json=json)
+
     async def post(self, path, json=None, **_):
         if path.endswith("/check"):
             self.check_calls.append(json)

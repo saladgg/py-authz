@@ -16,7 +16,7 @@ Lets users unit-test authz code without booting OpenFGA. The fake honors:
     - per-request contextual tuples on check / list_objects
 
 ``strict=True`` additionally rejects what a real OpenFGA server rejects
-(ARCH3-9), raising ``ExternalServiceError`` just like ``OpenFGAClient``
+(ARCH3-9), raising ``UpstreamRequestRejected`` just like ``OpenFGAClient``
 does on a 400: writes or checks naming a type or relation the model
 doesn't define, a tuple whose user type isn't an allowed subject of that
 relation, duplicate writes, and deletes of tuples that don't exist. The
@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from py_authz.api import Authz
 from py_authz.core.enforcement import AuthzEngine
-from py_authz.core.exceptions import ExternalServiceError
+from py_authz.core.exceptions import UpstreamRequestRejected
 from py_authz.modeling.base import Relation, ResourceModel, from_parent_pairs
 from py_authz.modeling.registry import ResourceModelRegistry
 from py_authz.modeling.registry import registry as default_registry
@@ -284,7 +284,9 @@ class InMemoryFGAClient:
 
     @staticmethod
     def _reject(message: str) -> None:
-        raise ExternalServiceError(f"OpenFGA rejected the request: {message}", service="openfga")
+        raise UpstreamRequestRejected(
+            f"OpenFGA rejected the request: {message}", status_code=400, detail=message
+        )
 
     def _known_types(self) -> set[str]:
         # The generator always emits a `user` type alongside every

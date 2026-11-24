@@ -34,7 +34,7 @@ class RecordingWriteClient:
         self._status_code = status_code
         self.calls: list[tuple[str, str, dict | None]] = []
 
-    async def request(self, method, path, json=None):
+    async def request(self, method, path, json=None, **_kwargs):
         self.calls.append((method, path, json))
         return MockResponse(self._response_data, status_code=self._status_code)
 
@@ -62,7 +62,7 @@ async def test_write_tuples_posts_writes_only():
         (
             "POST",
             "/stores/s1/write",
-            {"writes": {"tuple_keys": [_tuple()]}},
+            {"writes": {"tuple_keys": [_tuple()], "on_duplicate": "ignore"}},
         )
     ]
 
@@ -83,7 +83,7 @@ async def test_write_tuples_posts_deletes_only():
         (
             "POST",
             "/stores/s1/write",
-            {"deletes": {"tuple_keys": [_tuple()]}},
+            {"deletes": {"tuple_keys": [_tuple()], "on_missing": "ignore"}},
         )
     ]
 
@@ -107,8 +107,8 @@ async def test_write_tuples_posts_writes_and_deletes():
     assert method == "POST"
     assert path == "/stores/s1/write"
     assert body == {
-        "writes": {"tuple_keys": [w]},
-        "deletes": {"tuple_keys": [d]},
+        "writes": {"tuple_keys": [w], "on_duplicate": "ignore"},
+        "deletes": {"tuple_keys": [d], "on_missing": "ignore"},
     }
 
 
@@ -279,3 +279,22 @@ def test_tuple_helper_shape():
         "relation": "viewer",
         "object": "doc:1",
     }
+
+
+@pytest.mark.asyncio
+async def test_write_tuples_without_idempotent_writes_omits_the_options():
+    """For an OpenFGA older than 1.8, which rejects the options."""
+    http = RecordingWriteClient()
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s1",
+        model_id=None,
+        http_client=http,
+        idempotent_writes=False,
+    )
+
+    await client.write_tuples([_tuple()], deletes=[_tuple(user="user:2")])
+
+    payload = http.calls[0][2]
+    assert "on_duplicate" not in payload["writes"]
+    assert "on_missing" not in payload["deletes"]

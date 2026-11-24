@@ -105,9 +105,8 @@ class ModelSync:
         return model
 
     async def _upload_model(self, model: dict[str, Any]) -> str:
-        response = await self.fga_client._post(
-            f"/stores/{self.fga_client.store_id}/authorization-models",
-            json=model,
-        )
+        # Public API (ARCH3-17) — this used to reach into the client's
+        # private `_post`.
+        response = await self.fga_client.write_authorization_model(model)
 
         return response["authorization_model_id"]

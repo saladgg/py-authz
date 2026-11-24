@@ -4,8 +4,32 @@ from py_authz.core.exceptions import (
     ExternalServiceError,
     ServiceTimeout,
     ServiceUnavailable,
+    UpstreamRequestRejected,
 )
 from py_authz.utils.retry import retry_async
+
+#: Failures where the request provably never reached OpenFGA — safe to
+#: retry for *any* call, including non-idempotent ones (REL3-6).
+_NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+#: Additionally retried for idempotent calls: a read timeout (the server
+#: may or may not have processed the request — harmless to repeat when
+#: repeating can't change anything).
+_IDEMPOTENT_RETRYABLE = (*_NEVER_SENT, httpx.TimeoutException)
+
+#: Transient HTTP statuses retried for idempotent calls (REL3-17).
+_RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
+
+#: OpenFGA statuses that mean "your request is invalid", not "I'm
+#: unavailable" — surfaced as `UpstreamRequestRejected` (ARCH3-7).
+_REJECTED_STATUSES = frozenset({400, 404, 409, 422})
+
+
+class _RetryableStatus(Exception):
+    def __init__(self, response: httpx.Response):
+        super().__init__(f"retryable status {response.status_code}")
+        self.response = response
+
 
 #: OpenFGA's own cap on combined tuple operations (writes + deletes
 #: together) in a single Write request.
@@ -66,6 +90,8 @@ class OpenFGAClient:
         timeout: float = 2.0,
         max_retries: int = 2,
         http_client: httpx.AsyncClient | None = None,
+        idempotent_writes: bool = True,
+        list_objects_timeout: float = 10.0,
     ):
         """
         Initialize the OpenFGA client.
@@ -89,12 +115,30 @@ class OpenFGAClient:
 
             http_client (Optional[httpx.AsyncClient]):
                 Optional injected HTTP client (useful for testing).
+
+            idempotent_writes (bool):
+                Send OpenFGA's `on_duplicate: "ignore"` / `on_missing:
+                "ignore"` write options (OpenFGA >= 1.8), so granting an
+                existing tuple or revoking a missing one succeeds, and a
+                write can be safely retried after a read timeout (ARCH3-10,
+                REL3-6). Set `False` for an older server that rejects the
+                options — writes are then only retried when the request
+                provably never reached the server.
+
+            list_objects_timeout (float):
+                Timeout for `list_objects()` specifically (REL3-17).
+                ListObjects is OpenFGA's most expensive endpoint and its
+                own server-side deadline (3s by default) exceeds the
+                general `timeout`; it is also never retried on a read
+                timeout, since repeating a slow query just multiplies load.
         """
         self.api_url = api_url.rstrip("/")
         self.store_id = store_id
         self.model_id = model_id
         self.timeout = timeout
         self.max_retries = max_retries
+        self.idempotent_writes = idempotent_writes
+        self.list_objects_timeout = list_objects_timeout
 
         self._client = http_client or httpx.AsyncClient(
             base_url=self.api_url,
@@ -111,6 +155,7 @@ class OpenFGAClient:
         timeout: float = 2.0,
         max_retries: int = 2,
         http_client: httpx.AsyncClient | None = None,
+        idempotent_writes: bool = True,
     ) -> "OpenFGAClient":
         """
         Construct an `OpenFGAClient` scoped to one tenant's store.
@@ -142,6 +187,7 @@ class OpenFGAClient:
             timeout=timeout,
             max_retries=max_retries,
             http_client=http_client,
+            idempotent_writes=idempotent_writes,
         )
 
     async def check(
@@ -205,112 +251,107 @@ class OpenFGAClient:
         if context:
             payload["context"] = context
 
-        try:
-            response = await retry_async(
-                lambda: self._client.post(endpoint, json=payload),
-                retryable=(httpx.TimeoutException, httpx.ConnectError),
-                max_retries=self.max_retries,
-            )
+        data = await self._request("POST", endpoint, json=payload, idempotent=True)
+        return data.get("allowed", False)
 
-            # Raise for non-2xx responses
-            response.raise_for_status()
-
-            data = response.json()
-
-            return data.get("allowed", False)
-
-        except httpx.TimeoutException as exc:
-            raise ServiceTimeout(
-                "OpenFGA request timed out",
-                service="openfga",
-                cause=exc,
-            ) from exc
-
-        except httpx.ConnectError as exc:
-            raise ServiceUnavailable(
-                "Unable to connect to OpenFGA",
-                service="openfga",
-                cause=exc,
-            ) from exc
-
-        except httpx.HTTPStatusError as exc:
-            # Non-2xx responses (4xx, 5xx)
-            raise ExternalServiceError(
-                f"OpenFGA API error: {exc.response.status_code}",
-                service="openfga",
-                cause=exc,
-            ) from exc
-
-        except Exception as exc:
-            raise ExternalServiceError(
-                "Unexpected error during OpenFGA request",
-                service="openfga",
-                cause=exc,
-            ) from exc
-
-    async def _request(self, method: str, path: str, json: dict | None = None) -> dict:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        json: dict | None = None,
+        *,
+        idempotent: bool,
+        timeout: float | None = None,
+        retry_read_timeouts: bool = True,
+    ) -> dict:
         """
-        Shared HTTP helper behind `get_latest_model`/`create_store`/
-        `delete_store`/`list_objects`/`write_tuples`.
+        Shared HTTP helper behind every OpenFGA call.
 
-        Retries transient errors the same way `check()` does — previously
-        this had no retry at all, so a bulk `write_tuples()` chunk or a
-        `create_store()` call during tenant provisioning failed outright
-        on the exact transient blip `check()` would have silently
-        absorbed (see REL2-3). Retrying happens per-call, so for
-        `write_tuples()`'s chunked writes, a transient failure on one
-        chunk doesn't re-send chunks that already succeeded.
+        Retry policy depends on whether repeating the request is safe
+        (REL3-6). Every call retries failures where the request provably
+        never reached the server (connect errors/timeouts, pool
+        exhaustion). Only `idempotent` calls also retry read timeouts —
+        previously `create_store()` and writes retried a read timeout
+        too, which after a server-side commit created a duplicate,
+        orphaned store or failed with "tuple already exists" despite
+        having succeeded — and transient 429/502/503/504 responses.
+
+        Errors are classified (ARCH3-7): 400/404/409/422 →
+        `UpstreamRequestRejected` (a client/config error); timeouts →
+        `ServiceTimeout`; connect errors → `ServiceUnavailable`; any
+        other non-2xx or unexpected failure → `ExternalServiceError`.
         """
-        try:
-            response = await retry_async(
-                lambda: self._client.request(method, path, json=json),
-                retryable=(httpx.TimeoutException, httpx.ConnectError),
-                max_retries=self.max_retries,
+        if idempotent:
+            retryable: tuple[type[Exception], ...] = (
+                (*_IDEMPOTENT_RETRYABLE, _RetryableStatus)
+                if retry_read_timeouts
+                else (*_NEVER_SENT, _RetryableStatus)
             )
+        else:
+            retryable = _NEVER_SENT
+
+        async def attempt() -> httpx.Response:
+            kwargs: dict = {"json": json}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            response = await self._client.request(method, path, **kwargs)
+            if idempotent and response.status_code in _RETRYABLE_STATUSES:
+                raise _RetryableStatus(response)
+            return response
+
+        try:
+            try:
+                response = await retry_async(
+                    attempt, retryable=retryable, max_retries=self.max_retries
+                )
+            except _RetryableStatus as exc:
+                response = exc.response  # retries exhausted — classify below
             response.raise_for_status()
             try:
                 return response.json()
             except ValueError:
                 # A successful DELETE typically has no body (204 No
                 # Content) — `.json()` raises `json.JSONDecodeError`
-                # (a `ValueError`) on it. Only GET/POST responses here are
-                # ever expected to carry a JSON payload.
+                # (a `ValueError`) on it.
                 return {}
         except httpx.TimeoutException as exc:
             raise ServiceTimeout(
-                f"OpenFGA {method} {path} timed out",
-                service="openfga",
-                cause=exc,
+                f"OpenFGA {method} {path} timed out", service="openfga", cause=exc
             ) from exc
         except httpx.ConnectError as exc:
             raise ServiceUnavailable(
-                f"Unable to connect to OpenFGA for {method} {path}",
-                service="openfga",
-                cause=exc,
+                f"Unable to connect to OpenFGA for {method} {path}", service="openfga", cause=exc
             ) from exc
         except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in _REJECTED_STATUSES:
+                detail = _error_message(exc.response)
+                raise UpstreamRequestRejected(
+                    f"OpenFGA rejected {method} {path}: {status}"
+                    + (f" — {detail}" if detail else ""),
+                    status_code=status,
+                    detail=detail,
+                ) from exc
             raise ExternalServiceError(
-                f"OpenFGA API error: {exc.response.status_code}",
-                service="openfga",
-                cause=exc,
+                f"OpenFGA API error: {status}", service="openfga", cause=exc
             ) from exc
         except Exception as exc:
-            # Catch-all matching `check()`'s own fallback: an unexpected
-            # non-httpx failure (e.g. a malformed response body) is still
-            # classified as an `ExternalServiceError` instead of
-            # propagating raw and bypassing the CLI's exit-code mapping /
-            # the FastAPI adapter's fail-open/fail-closed handling.
+            # Catch-all: an unexpected non-httpx failure (e.g. a malformed
+            # response body) is still classified as an
+            # `ExternalServiceError` instead of propagating raw and
+            # bypassing the CLI's exit-code mapping / the FastAPI
+            # adapter's fail-open/fail-closed handling.
             raise ExternalServiceError(
-                f"Unexpected error during OpenFGA {method} {path}",
-                service="openfga",
-                cause=exc,
+                f"Unexpected error during OpenFGA {method} {path}", service="openfga", cause=exc
             ) from exc
 
     async def _get(self, path: str) -> dict:
-        return await self._request("GET", path)
+        return await self._request("GET", path, idempotent=True)
 
     async def _post(self, path: str, json: dict) -> dict:
-        return await self._request("POST", path, json=json)
+        """Read-only POST (check/list/read). Writes use `_request(...,
+        idempotent=...)` directly so their retry policy is explicit."""
+        return await self._request("POST", path, json=json, idempotent=True)
 
     async def get_latest_model(self) -> dict | None:
         """
@@ -319,7 +360,9 @@ class OpenFGAClient:
         Returns:
             dict or None
         """
-        res = await self._get(f"/stores/{self.store_id}/authorization-models")
+        # `page_size=1` (REL3-17): only the newest model is needed, but this
+        # used to fetch a full page on every sync, dry run and health probe.
+        res = await self._get(f"/stores/{self.store_id}/authorization-models?page_size=1")
 
         models = res.get("authorization_models", [])
 
@@ -336,10 +379,9 @@ class OpenFGAClient:
         Returns:
             str: store_id
         """
-        res = await self._post(
-            "/stores",
-            json={"name": name},
-        )
+        # Not idempotent: a retried create after a read timeout would make
+        # a second, orphaned store (REL3-6).
+        res = await self._request("POST", "/stores", json={"name": name}, idempotent=False)
 
         return res["id"]
 
@@ -352,7 +394,24 @@ class OpenFGAClient:
         later step (model sync, persisting the mapping) failed —
         orphaning it permanently.
         """
-        await self._request("DELETE", f"/stores/{store_id}")
+        try:
+            await self._request("DELETE", f"/stores/{store_id}", idempotent=True)
+        except UpstreamRequestRejected as exc:
+            # Already gone (e.g. a retried delete whose first attempt
+            # succeeded): the desired end state holds.
+            if exc.status_code != 404:
+                raise
+
+    async def write_authorization_model(self, model: dict) -> dict:
+        """Upload a new authorization model version (`POST
+        /authorization-models`). Not retried after a read timeout — a
+        repeat would just create a redundant duplicate version."""
+        return await self._request(
+            "POST",
+            f"/stores/{self.store_id}/authorization-models",
+            json=model,
+            idempotent=False,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -402,9 +461,13 @@ class OpenFGAClient:
         if context:
             payload["context"] = context
 
-        res = await self._post(
+        res = await self._request(
+            "POST",
             f"/stores/{self.store_id}/list-objects",
             json=payload,
+            idempotent=True,
+            timeout=self.list_objects_timeout,
+            retry_read_timeouts=False,
         )
 
         return list(res.get("objects", []))
@@ -512,11 +575,28 @@ class OpenFGAClient:
 
             if write_batch:
                 payload["writes"] = {"tuple_keys": write_batch}
+                if self.idempotent_writes:
+                    payload["writes"]["on_duplicate"] = "ignore"
 
             if delete_batch:
                 payload["deletes"] = {"tuple_keys": delete_batch}
+                if self.idempotent_writes:
+                    payload["deletes"]["on_missing"] = "ignore"
 
-            await self._post(
+            await self._request(
+                "POST",
                 f"/stores/{self.store_id}/write",
                 json=payload,
+                idempotent=self.idempotent_writes,
             )
+
+
+def _error_message(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict):
+        message = body.get("message")
+        return str(message) if message else None
+    return None

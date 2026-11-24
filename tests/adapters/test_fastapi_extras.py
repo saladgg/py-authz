@@ -496,3 +496,35 @@ def test_request_context_middleware_sets_request_id_header():
     assert res.status_code == 200
     assert "X-Request-ID" in res.headers
     assert len(res.headers["X-Request-ID"]) > 0
+
+
+class RejectingAuthz:
+    """OpenFGA rejected the check itself (e.g. a misconfigured relation)."""
+
+    async def can(self, *a, **kw):
+        from py_authz.core.exceptions import UpstreamRequestRejected
+
+        raise UpstreamRequestRejected("relation not found", status_code=400)
+
+
+@pytest.mark.asyncio
+async def test_fail_open_never_applies_when_openfga_rejects_the_check():
+    """ARCH3-7: a rejected check is a misconfiguration, not an outage.
+    Before, it was an ExternalServiceError and `fail_open=True` let the
+    request through — i.e. a typo'd relation silently allowed everyone."""
+    dep = require_dependency(
+        RejectingAuthz(),
+        Doc.view,
+        resource_getter=lambda request: Doc("static"),
+        user_getter=lambda request: Identity(id="user:1"),
+        fail_open=True,
+    )
+
+    class _Req:
+        class state:
+            user = Identity(id="user:1")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await dep(_Req())
+
+    assert exc_info.value.status_code == 500
