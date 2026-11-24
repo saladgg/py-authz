@@ -2,6 +2,71 @@
 
 <!-- version list -->
 
+## v2.0.0 (2026-11-24)
+
+### Bug Fixes
+
+- Migrate CLI safety, bounded paging, cross-tenant sweep (DX3-8, REL3-15, DX3-2)
+  ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- Third-pass audit backlogs and first remediation batch (docs/todos/10-13)
+  ([#17](https://github.com/saladgg/py-authz/pull/17),
+  [`39b1d29`](https://github.com/saladgg/py-authz/commit/39b1d296dd8af336939e870d2be164769d530ba2))
+
+- **auth**: Harden operator token acceptance; 401 not 500 from Keycloak middleware (SEC3-8, SEC3-14,
+  DX3-3) ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **client**: Idempotency-aware retries, idempotent writes, 4xx classification (REL3-6, ARCH3-10,
+  ARCH3-7, REL3-17) ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **control-panel**: BFF hardening, CI, tests and vulnerable deps (SEC3-10, SEC3-12, SEC3-15, DX3-7,
+  DX3-16) ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **control-panel**: Generate Next route types before tsc in typecheck
+  ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **control-plane**: Lifespan safety, pool sizing, audit flush, error exposure (REL3-12, REL3-14,
+  REL3-8, SEC3-11) ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **control-plane**: Readiness probes, SA auth cost, job lifecycle (REL3-7, REL3-13, SEC3-9, REL3-3,
+  REL3-9) ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **control-plane**: Tenant lifecycle and cache correctness (SEC3-6, SEC3-7, REL3-2, REL3-4, REL3-5,
+  REL3-18) ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **deps**: Upgrade vulnerable locked packages; raise pyjwt floor to 2.15
+  ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+- **modeling**: Authorization-semantics correctness (ARCH3-2, ARCH3-3, ARCH3-4, ARCH3-5)
+  ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+### Build System
+
+- **make**: Mirror CI locally; live-test and panel targets
+  ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+### Documentation
+
+- File the third-pass audit as docs/todos/10-13 (security, architecture
+  ([#17](https://github.com/saladgg/py-authz/pull/17),
+  [`39b1d29`](https://github.com/saladgg/py-authz/commit/39b1d296dd8af336939e870d2be164769d530ba2))
+
+- **todos**: Record second-batch remediation status (docs/todos/10-13)
+  ([#18](https://github.com/saladgg/py-authz/pull/18),
+  [`1f5c63f`](https://github.com/saladgg/py-authz/commit/1f5c63f12e2641e5d5dcf071a6ed35e93159b251))
+
+
 ## v1.6.0 (2026-09-07)
 
 ### Features
