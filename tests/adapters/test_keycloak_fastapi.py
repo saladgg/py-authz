@@ -71,9 +71,7 @@ def test_middleware_attaches_identity_on_valid_token():
 
 
 @pytest.mark.asyncio
-async def test_middleware_raises_http_exception_on_invalid_token():
-    from fastapi import HTTPException
-
+async def test_middleware_returns_401_on_invalid_token():
     validator = StubValidator(error=AuthenticationError("nope"))
     middleware = KeycloakAuthMiddleware(app=lambda *a: None, validator=validator)
 
@@ -86,10 +84,9 @@ async def test_middleware_raises_http_exception_on_invalid_token():
     async def _call_next(_):
         raise AssertionError("call_next should not run on invalid token")
 
-    with pytest.raises(HTTPException) as exc_info:
-        await middleware.dispatch(_Req(), _call_next)
+    response = await middleware.dispatch(_Req(), _call_next)
 
-    assert exc_info.value.status_code == 401
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -99,8 +96,6 @@ async def test_middleware_raises_503_when_identity_provider_unavailable():
     distinct from "this token is invalid" — it should surface as a 503,
     not be lumped in with a 401.
     """
-    from fastapi import HTTPException
-
     validator = StubValidator(error=IdentityProviderUnavailable("idp down"))
     middleware = KeycloakAuthMiddleware(app=lambda *a: None, validator=validator)
 
@@ -113,10 +108,9 @@ async def test_middleware_raises_503_when_identity_provider_unavailable():
     async def _call_next(_):
         raise AssertionError("call_next should not run when the IdP is unavailable")
 
-    with pytest.raises(HTTPException) as exc_info:
-        await middleware.dispatch(_Req(), _call_next)
+    response = await middleware.dispatch(_Req(), _call_next)
 
-    assert exc_info.value.status_code == 503
+    assert response.status_code == 503
 
 
 def test_middleware_extracts_token_containing_a_space():
@@ -141,3 +135,24 @@ async def test_real_validator_class_still_instantiable():
     """Smoke test: confirms the sys.modules stub is compatible with imports."""
     v = KeycloakJWTValidator(issuer="https://kc/realms/r", audience="aud")
     assert v.audience == "aud"
+
+
+def test_an_invalid_token_is_a_401_through_a_real_app_not_a_500():
+    """SEC3-14: the old test called `dispatch()` directly, so it never saw
+    that a raised HTTPException escapes Starlette's middleware stack as a
+    500 in a real app."""
+    app = FastAPI()
+    app.add_middleware(
+        KeycloakAuthMiddleware, validator=StubValidator(error=AuthenticationError("nope"))
+    )
+
+    @app.get("/")
+    async def root():
+        return {"ok": True}
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/", headers={"Authorization": "Bearer junk"})
+
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == "Bearer"

@@ -1,11 +1,12 @@
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from py_authz.adapters.keycloak import KeycloakJWTValidator
 from py_authz.core.exceptions import AuthenticationError, ExternalServiceError
 from py_authz.utils.deps import require_fast_api
 
-_, HTTPException, status = require_fast_api()
+_, _HTTPException, status = require_fast_api()
 
 
 class KeycloakAuthMiddleware(BaseHTTPMiddleware):
@@ -40,21 +41,28 @@ class KeycloakAuthMiddleware(BaseHTTPMiddleware):
 
             request.state.user = identity
 
-        except AuthenticationError as e:
-            raise HTTPException(
+        # Responses are *returned*, not raised (SEC3-14): this runs inside
+        # `BaseHTTPMiddleware.dispatch`, outside the routing layer where
+        # FastAPI's `HTTPException` handlers live — a raised HTTPException
+        # escaped as an unhandled error, so every invalid token produced a
+        # 500 (still failing closed, but noisy and indistinguishable from
+        # a real server fault).
+        except AuthenticationError:
+            return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication",
-            ) from e
+                content={"detail": "Invalid authentication"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-        except ExternalServiceError as e:
+        except ExternalServiceError:
             # The identity provider itself is unreachable (e.g.
             # `IdentityProviderUnavailable` from a failed discovery/JWKS
             # fetch) — distinct from "this token is invalid": a 503, not
             # a 401, so an IdP outage isn't indistinguishable from a bad
             # credential (see ARCH2-7).
-            raise HTTPException(
+            return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Identity provider unavailable",
-            ) from e
+                content={"detail": "Identity provider unavailable"},
+            )
 
         return await call_next(request)

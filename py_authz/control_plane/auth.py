@@ -52,6 +52,8 @@ class CurrentPrincipal:
     identity: Identity
     kind: str  # "operator" | "service_account"
     scopes: tuple[str, ...] = ()
+    #: For operators: the verified `sub`/`email` claims.
+    claims: dict | None = None
 
 
 def _bearer_token(request: Request) -> str:
@@ -67,13 +69,18 @@ async def _authenticate_operator(request: Request, token: str) -> CurrentPrincip
     payload = await validator.validate(token)
     identity = validator.to_identity(payload)
 
-    operator_store = request.app.state.operator_store
-    await operator_store.record_login(subject=payload.get("sub"), email=payload.get("email"))
+    # `record_login` moved to `GET /auth/me` (SEC3-8, REL3-19): it ran on
+    # every request, before any role check — a Postgres upsert per API
+    # call, and any realm user's token created an `operators` row.
 
     bootstrapper = request.app.state.bootstrapper
     await bootstrapper.maybe_bootstrap(identity)
 
-    return CurrentPrincipal(identity=identity, kind="operator")
+    return CurrentPrincipal(
+        identity=identity,
+        kind="operator",
+        claims={"sub": payload.get("sub"), "email": payload.get("email")},
+    )
 
 
 async def _authenticate_service_account(

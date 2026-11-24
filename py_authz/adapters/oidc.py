@@ -43,6 +43,9 @@ class OIDCJWTValidator:
         jwks_url: str | None = None,
         jwks_refresh_cooldown: float = 60.0,
         leeway: float = 0,
+        required_claims: tuple[str, ...] = ("exp", "iat", "sub"),
+        expected_typ: str | None = None,
+        allowed_azp: tuple[str, ...] | None = None,
     ):
         """
         Args:
@@ -75,10 +78,33 @@ class OIDCJWTValidator:
                 `0` here too, since the right value is deployment-specific;
                 set it explicitly (e.g. `30`) once you've measured your
                 actual clock drift.
+
+            required_claims (tuple[str, ...]):
+                Claims a token must carry (SEC3-8). PyJWT only validates
+                `exp`/`iat`/`nbf` *if present* — a signed token with no
+                `exp` used to be accepted forever. `iss`/`aud` are always
+                enforced on top of this.
+
+            expected_typ (Optional[str]):
+                If set, the token's `typ` claim must equal it
+                (case-insensitive). Keycloak marks access tokens `Bearer`
+                and ID tokens `ID` — set `"Bearer"` so an ID token (whose
+                `aud` is the client id, and so may match `audience`)
+                can't be replayed as an access token. Leave unset for
+                providers that don't emit `typ` (e.g. Auth0).
+
+            allowed_azp (Optional[tuple[str, ...]]):
+                If set, the token's `azp` (authorized party — the client
+                it was issued to) must be one of these. Use it to accept
+                only tokens minted for your own client, not ones a
+                different client of the same realm obtained.
         """
         self.issuer = issuer.rstrip("/")
         self.audience = audience
         self.leeway = leeway
+        self.required_claims = tuple(required_claims)
+        self.expected_typ = expected_typ
+        self.allowed_azp = tuple(allowed_azp) if allowed_azp is not None else None
 
         self._explicit_jwks_url = jwks_url
         self._discovery: dict[str, Any] | None = None
@@ -244,8 +270,10 @@ class OIDCJWTValidator:
                 audience=self.audience,
                 issuer=self.issuer,
                 leeway=self.leeway,
+                options={"require": list(self.required_claims)},
             )
 
+            self._check_typ_and_azp(payload)
             return payload
 
         except jwt.ExpiredSignatureError as e:
@@ -256,6 +284,18 @@ class OIDCJWTValidator:
 
         except jwt.InvalidTokenError as e:
             raise AuthenticationError(f"Invalid token: {str(e)}") from e
+
+    def _check_typ_and_azp(self, payload: dict[str, Any]) -> None:
+        if self.expected_typ is not None:
+            typ = payload.get("typ")
+            if not isinstance(typ, str) or typ.lower() != self.expected_typ.lower():
+                raise AuthenticationError(
+                    f"Invalid token: expected typ {self.expected_typ!r}, got {typ!r}"
+                )
+        if self.allowed_azp is not None and payload.get("azp") not in self.allowed_azp:
+            raise AuthenticationError(
+                "Invalid token: issued to a client this service doesn't accept"
+            )
 
     def _audience_error_message(self, exc: Exception) -> str:
         """

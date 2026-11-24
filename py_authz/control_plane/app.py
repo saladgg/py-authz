@@ -233,6 +233,8 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings, stack: AsyncExitSt
         issuer=settings.oidc_issuer,
         audience=settings.oidc_audience,
         jwks_url=settings.oidc_jwks_url,
+        expected_typ=settings.oidc_expected_typ,
+        allowed_azp=settings.oidc_allowed_azp,
     )
 
 

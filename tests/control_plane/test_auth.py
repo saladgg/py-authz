@@ -203,10 +203,13 @@ def test_invalid_oidc_token_is_401(client):
 # -------------------------------------------------------------------
 
 
-def test_valid_operator_token_records_login_and_runs_bootstrap(client, app):
-    client.get("/me", headers=_bearer("good-token"))
+def test_authenticating_runs_bootstrap_but_no_longer_records_a_login(client, app):
+    """SEC3-8/REL3-19: `record_login` ran on every request, before any role
+    check (a Postgres upsert per API call, and any realm user's token
+    created an operators row). It now happens only in `GET /auth/me`."""
+    client.get("/system", headers=_bearer("good-token"))
 
-    assert app.state.operator_store.logins == ["alice"]
+    assert app.state.operator_store.logins == []
     assert len(app.state.bootstrapper.calls) == 1
     assert app.state.bootstrapper.calls[0].id == "user:alice"
 

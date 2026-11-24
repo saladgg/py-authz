@@ -114,6 +114,13 @@ class ControlPlaneSettings:
     #: don't race DDL on every boot.
     apply_schema_on_startup: bool = True
 
+    #: Operator-token hardening (SEC3-8) — see `OIDCJWTValidator`'s
+    #: `expected_typ`/`allowed_azp`. For Keycloak, set `oidc_expected_typ`
+    #: to "Bearer" (rejects ID tokens) and `oidc_allowed_azp` to the
+    #: control panel's own client id.
+    oidc_expected_typ: str | None = None
+    oidc_allowed_azp: tuple[str, ...] | None = None
+
     #: Serve `/docs`, `/redoc` and `/openapi.json` (SEC3-11). Off by
     #: default: they publish the full admin API surface without
     #: authentication.
@@ -150,4 +157,11 @@ class ControlPlaneSettings:
             postgres_pool_max_size=int(os.environ.get("CONTROL_PLANE_PG_POOL_MAX_SIZE", "5")),
             apply_schema_on_startup=_env_bool("CONTROL_PLANE_APPLY_SCHEMA", True),
             expose_docs=_env_bool("CONTROL_PLANE_EXPOSE_DOCS", False),
+            oidc_expected_typ=os.environ.get("CONTROL_PLANE_OIDC_EXPECTED_TYP") or None,
+            oidc_allowed_azp=tuple(
+                a.strip()
+                for a in os.environ.get("CONTROL_PLANE_OIDC_ALLOWED_AZP", "").split(",")
+                if a.strip()
+            )
+            or None,
         )

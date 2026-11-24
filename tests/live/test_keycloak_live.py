@@ -82,3 +82,28 @@ async def test_generic_oidc_validator_resolves_keycloak_via_discovery():
     payload = await validator.validate(token)
 
     assert payload["preferred_username"] == KEYCLOAK_TEST_USER
+
+
+@requires_keycloak
+@pytest.mark.asyncio
+async def test_a_real_keycloak_access_token_passes_the_hardened_checks():
+    """SEC3-8: the recommended Keycloak settings (`expected_typ="Bearer"`,
+    `allowed_azp=(<client>,)`) accept a real access token — and the
+    required-claims default (`exp`/`iat`/`sub`) holds for Keycloak."""
+    token = await _fetch_token()
+    validator = OIDCJWTValidator(
+        issuer=KEYCLOAK_ISSUER,
+        audience=KEYCLOAK_AUDIENCE,
+        expected_typ="Bearer",
+        allowed_azp=(KEYCLOAK_AUDIENCE,),
+    )
+
+    payload = await validator.validate(token)
+
+    assert payload["typ"] == "Bearer"
+
+    wrong_azp = OIDCJWTValidator(
+        issuer=KEYCLOAK_ISSUER, audience=KEYCLOAK_AUDIENCE, allowed_azp=("someone-else",)
+    )
+    with pytest.raises(AuthenticationError):
+        await wrong_azp.validate(token)
