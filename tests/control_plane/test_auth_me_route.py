@@ -99,15 +99,15 @@ def test_service_account_reports_scopes_and_no_system_role(app, client):
     reported instead, unlike an operator's (always `None`)."""
     secret = generate_secret("sa_1")
     app.state.service_account_store.accounts["sa_1"] = FakeServiceAccountRecord(
-        id="sa_1", name="ci-bot", scopes=["models:sync"], secret_hash=hash_secret(secret)
+        id="sa_1", name="ci-bot", scopes=["models:write"], secret_hash=hash_secret(secret)
     )
 
     resp = client.get("/api/v1/auth/me", headers=bearer(secret))
 
     assert resp.status_code == 200
     assert resp.json() == {
-        "id": "service:ci-bot",
+        "id": "service_account:sa_1",
         "kind": "service_account",
-        "scopes": ["models:sync"],
+        "scopes": ["models:write"],
         "system_role": None,
     }

@@ -16,6 +16,15 @@ def get_settings(request: Request) -> ControlPlaneSettings:
     return request.app.state.settings
 
 
+def get_migration_concurrency(request: Request) -> int:
+    """`CONTROL_PLANE_MIGRATION_CONCURRENCY` (REL3-11 — previously parsed
+    into settings but never passed to `MigrationManager`). Falls back to
+    `MigrationManager`'s own default when the app was built without
+    settings (route-level unit tests)."""
+    settings = getattr(request.app.state, "settings", None)
+    return settings.migration_concurrency if settings is not None else 10
+
+
 def get_rbac_authz(request: Request):
     return request.app.state.rbac_authz
 

@@ -4,17 +4,22 @@ from fastapi import APIRouter, Depends
 
 from py_authz.control_plane.auth import (
     CurrentPrincipal,
+    authenticated,
     effective_system_role,
-    get_current_principal,
 )
 from py_authz.control_plane.deps import get_rbac_authz
+from py_authz.control_plane.scopes import ANY_PRINCIPAL
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+#: Self-introspection is the one route any authenticated principal may
+#: call regardless of its scopes.
+_any_principal = authenticated(scope=ANY_PRINCIPAL)
 
 
 @router.get("/me")
 async def get_me(
-    principal: CurrentPrincipal = Depends(get_current_principal),
+    principal: CurrentPrincipal = Depends(_any_principal),
     rbac_authz=Depends(get_rbac_authz),
 ) -> dict:
     """

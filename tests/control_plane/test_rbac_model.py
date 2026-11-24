@@ -14,6 +14,7 @@ from py_authz.control_plane.rbac_model import (
     RBAC_MODELS,
     ROLE_CHAIN,
     SYSTEM_OBJECT_ID,
+    ServiceAccountSubject,
     System,
     Tenant,
     generate_rbac_model,
@@ -28,9 +29,11 @@ from py_authz.testkit import InMemoryFGAClient
 @pytest.fixture
 def rbac_authz():
     reg = ResourceModelRegistry()
-    reg.register(System)
-    reg.register(Tenant)
-    client = InMemoryFGAClient(model_registry=reg)
+    # Strict mode + the full RBAC model (incl. the `service_account`
+    # subject type): reject what a real OpenFGA rejects (ARCH3-9).
+    for model in RBAC_MODELS:
+        reg.register(model)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
     return Authz(AuthzEngine(fga_client=client))
 
 
@@ -43,15 +46,33 @@ def test_rbac_models_are_not_registered_in_the_global_registry():
     assert Tenant not in global_registry.all()
 
 
-def test_generate_rbac_model_only_declares_system_and_tenant():
+def test_generate_rbac_model_declares_system_tenant_and_service_account_subjects():
     model = generate_rbac_model()
 
     types = {t["type"] for t in model["type_definitions"]}
-    assert types == {"user", "system", "tenant"}
+    assert types == {"user", "service_account", "system", "tenant"}
 
 
-def test_rbac_models_tuple_matches_the_two_classes():
-    assert set(RBAC_MODELS) == {System, Tenant}
+def test_every_role_relation_accepts_users_and_service_accounts():
+    """SEC3-3: service-account principals are `service_account:<id>`, so
+    every role relation must list that type as a directly-related subject
+    — otherwise a real OpenFGA rejects every SA check and grant with a
+    400 (the type-permissive in-memory fake never noticed)."""
+    model = generate_rbac_model()
+
+    for type_def in model["type_definitions"]:
+        if type_def["type"] not in ("system", "tenant"):
+            continue
+        for role in ROLE_CHAIN:
+            subjects = type_def["metadata"]["relations"][role]["directly_related_user_types"]
+            assert {s["type"] for s in subjects} == {"user", "service_account"}, (
+                type_def["type"],
+                role,
+            )
+
+
+def test_rbac_models_tuple_matches_the_model_classes():
+    assert set(RBAC_MODELS) == {ServiceAccountSubject, System, Tenant}
 
 
 #: `Authz.can()` with a string action (rather than a bound `Relation`)

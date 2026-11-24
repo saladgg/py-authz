@@ -5,7 +5,8 @@ evidence and code references; `NN_<topic>_todos.md` is the execution
 checklist (IDs match across the pair, and each todos file carries a status
 stamp at the top). Ship order within a backlog is its phase order.
 
-Two audit passes have been filed against py-authz so far, each requested
+Three audit passes have been filed against py-authz so far (the third,
+`10`–`13`, is at the bottom of this file), each requested
 as a comprehensive, ground-up review of the whole library against its
 stated goal — a reusable, production-ready authorization framework for
 Python built around OpenFGA and Keycloak — covering architecture, the
@@ -272,3 +273,85 @@ that talks only to that API.
 | Pair | Topic | Status stamp lives in |
 | ---- | ----- | --------------------- |
 | 09 | Control panel & service accounts — HTTP management API design, operator auth/RBAC (dogfooding py-authz on itself), service-account/machine-identity support, tenant/model/migration/audit management screens, and the Next.js frontend architecture | [`09_control_panel_todos.md`](09_control_panel_todos.md) — **filed 2026-09-05; fully shipped the same day, all four tiers (CP-1 through CP-19) — the control-plane API backend (`py_authz/control_plane/`), rate-limited and secrets-hardened, plus the Next.js frontend (`control-panel/`, all 9 screens). Verified end-to-end against a real running deployment (real OpenFGA/Keycloak/Postgres/Redis + a real browser-shaped OIDC login), which caught and fixed one real bug (an audit-log tenant filter matching against the wrong identifier). Nothing left open in this backlog** |
+
+## Third audit pass (filed 2026-11-24, backlogs `10`–`13`)
+
+A fresh, ground-up re-audit of the 1.6.0 tree, after `01`–`09` had all
+shipped. It covers security, architecture, code quality, refactoring,
+performance, operations, testing and missing capabilities. As before, each
+backlog first read its predecessor pairs, so nothing here re-files a
+shipped item. The control plane (`09`, built and shipped in one day) got
+the most scrutiny, and that's where most of the sharpest findings are.
+The four concern areas were reviewed in parallel and the headline claims
+were then re-checked against source. Findings marked REPRODUCED were
+confirmed with throwaway scripts (kept outside the repo). The grouping
+changes slightly from passes 1–2: `11` folds in code quality and
+refactoring, `12` folds in performance, and `13` folds in a
+missing-capabilities gap analysis.
+
+| Pair | Topic | Status stamp lives in |
+| ---- | ----- | --------------------- |
+| 10 | Security & identity — service-account scopes never enforced, admin → owner escalation via SA rotation, SA principals absent from the RBAC model, tenant-admin self-promotion, an unauthenticated shared RBAC store, cache invalidation that deletes nothing, token-acceptance gaps, BFF hardening | [`10_security_and_identity_todos.md`](10_security_and_identity_todos.md) — **filed 2026-11-24; not yet executed** |
+| 11 | Architecture, correctness & code quality — install extras missing from package metadata, a sync decorator that fails every other call, model-diff and modeling-DSL semantics bugs, 4xx→503 error mapping, a permissive testkit, duplicated model-sync paths, per-tenant connection pools | [`11_architecture_and_code_quality_todos.md`](11_architecture_and_code_quality_todos.md) — **filed 2026-11-24; not yet executed** |
+| 12 | Reliability, performance & operations — coalesced-check cancellation fan-out, unlocked control-plane provisioning, stuck jobs, non-idempotent retries, a `/health` that's always 200, Argon2 on the event loop, 60 Postgres connections per replica, release not gated on CI, `ruff check` missing from CI | [`12_reliability_performance_and_operations_todos.md`](12_reliability_performance_and_operations_todos.md) — **filed 2026-11-24; not yet executed** |
+| 13 | DX, testing & missing capabilities — no authenticated live control-plane test, no cross-tenant tests, an untested and un-CI'd control panel, a `migrate` CLI that silently no-ops, README drift, and the capability gaps (conditions/wildcards/usersets, sync-framework adapters, consistency/ListUsers/BatchCheck, tracing, model testing) | [`13_developer_experience_testing_and_capabilities_todos.md`](13_developer_experience_testing_and_capabilities_todos.md) — **filed 2026-11-24; not yet executed** |
+
+### Headline findings from this pass, if you read nothing else
+
+- **Service accounts, the headline `09` feature, are broken end-to-end
+  and insecure once fixed** (`10` SEC3-1/2/3). SA principals use a
+  `service:` subject type that the control plane's own RBAC model doesn't
+  define, so real OpenFGA should reject every SA check. The
+  type-permissive `InMemoryFGAClient` (`11` ARCH3-9) and a live test
+  that never authenticates (`13` DX3-1) both hid this. Underneath that,
+  scopes are never enforced on any route, and a `system#admin` can rotate
+  an owner-held SA to take its secret and promote themselves. **These
+  three must ship as one change.**
+- **A tenant admin can make themselves `tenant#owner` and remove every
+  other owner** (`10` SEC3-4). Reproduced, and unlike the SA issues this
+  works against a real OpenFGA today.
+- **`pip install "py-authz[<anything>]"` installs no optional
+  dependencies** (`11` ARCH3-1). Every extra is a PEP 735 dependency
+  group, which never reaches wheel metadata. Every install instruction in
+  the repo, and every "missing dependency" error message, points at
+  extras that don't exist. Fix before any PyPI publish.
+- **Control-plane cache invalidation by tenant deletes nothing and
+  reports success** (`10` SEC3-6): the route matches on tenant id while
+  keys are namespaced by store id. That's the same mismatch `09` fixed
+  for audit logs, and the test locks the bug in. `tenant_id="*"` wipes
+  the whole cache.
+- **The sync `@authorize` decorator fails every other call against a
+  real client** (`11` ARCH3-2): it creates a new event loop per call
+  while the `httpx` pool is bound to the first loop. Since checks fail
+  closed, every Django/Flask user is denied on alternating requests.
+- **Model "unchanged" detection ignores `conditions` and wildcards, and
+  `Relation(subjects=[])` silently makes intersection/exclude relations
+  directly grantable** (`11` ARCH3-3/4). Both are authorization-semantics
+  bugs in the modeling layer.
+- **One client disconnect can fail every request coalesced onto the same
+  OpenFGA check** (`12` REL3-1), a side effect of REL2-6's single-flight
+  fix (missing `asyncio.shield`).
+- **The control plane's operational base isn't production-shaped yet**
+  (`12`):
+  - unlocked tenant provisioning creates orphaned stores
+  - jobs can stay `running` forever and shutdown can hang
+  - `/health` returns 200 with Postgres down
+  - Argon2 blocks the event loop on every SA request
+  - one replica opens ~60 Postgres connections
+  - non-idempotent writes are retried after read timeouts
+  - the release workflow isn't gated on CI
+  - `ruff check` (and its bandit rules) quietly dropped out of CI
+    entirely
+
+### Suggested cross-backlog ship order
+
+1. `11` Tier 0 (packaging) and `12` Tier 0 (CI/release gates, `shield`):
+   small, independent, and they make every later change safer.
+2. `10` Tier 0 + `13` DX3-1/DX3-2 + `11` ARCH3-9 (strict testkit):
+   the SA trust boundary, with the tests that prove it against a real
+   OpenFGA.
+3. `10` Tier 1 + `12` REL3-2/REL3-4 + `11` Tier 1: operator RBAC, tenant
+   lifecycle, cache correctness, modeling semantics.
+4. Remaining `10` tiers and `12` Tiers 1–2, then `11` Tier 3
+   (`OpenFGAConnection` unblocks `10`'s SEC3-5).
+5. `13` Tier 4 capabilities, each behind a short design note.

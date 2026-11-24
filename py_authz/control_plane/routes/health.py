@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from py_authz.control_plane.auth import require_system_role
 from py_authz.control_plane.deps import get_metrics, get_product_fga_client
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import ExternalServiceError
 
 #: Mounted unversioned, at the app root, with no auth dependency — a load
@@ -38,7 +39,9 @@ async def health(fga_client=Depends(get_product_fga_client)) -> dict:
     return {"status": "ok" if healthy else "degraded", "checks": checks}
 
 
-@router.get("/metrics", dependencies=[Depends(require_system_role("auditor"))])
+@router.get(
+    "/metrics", dependencies=[Depends(require_system_role("auditor", scope=Scope.METRICS_READ))]
+)
 async def get_metrics_endpoint(metrics=Depends(get_metrics)) -> dict:
     """
     Aggregated `core/metrics.py` counters/durations, in a shape a

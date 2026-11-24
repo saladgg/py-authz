@@ -13,27 +13,61 @@ Reuses `Authz.grant`/`revoke`/`can`/`read_tuples` against the RBAC store
 unchanged — same principle as every other route in this package.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from py_authz.control_plane.auth import CurrentPrincipal, get_current_principal
-from py_authz.control_plane.deps import get_operator_store, get_rbac_authz
+from py_authz.control_plane.auth import CurrentPrincipal, authenticated
+from py_authz.control_plane.deps import (
+    get_operator_store,
+    get_rbac_authz,
+    get_service_account_store,
+)
 from py_authz.control_plane.operators import OperatorStore
-from py_authz.control_plane.rbac_model import ROLE_CHAIN, SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.rbac_model import (
+    ROLE_CHAIN,
+    SYSTEM_OBJECT_ID,
+    System,
+    Tenant,
+    role_rank,
+    service_account_principal,
+)
+from py_authz.control_plane.role_grants import effective_role, is_system_owner
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import AuthorizationDenied, InvalidAuthzRequest
 from py_authz.core.types import Identity, Resource
 
 router = APIRouter(prefix="/operators", tags=["operators"])
 
+_read = authenticated(scope=Scope.OPERATORS_READ)
+_write = authenticated(scope=Scope.OPERATORS_WRITE)
+
 
 class RoleAssignment(BaseModel):
-    #: Bare subject (the verified OIDC `sub`, no `"user:"` prefix — that's
-    #: added here, matching `OIDCJWTValidator.to_identity()`'s own
-    #: convention) to grant/revoke a role for.
+    #: Bare subject — no type prefix; that's added here from
+    #: `subject_kind`. For `user`, the verified OIDC `sub` (matching
+    #: `OIDCJWTValidator.to_identity()`'s convention); for
+    #: `service_account`, the account id (`sa_...`), never its name.
     subject: str
+    #: SEC3-3: before this, every grant was hard-coded to `user:`, so the
+    #: API had no way to give a service account a role at all.
+    subject_kind: Literal["user", "service_account"] = "user"
     scope: str  # "system" | "tenant"
     tenant_id: str | None = None
     role: str
+
+
+async def _target_identity(assignment: RoleAssignment, sa_store, *, granting: bool) -> Identity:
+    if assignment.subject_kind == "user":
+        return Identity(id=f"user:{assignment.subject}")
+    # Only refuse unknown/revoked accounts on *grant* — revoking a role
+    # from a since-revoked account must still work (it's cleanup).
+    if granting:
+        account = await sa_store.get(assignment.subject)
+        if account is None or account.is_revoked:
+            raise InvalidAuthzRequest(f"No active service account with id {assignment.subject!r}")
+    return Identity(id=service_account_principal(assignment.subject))
 
 
 def _resource_for(assignment: RoleAssignment) -> Resource:
@@ -58,25 +92,35 @@ async def _require_role_management(
     """
     Granting/revoking a *system*-scoped role requires `system#owner` —
     the most sensitive action in this whole API, since it can grant
-    itself (or anyone else) more roles. Granting/revoking a *tenant*-
-    scoped role accepts that tenant's own `tenant#admin`, or
-    `system#owner` — same OR as `require_tenant_admin_or_system_owner`
-    (`auth.py`), reimplemented inline here since this check's target
-    resource comes from the request body, not a path/query param the
-    existing dependency factories read from.
-    """
-    system_resource = Resource(type=System.type, id=SYSTEM_OBJECT_ID)
+    itself (or anyone else) more roles.
 
-    if assignment.scope == "system":
-        if not await rbac_authz.can("owner", principal.identity, system_resource):
-            raise AuthorizationDenied(f"{principal.identity.id!r} does not hold system#owner")
+    Granting/revoking a *tenant*-scoped role accepts `system#owner`, or a
+    tenant operator managing a role **strictly below** their own on that
+    tenant (SEC3-4) — a `tenant#owner` may manage any tenant role
+    (including other owners), a `tenant#admin` may manage `operator`,
+    `auditor` and `viewer` only. Previously any `tenant#admin` passed
+    unconditionally, so one could promote themselves to `tenant#owner`
+    and then revoke every other owner — including ones the system owner
+    had assigned.
+    """
+    if assignment.role not in ROLE_CHAIN:
+        raise InvalidAuthzRequest(f"Unknown role {assignment.role!r} — must be one of {ROLE_CHAIN}")
+
+    if await is_system_owner(rbac_authz, principal.identity):
         return
+    if assignment.scope == "system":
+        _resource_for(assignment)  # validates scope
+        raise AuthorizationDenied(f"{principal.identity.id!r} does not hold system#owner")
 
     tenant_resource = _resource_for(assignment)
-    if await rbac_authz.can("admin", principal.identity, tenant_resource):
-        return
-    if await rbac_authz.can("owner", principal.identity, system_resource):
-        return
+    held = await effective_role(rbac_authz, principal.identity, tenant_resource)
+    if held is not None and role_rank(held) <= role_rank("admin"):
+        if held == "owner" or role_rank(assignment.role) > role_rank(held):
+            return
+        raise AuthorizationDenied(
+            f"{principal.identity.id!r} holds tenant:{assignment.tenant_id}#{held} and may only "
+            f"manage roles below it — {assignment.role!r} requires tenant#owner or system#owner"
+        )
     raise AuthorizationDenied(
         f"{principal.identity.id!r} holds neither tenant:{assignment.tenant_id}#admin "
         "nor system#owner"
@@ -85,7 +129,7 @@ async def _require_role_management(
 
 @router.get("")
 async def list_operators(
-    principal: CurrentPrincipal = Depends(get_current_principal),
+    principal: CurrentPrincipal = Depends(_read),
     operator_store: OperatorStore = Depends(get_operator_store),
     rbac_authz=Depends(get_rbac_authz),
 ) -> dict:
@@ -111,7 +155,7 @@ async def list_operators(
 async def list_roles(
     scope: str,
     tenant_id: str | None = None,
-    principal: CurrentPrincipal = Depends(get_current_principal),
+    principal: CurrentPrincipal = Depends(_read),
     rbac_authz=Depends(get_rbac_authz),
 ) -> dict:
     """
@@ -148,15 +192,13 @@ async def list_roles(
 @router.post("/roles")
 async def grant_role(
     body: RoleAssignment,
-    principal: CurrentPrincipal = Depends(get_current_principal),
+    principal: CurrentPrincipal = Depends(_write),
     rbac_authz=Depends(get_rbac_authz),
+    sa_store=Depends(get_service_account_store),
 ) -> dict:
-    if body.role not in ROLE_CHAIN:
-        raise InvalidAuthzRequest(f"Unknown role {body.role!r} — must be one of {ROLE_CHAIN}")
-
     await _require_role_management(principal, body, rbac_authz)
     resource = _resource_for(body)
-    target = Identity(id=f"user:{body.subject}")
+    target = await _target_identity(body, sa_store, granting=True)
 
     await rbac_authz.grant(
         target,
@@ -168,6 +210,7 @@ async def grant_role(
     return {
         "status": "granted",
         "subject": body.subject,
+        "subject_kind": body.subject_kind,
         "role": body.role,
         "scope": body.scope,
         "tenant_id": body.tenant_id,
@@ -177,12 +220,13 @@ async def grant_role(
 @router.delete("/roles")
 async def revoke_role(
     body: RoleAssignment,
-    principal: CurrentPrincipal = Depends(get_current_principal),
+    principal: CurrentPrincipal = Depends(_write),
     rbac_authz=Depends(get_rbac_authz),
+    sa_store=Depends(get_service_account_store),
 ) -> dict:
     await _require_role_management(principal, body, rbac_authz)
     resource = _resource_for(body)
-    target = Identity(id=f"user:{body.subject}")
+    target = await _target_identity(body, sa_store, granting=False)
 
     await rbac_authz.revoke(
         target,
@@ -194,6 +238,7 @@ async def revoke_role(
     return {
         "status": "revoked",
         "subject": body.subject,
+        "subject_kind": body.subject_kind,
         "role": body.role,
         "scope": body.scope,
         "tenant_id": body.tenant_id,

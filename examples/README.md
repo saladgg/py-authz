@@ -42,7 +42,7 @@ on container restart — re-run `seed.py` afterwards.
 
 ```bash
 # From the repo root (uses uv):
-uv sync --group all
+uv sync --extra all
 
 # Or with pip, from a fresh venv:
 pip install -e ".[all]"
@@ -51,8 +51,8 @@ pip install -e ".[all]"
 pip install "pyjwt[crypto]"
 ```
 
-The extras map to groups in `pyproject.toml`: `fastapi`, `redis`, `postgres`,
-`cli`, `all`. Only install what each example needs; the core library has no
+The extras are `[project.optional-dependencies]` in `pyproject.toml`: `fastapi`, `redis`, `postgres`,
+`keycloak`, `cli`, `all`, `control-plane`. Only install what each example needs; the core library has no
 optional deps.
 
 ## One-time seed

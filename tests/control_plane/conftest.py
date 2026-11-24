@@ -12,7 +12,7 @@ conftest instead of re-duplicating the same `FakeOIDCValidator`/
 import pytest
 
 from py_authz.api import Authz
-from py_authz.control_plane.rbac_model import System, Tenant
+from py_authz.control_plane.rbac_model import RBAC_MODELS
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.exceptions import AuthenticationError
 from py_authz.core.types import Identity
@@ -52,9 +52,11 @@ class FakeBootstrapper:
 @pytest.fixture
 def rbac_authz():
     reg = ResourceModelRegistry()
-    reg.register(System)
-    reg.register(Tenant)
-    client = InMemoryFGAClient(model_registry=reg)
+    # Strict mode + the full RBAC model (incl. the `service_account`
+    # subject type): reject what a real OpenFGA rejects (ARCH3-9).
+    for model in RBAC_MODELS:
+        reg.register(model)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
     return Authz(AuthzEngine(fga_client=client))
 
 

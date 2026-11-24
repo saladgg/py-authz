@@ -11,12 +11,13 @@ from fastapi import APIRouter, Depends
 from py_authz.control_plane.auth import CurrentPrincipal, require_tenant_role
 from py_authz.control_plane.deps import get_multi_tenant_authz
 from py_authz.control_plane.schemas import GrantRevokeRequest
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.types import Identity
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["tuples"])
 
-_require_auditor = require_tenant_role("auditor")
-_require_admin = require_tenant_role("admin")
+_require_auditor = require_tenant_role("auditor", scope=Scope.TUPLES_READ)
+_require_admin = require_tenant_role("admin", scope=Scope.TUPLES_WRITE)
 
 
 @router.get("/tuples", dependencies=[Depends(_require_auditor)])

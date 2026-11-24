@@ -322,6 +322,71 @@ async def test_concurrent_cache_misses_on_same_key_share_one_upstream_call():
 
 
 @pytest.mark.asyncio
+async def test_cancelling_one_coalesced_caller_does_not_cancel_the_others():
+    """
+    Regression test for REL3-1: the coalesced upstream task is shared, so
+    cancelling the caller that started it (client disconnect, request
+    timeout) must not cancel it for every other caller waiting on the
+    same key — they must still get the real decision, and the decision
+    must still land in the cache.
+    """
+    gate = asyncio.Event()
+
+    class GatedCheckClient(MockOpenFGAClient):
+        async def check(self, *args, **kwargs):
+            await gate.wait()
+            return await super().check(*args, **kwargs)
+
+    fga = GatedCheckClient(allowed=True)
+    cache = InMemoryCache()
+    engine = AuthzEngine(fga_client=fga, cache=cache)
+    req = _request()
+
+    owner = asyncio.create_task(engine.enforce(req))
+    await asyncio.sleep(0)  # owner installs the in-flight task
+    waiter = asyncio.create_task(engine.enforce(req))
+    await asyncio.sleep(0)  # waiter coalesces onto it
+
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    gate.set()
+    assert await waiter is True
+    assert len(fga.calls) == 1
+
+    # The shared check still finished and cached its result even though
+    # the caller that started it is gone.
+    assert await engine.enforce(req) is True
+    assert len(fga.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_coalesced_waiter_does_not_cancel_the_owner():
+    gate = asyncio.Event()
+
+    class GatedCheckClient(MockOpenFGAClient):
+        async def check(self, *args, **kwargs):
+            await gate.wait()
+            return await super().check(*args, **kwargs)
+
+    engine = AuthzEngine(fga_client=GatedCheckClient(allowed=True), cache=InMemoryCache())
+    req = _request()
+
+    owner = asyncio.create_task(engine.enforce(req))
+    await asyncio.sleep(0)
+    waiter = asyncio.create_task(engine.enforce(req))
+    await asyncio.sleep(0)
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    gate.set()
+    assert await owner is True
+
+
+@pytest.mark.asyncio
 async def test_concurrent_cache_misses_on_different_keys_each_call_upstream():
     """Coalescing must be per-key — distinct requests must never share
     (or block on) each other's upstream call."""

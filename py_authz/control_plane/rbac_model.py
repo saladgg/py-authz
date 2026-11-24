@@ -37,25 +37,45 @@ from typing import Any
 from py_authz.modeling.base import Relation, ResourceModel
 from py_authz.modeling.generator import generate_model
 
+#: Subject types a role can be granted to (SEC3-3). Previously every
+#: relation used `Relation`'s default `subjects=["user"]`, while
+#: service-account principals were `service:<name>` — a type this model
+#: never defined, so a real OpenFGA rejected every SA check and grant
+#: with a 400 (only the type-permissive `InMemoryFGAClient` used by the
+#: unit tests accepted it).
+ROLE_SUBJECTS = ["user", "service_account"]
+
+#: Prefix of every service-account principal id: `service_account:<sa_id>`
+#: — keyed on the immutable account id, never its (reusable) name
+#: (SEC3-2).
+SERVICE_ACCOUNT_TYPE = "service_account"
+
+
+class ServiceAccountSubject(ResourceModel):
+    """Subject-only type: never the object of a check, only ever the
+    `user` side of a role tuple."""
+
+    type = SERVICE_ACCOUNT_TYPE
+
 
 class System(ResourceModel):
     type = "system"
 
-    owner = Relation("owner")
-    admin = Relation("admin", union=["owner"])
-    operator = Relation("operator", union=["admin"])
-    auditor = Relation("auditor", union=["operator"])
-    viewer = Relation("viewer", union=["auditor"])
+    owner = Relation("owner", subjects=ROLE_SUBJECTS)
+    admin = Relation("admin", subjects=ROLE_SUBJECTS, union=["owner"])
+    operator = Relation("operator", subjects=ROLE_SUBJECTS, union=["admin"])
+    auditor = Relation("auditor", subjects=ROLE_SUBJECTS, union=["operator"])
+    viewer = Relation("viewer", subjects=ROLE_SUBJECTS, union=["auditor"])
 
 
 class Tenant(ResourceModel):
     type = "tenant"
 
-    owner = Relation("owner")
-    admin = Relation("admin", union=["owner"])
-    operator = Relation("operator", union=["admin"])
-    auditor = Relation("auditor", union=["operator"])
-    viewer = Relation("viewer", union=["auditor"])
+    owner = Relation("owner", subjects=ROLE_SUBJECTS)
+    admin = Relation("admin", subjects=ROLE_SUBJECTS, union=["owner"])
+    operator = Relation("operator", subjects=ROLE_SUBJECTS, union=["admin"])
+    auditor = Relation("auditor", subjects=ROLE_SUBJECTS, union=["operator"])
+    viewer = Relation("viewer", subjects=ROLE_SUBJECTS, union=["auditor"])
 
 
 #: Every relation implies the one before it in this order (`owner`
@@ -66,12 +86,21 @@ ROLE_CHAIN: tuple[str, ...] = ("owner", "admin", "operator", "auditor", "viewer"
 
 #: The explicit model set `generate_rbac_model()`/`ModelSync` build from
 #: — deliberately NOT `registry.all()` (see module docstring).
-RBAC_MODELS: tuple[type[ResourceModel], ...] = (System, Tenant)
+RBAC_MODELS: tuple[type[ResourceModel], ...] = (ServiceAccountSubject, System, Tenant)
 
 #: Conventional single `system` object every control-plane deployment
 #: checks against for global-scope actions (managing service accounts,
 #: other operators' roles).
 SYSTEM_OBJECT_ID = "default"
+
+
+def role_rank(role: str) -> int:
+    """Position in `ROLE_CHAIN` — lower is more privileged (`owner` = 0)."""
+    return ROLE_CHAIN.index(role)
+
+
+def service_account_principal(account_id: str) -> str:
+    return f"{SERVICE_ACCOUNT_TYPE}:{account_id}"
 
 
 def generate_rbac_model() -> dict[str, Any]:

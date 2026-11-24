@@ -27,7 +27,7 @@ make venv          # .venv with Python 3.13
 make install-dev
 ```
 
-The core has minimal dependencies (`openfga-sdk`, `httpx`, `attrs`). Everything
+The core has minimal dependencies (`httpx`, `attrs`, `anyio`). Everything
 else — FastAPI, Redis, Postgres, Keycloak JWT — is an optional extra and is
 loaded lazily with a helpful `ImportError` message if missing.
 

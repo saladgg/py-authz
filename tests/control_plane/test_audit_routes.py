@@ -26,7 +26,7 @@ from starlette.testclient import TestClient
 
 from py_authz.api import Authz
 from py_authz.control_plane.errors import authz_error_handler
-from py_authz.control_plane.rbac_model import SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.rbac_model import RBAC_MODELS, SYSTEM_OBJECT_ID, System, Tenant
 from py_authz.control_plane.routes import audit as audit_routes
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.exceptions import AuthzError
@@ -77,9 +77,11 @@ ALICE = Identity(id="user:alice")
 @pytest.fixture
 def rbac_authz():
     reg = ResourceModelRegistry()
-    reg.register(System)
-    reg.register(Tenant)
-    client = InMemoryFGAClient(model_registry=reg)
+    # Strict mode + the full RBAC model (incl. the `service_account`
+    # subject type): reject what a real OpenFGA rejects (ARCH3-9).
+    for model in RBAC_MODELS:
+        reg.register(model)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
     return Authz(AuthzEngine(fga_client=client))
 
 

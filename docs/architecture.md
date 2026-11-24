@@ -13,7 +13,7 @@ diagram; this doc is for readers who want to understand or extend the library.
    `adapters/` and are pulled in lazily.
 2. **Async-only.** Every public method is a coroutine. Callers own the event
    loop; the library never creates one for you.
-3. **Minimal core deps.** `openfga-sdk`, `httpx`, `attrs`. Anything else —
+3. **Minimal core deps.** `httpx`, `attrs`, `anyio`. Anything else —
    FastAPI, Redis, Postgres, Keycloak JWT — is an optional extra and is
    guarded by `utils/deps.py`.
 4. **Explicit over implicit.** No globals for the engine, no thread-locals for

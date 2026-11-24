@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends
 from py_authz.audit.postgres import PostgresAuditQuery
 from py_authz.control_plane.auth import require_system_or_tenant_role_from_query
 from py_authz.control_plane.deps import get_audit_query, get_tenant_store
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import TenantNotFoundError
 
 router = APIRouter(tags=["audit"])
 
-_require_auditor = require_system_or_tenant_role_from_query("auditor")
+_require_auditor = require_system_or_tenant_role_from_query("auditor", scope=Scope.AUDIT_READ)
 
 
 @router.get("/audit-logs", dependencies=[Depends(_require_auditor)])

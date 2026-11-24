@@ -41,12 +41,12 @@ install: ## Install production dependencies
 	uv sync
 
 .PHONY: install-dev
-install-dev: ## Install dev + test dependencies
-	uv sync --group dev
+install-dev: ## Install dev + test dependencies (fails if uv.lock is stale — see SEC3-15)
+	uv sync --locked --group dev
 
 .PHONY: install-test
 install-test: ## Install test dependencies only
-	uv sync --group test
+	uv sync --locked --group test
 
 .PHONY: update
 update: ## Upgrade all dependency versions in the lockfile
@@ -67,8 +67,15 @@ format-check: ## Check formatting without changes
 	uv run ruff format --check
 
 .PHONY: lint
-lint: ## Run linter and type checker
+lint: ## Run linter (ruff, incl. the bandit-equivalent `S` rules) and type checker
+	uv run ruff check
 	uv run mypy
+
+.PHONY: check-dist
+check-dist: ## Build the wheel and assert every install extra is in its metadata (ARCH3-1)
+	rm -rf dist/
+	uv build --wheel --out-dir dist/
+	uv run python scripts/check_dist.py dist/
 
 .PHONY: audit
 audit: ## Scan dependencies for known vulnerabilities (see SEC2-8)
@@ -149,7 +156,7 @@ install-all: ## Install py-authz with every extra
 
 .PHONY: install-control-plane
 install-control-plane: ## Install only the control-plane API's own dependency group
-	uv sync --group control-plane
+	uv sync --extra control-plane
 
 .PHONY: run-control-plane
 run-control-plane: ## Run the control-plane API (dev/reload) against .env's §3 config — see docs/control_plane.md

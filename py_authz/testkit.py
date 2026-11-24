@@ -15,6 +15,16 @@ Lets users unit-test authz code without booting OpenFGA. The fake honors:
     - exclusions (``Relation(exclude="banned")``)
     - per-request contextual tuples on check / list_objects
 
+``strict=True`` additionally rejects what a real OpenFGA server rejects
+(ARCH3-9), raising ``ExternalServiceError`` just like ``OpenFGAClient``
+does on a 400: writes or checks naming a type or relation the model
+doesn't define, a tuple whose user type isn't an allowed subject of that
+relation, duplicate writes, and deletes of tuples that don't exist. The
+default (non-strict) mode stays permissive for backwards compatibility,
+but strict mode is what caught — after the fact — that the control
+plane's service-account principals used a subject type its own RBAC
+model never declared (SEC3-3). Prefer it in new tests.
+
 It does NOT implement the full OpenFGA evaluation engine (no conditions/ABAC,
 no nested intersection/difference beyond one level). For anything more
 elaborate, spin up a real OpenFGA instance — this fake covers the common
@@ -26,6 +36,7 @@ from __future__ import annotations
 
 from py_authz.api import Authz
 from py_authz.core.enforcement import AuthzEngine
+from py_authz.core.exceptions import ExternalServiceError
 from py_authz.modeling.base import Relation, ResourceModel, from_parent_pairs
 from py_authz.modeling.registry import ResourceModelRegistry
 from py_authz.modeling.registry import registry as default_registry
@@ -46,6 +57,7 @@ class InMemoryFGAClient:
         store_id: str = "in-memory",
         model_id: str | None = "in-memory-model",
         model_registry: ResourceModelRegistry | None = None,
+        strict: bool = False,
     ):
         # Widened to `str | None` (never actually `None` here, since
         # `store_id`'s own parameter default is `"in-memory"`) to
@@ -56,6 +68,7 @@ class InMemoryFGAClient:
         self.model_id = model_id
         self._registry = model_registry or default_registry
         self._tuples: set[tuple[str, str, str]] = set()
+        self.strict = strict
 
     # ------------------------------------------------------------------
     # Tuple management
@@ -66,6 +79,22 @@ class InMemoryFGAClient:
         writes: list[dict],
         deletes: list[dict] | None = None,
     ) -> None:
+        if self.strict:
+            # Validate the whole batch before applying any of it — a real
+            # OpenFGA Write is atomic, so a rejected batch changes nothing.
+            pending = set(self._tuples)
+            for t in writes or []:
+                key = (t["user"], t["relation"], t["object"])
+                self._validate_tuple(*key)
+                if key in pending:
+                    self._reject(f"cannot write a tuple which already exists: {key}")
+                pending.add(key)
+            for t in deletes or []:
+                key = (t["user"], t["relation"], t["object"])
+                if key not in pending:
+                    self._reject(f"cannot delete a tuple which does not exist: {key}")
+                pending.discard(key)
+
         for t in writes or []:
             self._tuples.add((t["user"], t["relation"], t["object"]))
         for t in deletes or []:
@@ -83,12 +112,24 @@ class InMemoryFGAClient:
         """See `OpenFGAClient.read_tuples()` — same filter/return shape,
         minus real pagination (this fake never has enough tuples for it
         to matter)."""
+
+        # OpenFGA's Read accepts a bare type (`"tenant:"`) as `object`,
+        # meaning "every object of that type" — mirrored here so code
+        # relying on that (e.g. enumerating a principal's role grants)
+        # behaves the same against the fake as against a real server.
+        def _object_matches(o: str) -> bool:
+            if object is None:
+                return True
+            if object.endswith(":"):
+                return o.startswith(object)
+            return o == object
+
         matches = [
             {"user": u, "relation": r, "object": o, "timestamp": None}
             for (u, r, o) in sorted(self._tuples)
             if (user is None or u == user)
             and (relation is None or r == relation)
-            and (object is None or o == object)
+            and _object_matches(o)
         ]
         return {"tuples": matches, "continuation_token": None}
 
@@ -105,6 +146,10 @@ class InMemoryFGAClient:
         contextual_tuples: list[dict] | None = None,
         context: dict | None = None,  # noqa: ARG002 — accepted for parity
     ) -> bool:
+        if self.strict:
+            self._validate_query(user, relation, object.split(":", 1)[0])
+            for t in contextual_tuples or []:
+                self._validate_tuple(t["user"], t["relation"], t["object"])
         extra = {(t["user"], t["relation"], t["object"]) for t in (contextual_tuples or [])}
         return self._check(user, relation, object, extra)
 
@@ -117,6 +162,8 @@ class InMemoryFGAClient:
         contextual_tuples: list[dict] | None = None,
         context: dict | None = None,  # noqa: ARG002 — accepted for parity
     ) -> list[str]:
+        if self.strict:
+            self._validate_query(user, relation, type)
         extra = {(t["user"], t["relation"], t["object"]) for t in (contextual_tuples or [])}
 
         prefix = f"{type}:"
@@ -216,14 +263,82 @@ class InMemoryFGAClient:
             return None
 
     def _lookup_relation(self, model: type[ResourceModel], name: str) -> Relation | None:
-        attr = getattr(model, name, None)
-        return attr if isinstance(attr, Relation) else None
+        """Find a relation by its OpenFGA name (`Relation.name`), not its
+        Python attribute name (ARCH3-9): `view = Relation("viewer", ...)`
+        defines the relation `viewer`, exactly as the real generator
+        (which keys on `Relation.name`) compiles it. Looking up by
+        attribute name made `can("viewer", ...)` silently return False
+        here while a real OpenFGA returned True."""
+        for value in vars(model).values():
+            if isinstance(value, Relation) and value.name == name:
+                return value
+        for klass in model.__mro__[1:]:
+            for value in vars(klass).values():
+                if isinstance(value, Relation) and value.name == name:
+                    return value
+        return None
+
+    # ------------------------------------------------------------------
+    # Strict-mode validation (mirrors OpenFGA's own 400s)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _reject(message: str) -> None:
+        raise ExternalServiceError(f"OpenFGA rejected the request: {message}", service="openfga")
+
+    def _known_types(self) -> set[str]:
+        # The generator always emits a `user` type alongside every
+        # registered model (see `OpenFGAModelGenerator.generate()`).
+        return {"user", *(m.type for m in self._registry.all())}
+
+    def _require_relation(self, type_name: str, relation: str) -> Relation:
+        model = self._lookup_model(type_name)
+        if model is None:
+            self._reject(f"type {type_name!r} not found in the authorization model")
+        assert model is not None  # noqa: S101 — narrowed by _reject raising
+        rel = self._lookup_relation(model, relation)
+        if rel is None:
+            self._reject(f"relation {type_name}#{relation} not found in the authorization model")
+        assert rel is not None  # noqa: S101 — narrowed by _reject raising
+        return rel
+
+    def _validate_user(self, user: str) -> None:
+        user_type, sep, _ = user.partition(":")
+        if not sep:
+            self._reject(f"user {user!r} must be of the form 'type:id'")
+        if user_type not in self._known_types():
+            self._reject(f"type {user_type!r} not found in the authorization model")
+
+    def _validate_query(self, user: str, relation: str, object_type: str) -> None:
+        self._validate_user(user)
+        self._require_relation(object_type, relation)
+
+    def _validate_tuple(self, user: str, relation: str, obj: str) -> None:
+        self._validate_user(user)
+        rel = self._require_relation(obj.split(":", 1)[0], relation)
+
+        user_type, _, user_id = user.partition(":")
+        if user_id == "*":
+            form = f"{user_type}:*"
+        elif "#" in user_id:
+            form = f"{user_type}#{user_id.split('#', 1)[1]}"
+        else:
+            form = user_type
+
+        # Tupleset relations named by `from_parent` (e.g. `parent`) accept
+        # whatever subject types they declare, same as any other relation.
+        if form not in rel.subjects:
+            self._reject(
+                f"type {form!r} is not an allowed subject of {obj.split(':', 1)[0]}#{relation} "
+                f"(allowed: {rel.subjects})"
+            )
 
 
 def make_fake_authz(
     *,
     store_id: str = "in-memory",
     model_registry: ResourceModelRegistry | None = None,
+    strict: bool = False,
 ) -> Authz:
     """
     Build an ``Authz`` instance backed by an in-memory FGA client.
@@ -233,6 +348,6 @@ def make_fake_authz(
         await authz.grant(alice, "owner", Document(id="roadmap"))
         assert await authz.can(Document.viewer, alice, Document(id="roadmap"))
     """
-    client = InMemoryFGAClient(store_id=store_id, model_registry=model_registry)
+    client = InMemoryFGAClient(store_id=store_id, model_registry=model_registry, strict=strict)
     engine = AuthzEngine(fga_client=client)
     return Authz(engine)

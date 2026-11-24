@@ -15,15 +15,16 @@ from py_authz.control_plane.auth import (
 )
 from py_authz.control_plane.deps import get_model_registry, get_tenant_manager, get_tenant_store
 from py_authz.control_plane.schemas import TenantCreateRequest
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import TenantNotFoundError
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
-_require_operator = require_system_role("operator")
-_require_auditor_system = require_system_role("auditor")
-_require_tenant_auditor = require_tenant_role("auditor")
-_require_tenant_admin = require_tenant_role("admin")
-_require_deprovision = require_tenant_admin_or_system_owner()
+_require_operator = require_system_role("operator", scope=Scope.TENANTS_WRITE)
+_require_auditor_system = require_system_role("auditor", scope=Scope.TENANTS_READ)
+_require_tenant_auditor = require_tenant_role("auditor", scope=Scope.TENANTS_READ)
+_require_tenant_admin = require_tenant_role("admin", scope=Scope.TENANTS_WRITE)
+_require_deprovision = require_tenant_admin_or_system_owner(scope=Scope.TENANTS_WRITE)
 
 
 @router.post("", dependencies=[Depends(_require_operator)])

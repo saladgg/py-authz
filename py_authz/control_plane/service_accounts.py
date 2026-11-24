@@ -180,7 +180,7 @@ class ServiceAccountStore:
     async def revoke(self, account_id: str) -> None:
         """
         Soft-delete: sets `revoked_at`, never deletes the row — past
-        audit-log entries attributing actions to `service:<name>` remain
+        audit-log entries attributing actions to `service_account:<id>` remain
         meaningful. Idempotent: revoking an already-revoked or unknown
         account is a no-op.
 

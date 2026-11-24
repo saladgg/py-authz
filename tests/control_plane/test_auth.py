@@ -24,7 +24,8 @@ from py_authz.control_plane.auth import (
 )
 from py_authz.control_plane.errors import authz_error_handler
 from py_authz.control_plane.rate_limit import InMemoryRateLimiter
-from py_authz.control_plane.rbac_model import SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.rbac_model import RBAC_MODELS, SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.scopes import ANY_PRINCIPAL, Scope
 from py_authz.control_plane.security import generate_secret, hash_secret
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.exceptions import AuthzError
@@ -92,9 +93,11 @@ class FakeServiceAccountStore:
 @pytest.fixture
 def rbac_authz():
     reg = ResourceModelRegistry()
-    reg.register(System)
-    reg.register(Tenant)
-    client = InMemoryFGAClient(model_registry=reg)
+    # Strict mode + the full RBAC model (incl. the `service_account`
+    # subject type): reject what a real OpenFGA rejects (ARCH3-9).
+    for model in RBAC_MODELS:
+        reg.register(model)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
     return Authz(AuthzEngine(fga_client=client))
 
 
@@ -112,39 +115,45 @@ def app(rbac_authz):
     fastapi_app.state.service_account_store = FakeServiceAccountStore()
     fastapi_app.state.service_account_rate_limiter = InMemoryRateLimiter()
 
-    @fastapi_app.get("/system", dependencies=[Depends(require_system_role("operator"))])
+    @fastapi_app.get(
+        "/system", dependencies=[Depends(require_system_role("operator", scope=ANY_PRINCIPAL))]
+    )
     async def system_route():
         return {"ok": True}
 
     @fastapi_app.get(
         "/system-scoped",
-        dependencies=[
-            Depends(require_system_role("operator", service_account_scope="models:sync"))
-        ],
+        dependencies=[Depends(require_system_role("operator", scope=Scope.MODELS_WRITE))],
     )
     async def system_scoped_route():
         return {"ok": True}
 
-    @fastapi_app.get("/tenants/{tenant_id}", dependencies=[Depends(require_tenant_role("auditor"))])
+    @fastapi_app.get(
+        "/tenants/{tenant_id}",
+        dependencies=[Depends(require_tenant_role("auditor", scope=ANY_PRINCIPAL))],
+    )
     async def tenant_route(tenant_id: str):
         return {"ok": True}
 
     @fastapi_app.delete(
         "/tenants/{tenant_id}",
-        dependencies=[Depends(require_tenant_admin_or_system_owner())],
+        dependencies=[Depends(require_tenant_admin_or_system_owner(scope=ANY_PRINCIPAL))],
     )
     async def delete_tenant_route(tenant_id: str):
         return {"ok": True}
 
     @fastapi_app.get(
-        "/models-sync", dependencies=[Depends(require_tenant_role_from_query("admin"))]
+        "/models-sync",
+        dependencies=[Depends(require_tenant_role_from_query("admin", scope=ANY_PRINCIPAL))],
     )
     async def models_sync_route(tenant_id: str):
         return {"ok": True}
 
     @fastapi_app.get(
         "/audit-logs",
-        dependencies=[Depends(require_system_or_tenant_role_from_query("auditor"))],
+        dependencies=[
+            Depends(require_system_or_tenant_role_from_query("auditor", scope=ANY_PRINCIPAL))
+        ],
     )
     async def audit_logs_route(tenant_id: str | None = None):
         return {"ok": True}
@@ -413,7 +422,9 @@ def test_lockout_also_blocks_the_correct_secret(client, app):
 @pytest.mark.asyncio
 async def test_successful_auth_resets_the_failure_counter(client, app, rbac_authz):
     secret = _make_service_account(app, account_id="sa_1", name="ci-bot", scopes=[])
-    await rbac_authz.grant(Identity(id="service:ci-bot"), "operator", System(id=SYSTEM_OBJECT_ID))
+    await rbac_authz.grant(
+        Identity(id="service_account:sa_1"), "operator", System(id=SYSTEM_OBJECT_ID)
+    )
 
     for _ in range(3):
         client.get("/system", headers=_bearer("pasa_sa_1.wrong-secret"))
@@ -453,17 +464,23 @@ async def test_service_account_needs_both_scope_and_rbac_role(client, app, rbac_
     secret = _make_service_account(app, account_id="sa_1", name="ci-bot", scopes=[])
 
     # Has the RBAC role but not the scope.
-    await rbac_authz.grant(Identity(id="service:ci-bot"), "operator", System(id=SYSTEM_OBJECT_ID))
+    await rbac_authz.grant(
+        Identity(id="service_account:sa_1"), "operator", System(id=SYSTEM_OBJECT_ID)
+    )
     resp = client.get("/system-scoped", headers=_bearer(secret))
     assert resp.status_code == 403
 
     # Has the scope but not (yet) the RBAC role — recreate without the role.
-    secret2 = _make_service_account(app, account_id="sa_2", name="ci-bot-2", scopes=["models:sync"])
+    secret2 = _make_service_account(
+        app, account_id="sa_2", name="ci-bot-2", scopes=["models:write"]
+    )
     resp = client.get("/system-scoped", headers=_bearer(secret2))
     assert resp.status_code == 403
 
     # Both present -> allowed.
-    await rbac_authz.grant(Identity(id="service:ci-bot-2"), "operator", System(id=SYSTEM_OBJECT_ID))
+    await rbac_authz.grant(
+        Identity(id="service_account:sa_2"), "operator", System(id=SYSTEM_OBJECT_ID)
+    )
     resp = client.get("/system-scoped", headers=_bearer(secret2))
     assert resp.status_code == 200
 
@@ -485,7 +502,7 @@ def test_me_reports_service_account_identity_and_scopes(client, app):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["id"] == "service:ci-bot"
+    assert body["id"] == "service_account:sa_1"
     assert body["kind"] == "service_account"
     assert set(body["scopes"]) == {"models:sync", "audit:read"}
 
@@ -501,19 +518,72 @@ def test_me_reports_service_account_identity_and_scopes(client, app):
 
 def test_require_system_role_rejects_unknown_role():
     with pytest.raises(ValueError, match="Unknown role 'made-up'"):
-        require_system_role("made-up")
+        require_system_role("made-up", scope=ANY_PRINCIPAL)
 
 
 def test_require_tenant_role_rejects_unknown_role():
     with pytest.raises(ValueError, match="Unknown role 'made-up'"):
-        require_tenant_role("made-up")
+        require_tenant_role("made-up", scope=ANY_PRINCIPAL)
 
 
 def test_require_tenant_role_from_query_rejects_unknown_role():
     with pytest.raises(ValueError, match="Unknown role 'made-up'"):
-        require_tenant_role_from_query("made-up")
+        require_tenant_role_from_query("made-up", scope=ANY_PRINCIPAL)
 
 
 def test_require_system_or_tenant_role_from_query_rejects_unknown_role():
     with pytest.raises(ValueError, match="Unknown role 'made-up'"):
-        require_system_or_tenant_role_from_query("made-up")
+        require_system_or_tenant_role_from_query("made-up", scope=ANY_PRINCIPAL)
+
+
+def test_dependency_factories_reject_an_unknown_scope():
+    """SEC3-1: a typo'd scope on a route fails at definition time, not as
+    a silently unsatisfiable (or silently skipped) check at request time."""
+    with pytest.raises(ValueError):
+        require_system_role("viewer", scope="models:sycn")
+
+
+def test_dependency_factories_require_a_scope():
+    """SEC3-1: `scope` has no default — a route can't forget to declare
+    one and silently let every service account through."""
+    with pytest.raises(TypeError):
+        require_system_role("viewer")  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_service_account_principal_is_keyed_on_id_not_name(client, app, rbac_authz):
+    """SEC3-2: a role granted to one account must not carry over to a
+    different account that happens to share (or later reuse) its name."""
+    await rbac_authz.grant(
+        Identity(id="service_account:sa_old"), "operator", System(id=SYSTEM_OBJECT_ID)
+    )
+    secret = _make_service_account(app, account_id="sa_new", name="ci-bot", scopes=[])
+
+    resp = client.get("/system", headers=_bearer(secret))
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_scopes_are_enforced_on_a_real_production_route(app, rbac_authz):
+    """SEC3-1, the reproduced bypass, against an actual shipped route
+    rather than a synthetic one: an SA holding the right RBAC role but
+    not the route's scope must be refused; adding the scope admits it."""
+    from py_authz.control_plane.routes import health as health_routes
+    from py_authz.core.metrics import Metrics
+
+    app.include_router(health_routes.router, prefix="/api/v1")
+    app.state.metrics = Metrics()
+    client = TestClient(app)
+
+    no_scope = _make_service_account(app, account_id="sa_1", name="no-scope", scopes=[])
+    scoped = _make_service_account(
+        app, account_id="sa_2", name="scoped", scopes=[Scope.METRICS_READ.value]
+    )
+    for sa in ("sa_1", "sa_2"):
+        await rbac_authz.grant(
+            Identity(id=f"service_account:{sa}"), "owner", System(id=SYSTEM_OBJECT_ID)
+        )
+
+    assert client.get("/api/v1/metrics", headers=_bearer(no_scope)).status_code == 403
+    assert client.get("/api/v1/metrics", headers=_bearer(scoped)).status_code == 200

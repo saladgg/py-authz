@@ -73,13 +73,16 @@ class FakeMigrationManager:
         self.dry_run_calls: list[list[str]] = []
         self.migrate_calls: list[list[str]] = []
         self.batch_result = MigrationBatchResult(succeeded={"acme": "model-1"}, failed={})
+        self.concurrency_seen: list[int] = []
 
-    async def dry_run_all(self, tenant_ids):
+    async def dry_run_all(self, tenant_ids, *, concurrency=10):
         self.dry_run_calls.append(tenant_ids)
+        self.concurrency_seen.append(concurrency)
         return dict.fromkeys(tenant_ids, True)
 
-    async def migrate_all(self, tenant_ids):
+    async def migrate_all(self, tenant_ids, *, concurrency=10):
         self.migrate_calls.append(tenant_ids)
+        self.concurrency_seen.append(concurrency)
         return self.batch_result
 
 
@@ -163,6 +166,25 @@ async def test_dry_run_runs_synchronously_against_named_tenants(
     }
     assert migration_manager.dry_run_calls == [["acme", "other-corp"]]
     assert migration_manager.migrate_calls == []
+
+
+@pytest.mark.asyncio
+async def test_migration_concurrency_setting_is_passed_through(
+    app, client, rbac_authz, migration_manager
+):
+    """Regression test for REL3-11: `CONTROL_PLANE_MIGRATION_CONCURRENCY`
+    was parsed into settings but never reached `MigrationManager`."""
+    from types import SimpleNamespace
+
+    app.state.settings = SimpleNamespace(migration_concurrency=3)
+    await rbac_authz.grant(Identity(id="user:alice"), "operator", System(id=SYSTEM_OBJECT_ID))
+
+    resp = client.post(
+        "/api/v1/migrations", headers=bearer(), json={"dry_run": True, "tenant_ids": ["acme"]}
+    )
+
+    assert resp.status_code == 200
+    assert migration_manager.concurrency_seen == [3]
 
 
 @pytest.mark.asyncio

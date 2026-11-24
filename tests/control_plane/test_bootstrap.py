@@ -6,7 +6,7 @@ import pytest
 
 from py_authz.api import Authz
 from py_authz.control_plane.bootstrap import BreakGlassBootstrapper
-from py_authz.control_plane.rbac_model import SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.rbac_model import RBAC_MODELS, SYSTEM_OBJECT_ID, System
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.types import Identity, Resource
 from py_authz.modeling.registry import ResourceModelRegistry
@@ -15,9 +15,11 @@ from py_authz.testkit import InMemoryFGAClient
 
 def _rbac_authz():
     reg = ResourceModelRegistry()
-    reg.register(System)
-    reg.register(Tenant)
-    client = InMemoryFGAClient(model_registry=reg)
+    # Strict mode + the full RBAC model (incl. the `service_account`
+    # subject type): reject what a real OpenFGA rejects (ARCH3-9).
+    for model in RBAC_MODELS:
+        reg.register(model)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
     return Authz(AuthzEngine(fga_client=client)), client
 
 

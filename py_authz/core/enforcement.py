@@ -315,20 +315,38 @@ class AuthzEngine:
                 context=request.context,
             )
 
+        # Every await on the shared task is shielded (REL3-1): the task is
+        # shared by every coalesced caller, so cancelling one caller (a
+        # client disconnect, a request timeout) must cancel only that
+        # caller's wait — never the upstream check the others are still
+        # waiting on. Without the shield, one disconnect fanned a
+        # `CancelledError` (a `BaseException`, so it escaped both
+        # `except AuthzError` and the `fail_open` policy) out to every
+        # unrelated request sharing the key.
         existing = self._inflight_checks.get(cache_key)
         if existing is not None:
-            return await existing
+            return await asyncio.shield(existing)
 
         task = asyncio.ensure_future(self._check_and_cache(request, cache_key, contextual))
         self._inflight_checks[cache_key] = task
-        try:
-            return await task
-        finally:
-            # Only the entry *this* call installed, and only if it's
-            # still the current one — a slow finally on an old task must
-            # never evict a newer task another call has since installed.
-            if self._inflight_checks.get(cache_key) is task:
+
+        def _forget(done: asyncio.Future) -> None:
+            # The task removes its own entry when it finishes, not the
+            # owning caller — so an owner cancelled mid-flight doesn't
+            # evict an entry that other callers are still coalescing on.
+            # Only remove it if it's still the current one: a newer task
+            # installed after this one finished must never be evicted.
+            if self._inflight_checks.get(cache_key) is done:
                 del self._inflight_checks[cache_key]
+            # Retrieve the exception so an owner-less failure (every
+            # caller cancelled) doesn't log "exception was never
+            # retrieved"; the callers that are still waiting get it
+            # through their own shielded await.
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(_forget)
+        return await asyncio.shield(task)
 
     async def _check_and_cache(
         self, request: AuthzRequest, cache_key: str, contextual: list[dict] | None
