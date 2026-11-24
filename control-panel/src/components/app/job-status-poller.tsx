@@ -7,8 +7,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getMigrationJob } from "@/lib/actions";
 import type { MigrationJob } from "@/lib/types";
 
-const TERMINAL_STATUSES = new Set(["succeeded", "failed"]);
+const TERMINAL_STATUSES = new Set(["succeeded", "partial", "failed", "cancelled"]);
 const POLL_INTERVAL_MS = 2000;
+/** Stop polling after this long (REL3-3) — a job orphaned by a crash is
+ * settled by the API's startup reaper, not by polling it forever. */
+const MAX_POLL_MS = 10 * 60 * 1000;
 
 /**
  * Live job-progress polling against `GET /migrations/{job_id}` (CP-7/
@@ -18,17 +21,24 @@ const POLL_INTERVAL_MS = 2000;
  */
 export function JobStatusPoller({ initialJob }: { initialJob: MigrationJob }) {
   const [job, setJob] = useState(initialJob);
+  const [gaveUp, setGaveUp] = useState(false);
 
   useEffect(() => {
-    if (TERMINAL_STATUSES.has(job.status)) return;
+    if (TERMINAL_STATUSES.has(job.status) || gaveUp) return;
 
+    const startedAt = Date.now();
     const interval = setInterval(async () => {
+      if (Date.now() - startedAt > MAX_POLL_MS) {
+        clearInterval(interval);
+        setGaveUp(true);
+        return;
+      }
       const result = await getMigrationJob(job.id);
       if (result.success) setJob(result.data);
     }, POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [job.id, job.status]);
+  }, [job.id, job.status, gaveUp]);
 
   const succeeded = job.result?.succeeded ?? {};
   const failed = job.result?.failed ?? {};
@@ -42,8 +52,13 @@ export function JobStatusPoller({ initialJob }: { initialJob: MigrationJob }) {
         <JobStatusBadge status={job.status} />
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
-        {job.status === "running" || job.status === "pending" ? (
+        {(job.status === "running" || job.status === "pending") && !gaveUp ? (
           <p className="text-muted-foreground">Running…</p>
+        ) : null}
+        {gaveUp ? (
+          <p className="text-muted-foreground">
+            Still running after 10 minutes — stopped polling. Refresh the page to check again.
+          </p>
         ) : null}
         {Object.keys(succeeded).length > 0 ? (
           <p>

@@ -50,6 +50,7 @@ export async function GET(request: NextRequest) {
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,
     expiresAt: tokens.expiresAt,
+    issuedAt: Date.now(),
   });
 
   return NextResponse.redirect(new URL("/dashboard", request.url));

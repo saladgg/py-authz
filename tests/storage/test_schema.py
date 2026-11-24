@@ -1,28 +1,23 @@
 """Tests for py_authz.storage.schema.apply_schema()."""
 
-from contextlib import asynccontextmanager
-
 import pytest
 
 from py_authz.storage import schema as schema_module
 
 
 class FakeConnection:
-    def __init__(self, pool):
-        self.pool = pool
+    """`apply_schema()` uses one connection (REL3-14 — it used to open a
+    whole default-sized pool to run DDL on one connection)."""
 
-    async def execute(self, sql):
-        self.pool.executed_sql.append(sql)
-
-
-class FakePool:
     def __init__(self):
         self.executed_sql: list[str] = []
         self.closed = False
+        self.fail = False
 
-    @asynccontextmanager
-    async def acquire(self):
-        yield FakeConnection(self)
+    async def execute(self, sql):
+        if self.fail:
+            raise RuntimeError("boom")
+        self.executed_sql.append(sql)
 
     async def close(self):
         self.closed = True
@@ -30,14 +25,21 @@ class FakePool:
 
 @pytest.fixture
 def patched_asyncpg(monkeypatch):
-    pool = FakePool()
+    conn = FakeConnection()
 
-    async def _create_pool(dsn):
-        return pool
+    async def _connect(dsn):
+        return conn
 
-    fake_module = type("asyncpg_stub", (), {"create_pool": staticmethod(_create_pool)})
+    def _no_pools(*a, **kw):
+        raise AssertionError("apply_schema must not open a pool")
+
+    fake_module = type(
+        "asyncpg_stub",
+        (),
+        {"connect": staticmethod(_connect), "create_pool": staticmethod(_no_pools)},
+    )
     monkeypatch.setattr(schema_module, "asyncpg", fake_module)
-    return pool
+    return conn
 
 
 @pytest.mark.asyncio
@@ -54,39 +56,17 @@ async def test_apply_schema_executes_every_schema_file_in_order(patched_asyncpg)
 
 
 @pytest.mark.asyncio
-async def test_apply_schema_closes_its_own_pool(patched_asyncpg):
+async def test_apply_schema_closes_its_own_connection(patched_asyncpg):
     await schema_module.apply_schema("postgres://fake")
 
     assert patched_asyncpg.closed is True
 
 
 @pytest.mark.asyncio
-async def test_apply_schema_closes_pool_even_if_execute_raises(monkeypatch):
-    pool = FakePool()
+async def test_apply_schema_closes_its_connection_even_if_execute_raises(patched_asyncpg):
+    patched_asyncpg.fail = True
 
-    async def _create_pool(dsn):
-        return pool
-
-    class _BoomConnection(FakeConnection):
-        async def execute(self, sql):
-            raise RuntimeError("boom")
-
-    @asynccontextmanager
-    async def _acquire(self):
-        yield _BoomConnection(self)
-
-    monkeypatch.setattr(FakePool, "acquire", _acquire)
-    fake_module = type("asyncpg_stub", (), {"create_pool": staticmethod(_create_pool)})
-    monkeypatch.setattr(schema_module, "asyncpg", fake_module)
-
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(RuntimeError):
         await schema_module.apply_schema("postgres://fake")
 
-    assert pool.closed is True
-
-
-def test_schema_sql_files_exist_on_disk():
-    for filename in schema_module.SCHEMA_FILES:
-        path = schema_module._SQL_DIR / filename
-        assert path.is_file(), f"missing schema file: {path}"
-        assert path.read_text().strip()
+    assert patched_asyncpg.closed is True

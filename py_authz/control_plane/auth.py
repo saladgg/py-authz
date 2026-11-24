@@ -19,8 +19,12 @@ Nothing here reimplements authorization — it's the same `Authz.can()`
 surface as every other route in this API's underlying library.
 """
 
+import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
+import anyio
 from fastapi import Depends, HTTPException, Request
 
 from py_authz.control_plane.rbac_model import (
@@ -31,7 +35,11 @@ from py_authz.control_plane.rbac_model import (
     service_account_principal,
 )
 from py_authz.control_plane.scopes import ANY_PRINCIPAL, Scope
-from py_authz.control_plane.security import parse_account_id, verify_secret
+from py_authz.control_plane.security import (
+    MalformedServiceAccountToken,
+    parse_account_id,
+    verify_secret,
+)
 from py_authz.core.exceptions import AuthenticationError, AuthorizationDenied, InvalidAuthzRequest
 from py_authz.core.types import Identity, Resource
 
@@ -44,6 +52,8 @@ class CurrentPrincipal:
     identity: Identity
     kind: str  # "operator" | "service_account"
     scopes: tuple[str, ...] = ()
+    #: For operators: the verified `sub`/`email` claims.
+    claims: dict | None = None
 
 
 def _bearer_token(request: Request) -> str:
@@ -59,13 +69,18 @@ async def _authenticate_operator(request: Request, token: str) -> CurrentPrincip
     payload = await validator.validate(token)
     identity = validator.to_identity(payload)
 
-    operator_store = request.app.state.operator_store
-    await operator_store.record_login(subject=payload.get("sub"), email=payload.get("email"))
+    # `record_login` moved to `GET /auth/me` (SEC3-8, REL3-19): it ran on
+    # every request, before any role check — a Postgres upsert per API
+    # call, and any realm user's token created an `operators` row.
 
     bootstrapper = request.app.state.bootstrapper
     await bootstrapper.maybe_bootstrap(identity)
 
-    return CurrentPrincipal(identity=identity, kind="operator")
+    return CurrentPrincipal(
+        identity=identity,
+        kind="operator",
+        claims={"sub": payload.get("sub"), "email": payload.get("email")},
+    )
 
 
 async def _authenticate_service_account(
@@ -89,12 +104,17 @@ async def _authenticate_service_account(
 
     store = request.app.state.service_account_store
     record = await store.get(account_id)
-    if record is None or record.is_revoked or not verify_secret(token, record.secret_hash):
+    if record is None:
+        # Unknown id: not recorded as a failed attempt (SEC3-9) — there's
+        # no account to lock, and recording it let anyone grow the
+        # in-memory limiter without bound under ids of their choosing.
+        raise AuthenticationError("Invalid or revoked service-account secret")
+    if record.is_revoked or not await _verify_cached(token, record.secret_hash):
         await rate_limiter.record_failure(account_id)
         raise AuthenticationError("Invalid or revoked service-account secret")
 
     await rate_limiter.record_success(account_id)
-    await store.touch_last_used(account_id)
+    await _touch_last_used_throttled(store, record)
 
     # Keyed on the immutable account id, never the name (SEC3-2): names
     # are reusable after revoke, so a name-keyed principal let a newly
@@ -111,6 +131,47 @@ async def _authenticate_service_account(
         },
     )
     return CurrentPrincipal(identity=identity, kind="service_account", scopes=tuple(record.scopes))
+
+
+#: Successful verifications, keyed on `(sha256(token), stored hash)`
+#: (REL3-13). Argon2 is deliberately expensive (~25 ms) and used to run on
+#: the event loop for *every* service-account request, stalling every
+#: other request. Including the stored hash in the key means a rotate
+#: or revoke (both replace `secret_hash`; revoke also sets `revoked_at`,
+#: checked before this) invalidates entries immediately on every replica,
+#: since the record is still read from Postgres on each request — no TTL
+#: window in which a revoked secret keeps working. Bounded LRU.
+_VERIFIED: OrderedDict[tuple[str, str], None] = OrderedDict()
+_VERIFIED_MAX = 1024
+
+#: `last_used_at` is informational — writing it on every request was a
+#: Postgres UPDATE per API call (REL3-13).
+_TOUCH_INTERVAL = timedelta(minutes=1)
+
+
+async def _verify_cached(token: str, secret_hash: str) -> bool:
+    key = (hashlib.sha256(token.encode()).hexdigest(), secret_hash)
+    if key in _VERIFIED:
+        _VERIFIED.move_to_end(key)
+        return True
+    # Off the event loop: argon2 is CPU-bound by design.
+    if not await anyio.to_thread.run_sync(verify_secret, token, secret_hash):
+        return False
+    _VERIFIED[key] = None
+    while len(_VERIFIED) > _VERIFIED_MAX:
+        _VERIFIED.popitem(last=False)
+    return True
+
+
+async def _touch_last_used_throttled(store, record) -> None:
+    last_used = getattr(record, "last_used_at", None)
+    if isinstance(last_used, datetime):
+        now = datetime.now(last_used.tzinfo or UTC)
+        if last_used.tzinfo is None:
+            now = now.replace(tzinfo=None)
+        if now - last_used < _TOUCH_INTERVAL:
+            return
+    await store.touch_last_used(record.id)
 
 
 async def get_current_principal(request: Request) -> CurrentPrincipal:
@@ -130,7 +191,10 @@ async def get_current_principal(request: Request) -> CurrentPrincipal:
     needing to plumb it through separately.
     """
     token = _bearer_token(request)
-    account_id = parse_account_id(token)
+    try:
+        account_id = parse_account_id(token)
+    except MalformedServiceAccountToken as exc:
+        raise AuthenticationError("Invalid or revoked service-account secret") from exc
     if account_id is not None:
         principal = await _authenticate_service_account(request, token, account_id)
     else:

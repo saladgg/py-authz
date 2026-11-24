@@ -54,10 +54,21 @@ class InMemoryRateLimiter:
     instance B.
     """
 
+    #: Sweep threshold (SEC3-9): once this many ids are tracked, entries
+    #: whose window and lockout have both expired are dropped.
+    MAX_TRACKED_KEYS = 10_000
+
     def __init__(self, policy: RateLimitPolicy | None = None):
         self.policy = policy or RateLimitPolicy()
         self._failure_times: dict[str, list[float]] = {}
         self._locked_until: dict[str, float] = {}
+
+    def _sweep(self, now: float) -> None:
+        window_start = now - self.policy.lockout_seconds
+        for key in [k for k, ts in self._failure_times.items() if not ts or ts[-1] < window_start]:
+            if self._locked_until.get(key, 0) <= now:
+                self._failure_times.pop(key, None)
+                self._locked_until.pop(key, None)
 
     async def is_locked_out(self, key: str) -> bool:
         locked_until = self._locked_until.get(key)
@@ -74,6 +85,8 @@ class InMemoryRateLimiter:
 
     async def record_failure(self, key: str) -> None:
         now = time.monotonic()
+        if len(self._failure_times) >= self.MAX_TRACKED_KEYS:
+            self._sweep(now)
         window_start = now - self.policy.lockout_seconds
         attempts = [t for t in self._failure_times.get(key, []) if t >= window_start]
         attempts.append(now)

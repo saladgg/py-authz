@@ -111,3 +111,11 @@ def test_service_account_reports_scopes_and_no_system_role(app, client):
         "scopes": ["models:write"],
         "system_role": None,
     }
+
+
+def test_auth_me_records_the_operator_login(app, client):
+    """`/auth/me` is the panel's login moment — where an operator joins
+    the roster (moved here from every request, SEC3-8/REL3-19)."""
+    client.get("/api/v1/auth/me", headers=bearer())
+
+    assert app.state.operator_store.logins == ["alice"]

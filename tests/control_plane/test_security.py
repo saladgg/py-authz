@@ -1,5 +1,7 @@
 """Tests for py_authz.control_plane.security (CP-3, CP-17)."""
 
+import pytest
+
 from py_authz.control_plane.security import (
     SECRET_PREFIX,
     generate_secret,
@@ -28,8 +30,23 @@ def test_parse_account_id_returns_none_for_non_service_account_token():
     assert parse_account_id("") is None
 
 
-def test_parse_account_id_returns_none_for_malformed_prefix_only():
-    assert parse_account_id(SECRET_PREFIX) is None  # no "." separator at all
+@pytest.mark.parametrize(
+    "token",
+    [
+        SECRET_PREFIX,  # no "." separator at all
+        f"{SECRET_PREFIX}sa_1.",  # empty secret part
+        f"{SECRET_PREFIX}not-an-id.x",  # wrong id shape
+        f"{SECRET_PREFIX}sa_{'a' * 500}.x",  # unbounded id (SEC3-9)
+        f"{SECRET_PREFIX}sa_1*.x",
+    ],
+)
+def test_parse_account_id_rejects_a_malformed_service_account_token(token):
+    """SEC3-9: a token carrying the prefix but not the shape is rejected
+    outright, before any store lookup or rate-limiter bookkeeping."""
+    from py_authz.control_plane.security import MalformedServiceAccountToken
+
+    with pytest.raises(MalformedServiceAccountToken):
+        parse_account_id(token)
 
 
 def test_hash_and_verify_round_trip():

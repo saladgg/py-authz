@@ -98,5 +98,12 @@ def test_server_error_logs_a_traceback(client, caplog):
         resp = client.get("/misconfigured")
 
     assert resp.status_code == 500
-    assert resp.json() == {"error": "ConfigurationError", "detail": "bad config"}
-    assert any("control-plane request failed" in r.message for r in caplog.records)
+    body = resp.json()
+    # SEC3-11: the internal message is logged, never returned.
+    assert body["error"] == "ConfigurationError"
+    assert body["detail"] == "Internal error"
+    assert "bad config" not in resp.text
+    assert any(
+        "control-plane request failed" in r.message and body["incident_id"] in r.message
+        for r in caplog.records
+    )

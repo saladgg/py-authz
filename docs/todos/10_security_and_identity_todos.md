@@ -9,7 +9,10 @@ that file.
 > Tier 1, which touched the same role-assignment function. SEC3-3 is now
 > **reproduced** against a real OpenFGA, not just inferred: the pre-fix
 > model shape returns a 400 on both write and check for a `service:`
-> principal. Remaining tiers open.
+> principal. Tier 1 is now fully shipped too: SEC3-6 and SEC3-7 landed
+> in the second batch (2026-11-24). Batch 2 also shipped Tier 2's SEC3-8
+> and all of Tier 3 except SEC3-13. **Still open:** SEC3-5 (blocked on
+> `11`'s ARCH3-11) and SEC3-13.
 
 ---
 
@@ -90,7 +93,7 @@ that file.
   `test_operator_and_service_account_flows_end_to_end` runs against the
   full compose stack and passes, along with the 35 existing live tests.
 
-## Tier 1 — Operator RBAC and cache correctness
+## Tier 1 — Operator RBAC and cache correctness ✅
 
 - [x] **SEC3-4 — Grants/revokes only strictly below the caller's own
   role.** `tenant#owner` changes require `tenant#owner` or
@@ -106,37 +109,97 @@ that file.
   admin role, and can't revoke an owner; a tenant owner can manage
   owners. The existing accepts-tenant-admin test still passes, because it
   grants `auditor`, which is below admin.
-- [ ] **SEC3-6 — Resolve tenant → store id in `/cache/invalidate`;
+- [x] **SEC3-6 — Resolve tenant → store id in `/cache/invalidate`;
   prefix match; escape glob metacharacters.** Replace the two tests that
   encode the bug. Also needed by `12`'s REL3-4.
-- [ ] **SEC3-7 — Deprovision deletes `tenant:<id>` RBAC tuples** (and
+  Shipped:
+  - The route resolves the store id via `tenant_store` (404 on an
+    unknown tenant). Tenant and tenant+user modes use the new
+    `RedisCache.delete_by_prefix()`; user-across-all-tenants stays a
+    fragment match.
+  - Every caller-supplied fragment or prefix is glob-escaped, so
+    `tenant_id="*"` is now just an unknown tenant.
+  - The route tests were rewritten to run the **real** `RedisCache` over
+    a new shared `tests/fake_redis.py`, which implements Redis's own
+    glob semantics including escapes. Two tenants' keys are written by
+    real `AuthzEngine`s namespaced by store id, and the tests assert
+    which keys survive, not which strings were passed. Four of the new
+    tests fail on the old route.
+- [x] **SEC3-7 — Deprovision deletes `tenant:<id>` RBAC tuples** (and
   optionally `model_versions` rows). Test: re-provision the same id → the
   old admin has no access.
+  Shipped: the deprovision route calls the new
+  `role_grants.delete_object_role_grants()` (paginated read, then revoke
+  each, audited with the acting principal) and reports `roles_removed`.
+  The test covers user and service-account grants removed while another
+  tenant's grants are untouched. `model_versions` rows are deliberately
+  kept as history.
 
 ## Tier 2 — Token acceptance and the RBAC store's own exposure
 
-- [ ] **SEC3-8 — Require `exp`/`iat`/`sub`/`iss`/`aud`; optional
+- [x] **SEC3-8 — Require `exp`/`iat`/`sub`/`iss`/`aud`; optional
   `expected_typ`/`allowed_azp`; separate control-plane client and
   audience in docs and env examples; move `record_login` after the RBAC
   check.**
+  Shipped: `OIDCJWTValidator` requires `exp`/`iat`/`sub` by default
+  (`iss`/`aud` are enforced whenever they're configured), and gains
+  optional `expected_typ`/`allowed_azp` checks, exposed as
+  `CONTROL_PLANE_OIDC_EXPECTED_TYP`/`_ALLOWED_AZP`. These are off by
+  default because Auth0 and others don't emit `typ`; `.env.example`
+  recommends `Bearer` plus the panel's own client for Keycloak.
+  `record_login` moved to `GET /auth/me`. Verified with a real Keycloak
+  token. New real-signature tests in
+  `tests/adapters/test_oidc_signed_tokens.py`; the missing-claim tests
+  fail on the old validator. Not done: giving
+  `docker/keycloak/realm.json` a separate control-panel client (the docs
+  explain how).
 - [ ] **SEC3-5 — OpenFGA auth support plus a shared-unauthenticated
   warning.** Depends on `11`'s ARCH3-11 (a shared connection object to
   carry credentials). Document isolating the RBAC store.
 
 ## Tier 3 — Hardening (small, parallelizable)
 
-- [ ] **SEC3-9 — Validate the SA id format; don't track failures for
+- [x] **SEC3-9 — Validate the SA id format; don't track failures for
   unknown ids; bound the limiter dicts.**
-- [ ] **SEC3-10 — CSV formula neutralisation plus `charset=utf-8`.**
+  Shipped: `parse_account_id` rejects malformed `pasa_` tokens
+  (`MalformedServiceAccountToken`, so 401) before any store lookup.
+  Unknown ids aren't recorded as failures. `InMemoryRateLimiter` sweeps
+  expired keys once it tracks 10k ids.
+- [x] **SEC3-10 — CSV formula neutralisation plus `charset=utf-8`.**
   Add a unit test once `13`'s DX3-7 gives the panel a test runner.
-- [ ] **SEC3-11 — Generic 5xx detail plus request id; no exception text
+  Shipped: new `control-panel/src/lib/csv.ts` prefixes formula-
+  triggering cells with `'`, quotes CR, uses CRLF rows and
+  `charset=utf-8`. Covered by vitest.
+- [x] **SEC3-11 — Generic 5xx detail plus request id; no exception text
   on `/health`; `CONTROL_PLANE_EXPOSE_DOCS=false` default.**
-- [ ] **SEC3-12 — Sealed session `iat`/`exp`; POST logout with refresh
+  Shipped: 5xx responses return a generic `detail` plus an `incident_id`
+  (the request id), with the full error logged. Readiness probes never
+  echo exception text. `/docs`, `/redoc` and `/openapi.json` are off
+  unless `CONTROL_PLANE_EXPOSE_DOCS=true`.
+- [x] **SEC3-12 — Sealed session `iat`/`exp`; POST logout with refresh
   revocation and `end_session_endpoint`; security headers in
   `next.config.ts`.**
+  Shipped: the session seals `issuedAt` and enforces the 8-hour lifetime
+  server-side; pre-change sessions count as expired. Logout is a same-
+  origin-checked `POST` that revokes the refresh token and 303-redirects
+  to `end_session_endpoint`; a `GET` now returns 405. Security headers
+  (a CSP including `frame-ancestors 'none'` and a runtime IdP origin in
+  `form-action`, `X-Frame-Options: DENY`, etc.) are set per request in
+  `proxy.ts`, not `next.config.ts`, because the latter resolves at build
+  time. Verified against a built `next start`.
 - [ ] **SEC3-13 — Lockout keyed on (account, network), or backoff
   instead of a hard lockout.**
-- [ ] **SEC3-14 — `KeycloakAuthMiddleware` returns a `JSONResponse`, not
+- [x] **SEC3-14 — `KeycloakAuthMiddleware` returns a `JSONResponse`, not
   `raise HTTPException`.**
-- [ ] **SEC3-15 — npm Dependabot, `pnpm audit`, `uv sync --locked`,
+  Shipped: the middleware returns `JSONResponse` 401 (with `WWW-
+  Authenticate`) or 503 instead of raising. A new test through a real
+  app confirms 401, not 500.
+- [x] **SEC3-15 — npm Dependabot, `pnpm audit`, `uv sync --locked`,
   semantic-release refreshes `uv.lock`.**
+  Shipped: npm Dependabot entry, and `pnpm audit --prod` in the new
+  panel CI job. That gate found 62 prod advisories (4 critical): `next`
+  upgraded 16.3.4 → 16.4.6, `shadcn` moved to devDependencies, `source-
+  map-js` pinned via a pnpm override; it's now clean. `uv sync --locked`
+  shipped in batch 1, and the CI `pip-audit` failure on main was fixed
+  by upgrading 6 locked packages and raising the `pyjwt` floor to 2.15.
+  Not done: semantic-release refreshing `uv.lock`.

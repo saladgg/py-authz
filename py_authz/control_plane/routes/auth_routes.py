@@ -7,7 +7,7 @@ from py_authz.control_plane.auth import (
     authenticated,
     effective_system_role,
 )
-from py_authz.control_plane.deps import get_rbac_authz
+from py_authz.control_plane.deps import get_operator_store, get_rbac_authz
 from py_authz.control_plane.scopes import ANY_PRINCIPAL
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -21,6 +21,7 @@ _any_principal = authenticated(scope=ANY_PRINCIPAL)
 async def get_me(
     principal: CurrentPrincipal = Depends(_any_principal),
     rbac_authz=Depends(get_rbac_authz),
+    operator_store=Depends(get_operator_store),
 ) -> dict:
     """
     The caller's own identity + effective system-scope role. Per-tenant
@@ -30,6 +31,10 @@ async def get_me(
     """
     role = None
     if principal.kind == "operator":
+        # The panel calls this on every page load — the "login" moment
+        # that adds an operator to the roster role grants pick from.
+        claims = principal.claims or {}
+        await operator_store.record_login(subject=claims.get("sub"), email=claims.get("email"))
         role = await effective_system_role(rbac_authz, principal.identity)
 
     return {

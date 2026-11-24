@@ -200,3 +200,31 @@ class RedisLockManager:
             except Exception:  # pragma: no cover — defensive; _renew_loop doesn't raise
                 logger.exception(f"lock_renewal_task_failed key={key}")
             await self._lock.release(key, lock_id)
+
+
+class InProcessLockManager:
+    """
+    `RedisLockManager`-compatible lock manager for a single process, for
+    deployments without Redis (REL3-2). Serializes callers within this
+    process only — it can't coordinate across replicas, so a
+    multi-replica deployment should configure Redis and use
+    `RedisLockManager` instead. Locks are dropped once nobody holds or
+    waits for them, so the key space doesn't grow without bound.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._waiters: dict[str, int] = {}
+
+    @asynccontextmanager
+    async def lock(self, key: str, ttl: int = 30, **_ignored):  # noqa: ARG002 — API parity
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        self._waiters[key] = self._waiters.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            self._waiters[key] -= 1
+            if self._waiters[key] == 0:
+                del self._waiters[key]
+                del self._locks[key]

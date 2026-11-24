@@ -41,7 +41,8 @@ def test_every_other_route_is_versioned_under_api_v1():
     app = create_app(_settings())
     schema = app.openapi()
 
-    other_paths = [p for p in schema["paths"] if p != "/health"]
+    probes = {"/health", "/livez", "/readyz"}
+    other_paths = [p for p in schema["paths"] if p not in probes]
     assert other_paths, "expected at least one non-health route"
     assert all(p.startswith("/api/v1") for p in other_paths)
 
@@ -52,6 +53,8 @@ def test_expected_route_surface_matches_the_architecture_doc():
 
     expected = {
         "/health",
+        "/livez",
+        "/readyz",
         "/api/v1/metrics",
         "/api/v1/auth/me",
         "/api/v1/service-accounts",
@@ -76,3 +79,36 @@ def test_expected_route_surface_matches_the_architecture_doc():
         "/api/v1/cache/invalidate",
     }
     assert set(schema["paths"]) == expected
+
+
+def test_tenant_manager_is_always_wired_with_a_provisioning_lock():
+    """REL3-2: `_wire()` used to build `TenantManager` without a lock
+    manager, so concurrent creates orphaned OpenFGA stores. Checks the
+    wiring source, since `_wire()` itself needs live services (it's
+    exercised end-to-end by tests/live/test_control_plane_live.py)."""
+    import inspect
+
+    from py_authz.control_plane import app as app_module
+
+    source = inspect.getsource(app_module._wire)
+    assert "lock_manager=lock_manager" in source
+    assert "InProcessLockManager()" in source
+
+
+def test_interactive_docs_are_off_by_default():
+    """SEC3-11: /docs, /redoc and /openapi.json published the full admin
+    API surface without authentication."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(create_app(_settings()))
+
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+
+
+def test_interactive_docs_can_be_enabled():
+    from starlette.testclient import TestClient
+
+    client = TestClient(create_app(_settings(expose_docs=True)))
+
+    assert client.get("/openapi.json").status_code == 200

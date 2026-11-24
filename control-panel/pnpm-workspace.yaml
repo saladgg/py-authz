@@ -1,3 +1,10 @@
 allowBuilds:
+  esbuild: false
   sharp: false
   unrs-resolver: false
+
+# Transitive security pins, each removable once the depending package
+# ships a fixed version (SEC3-15 / DX3-7).
+overrides:
+  # next -> postcss -> source-map-js (high severity, fixed in 1.2.2)
+  source-map-js: ^1.2.4

@@ -1,28 +1,6 @@
 import pytest
 
-
-class MockRedis:
-    def __init__(self):
-        self.store = {}
-
-    async def get(self, key):
-        return self.store.get(key)
-
-    async def set(self, key, value, ex=None):
-        self.store[key] = value.encode()
-
-    async def delete(self, key):
-        self.store.pop(key, None)
-
-    async def scan_iter(self, match=None):
-        import fnmatch
-
-        for key in list(self.store.keys()):
-            if match is None or fnmatch.fnmatch(key, match):
-                yield key
-
-    async def aclose(self):
-        pass
+from tests.fake_redis import FakeRedis as MockRedis
 
 
 @pytest.fixture
@@ -140,3 +118,59 @@ async def test_delete_by_fragment_matches_a_fragment_mid_key():
 async def test_delete_by_fragment_rejects_empty_fragment(redis_cache):
     with pytest.raises(ValueError):
         await redis_cache.delete_by_fragment("")
+
+
+# ----------------------------------------------------------------------
+# SEC3-6 / REL3-18: prefix deletion, glob escaping, batched UNLINK
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_by_prefix_matches_only_keys_starting_with_the_prefix(redis_cache):
+    await redis_cache.set("store-a:6:user:1|x", True)
+    await redis_cache.set("store-a:6:user:2|x", True)
+    # The same text later in a key must not match a prefix delete.
+    await redis_cache.set("store-b:12:doc:store-a:|x", True)
+
+    deleted = await redis_cache.delete_by_prefix("store-a:")
+
+    assert deleted == 2
+    assert await redis_cache.get("store-b:12:doc:store-a:|x") is True
+
+
+@pytest.mark.asyncio
+async def test_glob_metacharacters_in_a_fragment_are_matched_literally(redis_cache):
+    """`tenant_id="*"` used to wipe the whole cache."""
+    await redis_cache.set("store-a:k1", True)
+    await redis_cache.set("store-b:k2", True)
+
+    assert await redis_cache.delete_by_fragment("*") == 0
+    assert await redis_cache.delete_by_prefix("*") == 0
+    assert await redis_cache.delete_by_fragment("store-?") == 0
+    assert await redis_cache.count_keys() == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_scans_with_a_large_count_and_unlinks_in_batches():
+    from py_authz.cache import redis as redis_module
+    from py_authz.cache.redis import RedisCache
+
+    fake = MockRedis()
+    cache = RedisCache(client=fake)
+    for i in range(redis_module._DELETE_BATCH * 2 + 7):
+        await cache.set(f"ns:{i}", True)
+
+    calls: list[int] = []
+    real_unlink = fake.unlink
+
+    async def counting_unlink(*keys):
+        calls.append(len(keys))
+        return await real_unlink(*keys)
+
+    fake.unlink = counting_unlink
+
+    deleted = await cache.delete_by_prefix("ns:")
+
+    assert deleted == redis_module._DELETE_BATCH * 2 + 7
+    assert calls == [redis_module._DELETE_BATCH, redis_module._DELETE_BATCH, 7]
+    assert fake.scan_counts[-1] == redis_module._SCAN_COUNT

@@ -226,7 +226,13 @@ class OpenFGAModelGenerator:
         # Final shape
         # -------------------------------------------------
         if not parts:
-            return {}
+            # Only reachable with an explicit `subjects=[]` and nothing
+            # else — OpenFGA rejects an empty rewrite, so fail here with a
+            # useful message instead of at upload time.
+            raise ModelValidationError(
+                f"Relation '{rel.name}' has no direct subjects and no "
+                "union/inherits/intersection/from_parent — nothing can ever hold it"
+            )
 
         if len(parts) == 1:
             return parts[0]

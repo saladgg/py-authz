@@ -27,6 +27,17 @@ class MigrationBatchResult:
     failed: dict[str, Exception] = field(default_factory=dict)
 
 
+@dataclass
+class DryRunBatchResult:
+    """
+    Outcome of `MigrationManager.dry_run_batch()`: which tenants' models
+    would change, and which tenants couldn't be checked (REL3-9).
+    """
+
+    would_change: dict[str, bool] = field(default_factory=dict)
+    failed: dict[str, Exception] = field(default_factory=dict)
+
+
 class MigrationManager:
     """
     Handles tenant-wide model migrations.
@@ -162,17 +173,43 @@ class MigrationManager:
         finally:
             await client.aclose()
 
-    async def dry_run_all(self, tenant_ids: list[str], *, concurrency: int = 10) -> dict[str, bool]:
-        """Concurrent `dry_run_tenant()` over many tenants."""
+    async def dry_run_batch(
+        self, tenant_ids: list[str], *, concurrency: int = 10
+    ) -> DryRunBatchResult:
+        """
+        Concurrent `dry_run_tenant()` over many tenants, isolating each
+        tenant's failure the same way `migrate_all()` does (ARCH2-10).
+        Before REL3-9 one unreachable or stale tenant aborted the whole
+        preview with a bare `ExceptionGroup` (a raw 500 from the control
+        plane), discarding every other tenant's result.
+        """
         semaphore = anyio.Semaphore(concurrency)
-        results: dict[str, bool] = {}
+        result = DryRunBatchResult()
 
         async def worker(tenant_id: str) -> None:
             async with semaphore:
-                results[tenant_id] = await self.dry_run_tenant(tenant_id)
+                try:
+                    result.would_change[tenant_id] = await self.dry_run_tenant(tenant_id)
+                except Exception as exc:
+                    result.failed[tenant_id] = exc
+                    logger.warning(
+                        json.dumps({"event": "migration_dry_run_failed", "tenant": tenant_id})
+                    )
 
         async with anyio.create_task_group() as tg:
             for tenant_id in tenant_ids:
                 tg.start_soon(worker, tenant_id)
 
-        return results
+        return result
+
+    async def dry_run_all(self, tenant_ids: list[str], *, concurrency: int = 10) -> dict[str, bool]:
+        """
+        Concurrent `dry_run_tenant()` over many tenants. Prefer
+        `dry_run_batch()`, which reports per-tenant failures; this keeps
+        its original all-or-nothing contract but raises the first
+        tenant's actual error rather than a bare `ExceptionGroup`.
+        """
+        result = await self.dry_run_batch(tenant_ids, concurrency=concurrency)
+        if result.failed:
+            raise next(iter(result.failed.values()))
+        return result.would_change

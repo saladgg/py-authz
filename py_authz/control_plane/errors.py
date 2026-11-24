@@ -9,10 +9,12 @@ more specific one after it.
 """
 
 import logging
+import uuid
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from py_authz.core.context import get_request_id
 from py_authz.core.exceptions import (
     AuthenticationError,
     AuthorizationDenied,
@@ -65,10 +67,28 @@ async def authz_error_handler(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, AuthzError)  # noqa: S101 — see docstring
     status_code = status_code_for(exc)
     if status_code >= 500:
-        logger.exception("control-plane request failed", exc_info=exc)
-    else:
-        logger.info("control-plane request denied: %s: %s", type(exc).__name__, exc, exc_info=False)
+        # SEC3-11: a 5xx's message is about *our* internals (a JWKS URL,
+        # an OpenFGA path containing the RBAC store id, a config value)
+        # and was echoed to the caller — including unauthenticated ones.
+        # Log it in full; return a generic message plus an id to find it.
+        incident_id = get_request_id() or uuid.uuid4().hex
+        logger.exception("control-plane request failed (incident %s)", incident_id, exc_info=exc)
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": type(exc).__name__,
+                "detail": _GENERIC_5XX.get(status_code, "Internal error"),
+                "incident_id": incident_id,
+            },
+        )
+    logger.info("control-plane request denied: %s: %s", type(exc).__name__, exc, exc_info=False)
     return JSONResponse(
         status_code=status_code,
         content={"error": type(exc).__name__, "detail": str(exc)},
     )
+
+
+_GENERIC_5XX = {
+    500: "Internal error",
+    503: "A dependency is unavailable — try again shortly",
+}

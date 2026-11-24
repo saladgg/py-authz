@@ -8,10 +8,12 @@ class RecordingReadClient:
         self._response_data = response_data or {}
         self.calls: list[tuple[str, str, dict | None]] = []
 
-    async def request(self, method, path, json=None):
+    async def request(self, method, path, json=None, **_kwargs):
         self.calls.append((method, path, json))
 
         class _Resp:
+            status_code = 200
+
             def __init__(self, data):
                 self._data = data
 

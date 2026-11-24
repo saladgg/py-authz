@@ -25,6 +25,18 @@ from py_authz.core.exceptions import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_jwk_parsing(monkeypatch):
+    """Every test here mocks `jwt.decode` and feeds placeholder JWKs
+    (`{"kid": "k1"}`), so key parsing is stubbed too. Real signature
+    verification is covered by tests/adapters/test_oidc_signed_tokens.py.
+    (This used to work only because test_keycloak.py could replace PyJWT
+    with a fake for the whole session — see `_install_fake_jwt`.)"""
+    monkeypatch.setattr(
+        jwt.algorithms.RSAAlgorithm, "from_jwk", staticmethod(lambda key: "placeholder-key")
+    )
+
+
 class _FakeResponse:
     def __init__(self, data, status_code=200):
         self._data = data

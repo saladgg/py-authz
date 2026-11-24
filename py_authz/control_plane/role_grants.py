@@ -82,3 +82,27 @@ async def dominates(rbac_authz, identity: Identity, grants: list[RoleGrant]) -> 
         if held is None or role_rank(held) > role_rank(grant.role):
             return False
     return True
+
+
+async def delete_object_role_grants(
+    rbac_authz, resource: Resource, *, reason: str, actor: Identity
+) -> int:
+    """Delete every role tuple on `resource` (e.g. `tenant:<id>`), for
+    every subject. Used on tenant deprovision (SEC3-7) so a later tenant
+    re-created under the same human-chosen id doesn't silently inherit
+    the previous tenant's operators."""
+    obj = resource.to_fga_object()
+    grants: list[tuple[str, str]] = []
+    token: str | None = None
+    while True:
+        page = await rbac_authz.read_tuples(object=obj, continuation_token=token)
+        grants.extend(
+            (t["user"], t["relation"]) for t in page["tuples"] if t["relation"] in ROLE_CHAIN
+        )
+        token = page.get("continuation_token")
+        if not token:
+            break
+
+    for user, role in grants:
+        await rbac_authz.revoke(Identity(id=user), role, resource, reason=reason, actor=actor)
+    return len(grants)

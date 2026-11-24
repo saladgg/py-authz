@@ -78,6 +78,40 @@ class InvalidAuthzRequest(AuthzError):
     pass
 
 
+class UpstreamRequestRejected(InvalidAuthzRequest):
+    """
+    Raised when OpenFGA rejects a request as invalid (HTTP 400/404/409/
+    422) — an unknown type or relation, a malformed user, an invalid
+    model, a store that doesn't exist.
+
+    Before ARCH3-7 these surfaced as `ExternalServiceError`, i.e. "the
+    service is unavailable" (a 503 from the control plane), so callers
+    retried pointlessly, on-call saw false outages, and the FastAPI
+    adapter's `fail_open=True` even *allowed* requests whose check was
+    rejected because of a misconfiguration. This is a client/config
+    error, not an availability one: it's an `InvalidAuthzRequest`, and is
+    never retried or failed open.
+
+    Attributes:
+        status_code: the HTTP status OpenFGA returned.
+        detail: OpenFGA's error message, when it sent one.
+        service: always "openfga" today.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        detail: str | None = None,
+        service: str = "openfga",
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
+        self.service = service
+
+
 # ---------------------------------------------------------------------
 # External Service Errors
 # ---------------------------------------------------------------------

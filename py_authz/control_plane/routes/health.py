@@ -1,42 +1,82 @@
-"""GET /health, GET /metrics (CP-10)."""
+"""GET /livez, /readyz, /health (probes) and GET /metrics (CP-10)."""
+
+import asyncio
+import logging
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from py_authz.control_plane.auth import require_system_role
-from py_authz.control_plane.deps import get_metrics, get_product_fga_client
+from py_authz.control_plane.deps import get_metrics, get_readiness_checks
 from py_authz.control_plane.scopes import Scope
-from py_authz.core.exceptions import ExternalServiceError
+
+logger = logging.getLogger("py_authz.control_plane.health")
+
+#: Per-check ceiling. Every OpenFGA check client is built with
+#: `max_retries=0`, so this bounds the whole probe too (checks run
+#: concurrently).
+CHECK_TIMEOUT_SECONDS = 1.0
 
 #: Mounted unversioned, at the app root, with no auth dependency — a load
 #: balancer/orchestrator probe has no operator session or service-account
-#: credential to present (see `health()`'s own docstring).
+#: credential to present.
 health_router = APIRouter(tags=["health"])
 
 #: Mounted under `/api/v1` like every other authenticated route.
 router = APIRouter(tags=["health"])
 
 
-@health_router.get("/health")
-async def health(fga_client=Depends(get_product_fga_client)) -> dict:
-    """
-    Unauthenticated (the one route in this API that is — a load
-    balancer/orchestrator health check has no operator session or
-    service-account credential to present) reachability probe. Attempts
-    a real, cheap OpenFGA call (`get_latest_model()` against the product
-    OpenFGA instance's `store_id`-less client would 404 without one, so
-    this uses the RBAC store — always guaranteed to exist once the
-    control-plane API itself started) rather than only reporting process
-    liveness.
-    """
-    checks: dict[str, str] = {}
-    try:
-        await fga_client.get_latest_model()
-        checks["openfga"] = "ok"
-    except ExternalServiceError as exc:
-        checks["openfga"] = f"unreachable: {exc}"
+@health_router.get("/livez")
+async def livez() -> dict:
+    """Liveness: the process is up and serving. Checks no dependencies —
+    a dependency outage should take the instance out of rotation
+    (`/readyz`), not get it restarted."""
+    return {"status": "ok"}
 
-    healthy = all(v == "ok" for v in checks.values())
-    return {"status": "ok" if healthy else "degraded", "checks": checks}
+
+async def _run_check(name: str, check) -> tuple[str, bool]:
+    try:
+        await asyncio.wait_for(check(), timeout=CHECK_TIMEOUT_SECONDS)
+        return name, True
+    except Exception:  # noqa: BLE001 — any failure means "not ready"
+        logger.warning("readiness check %r failed", name, exc_info=True)
+        return name, False
+
+
+async def _readiness(checks: dict) -> JSONResponse:
+    results = await asyncio.gather(*(_run_check(n, c) for n, c in checks.items()))
+    report = {name: ("ok" if ok else "unavailable") for name, ok in results}
+    ready = all(ok for _, ok in results)
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ok" if ready else "unavailable", "checks": report},
+    )
+
+
+@health_router.get("/readyz")
+async def readyz(checks: dict = Depends(get_readiness_checks)) -> JSONResponse:
+    """
+    Readiness (REL3-7): Postgres, Redis (when configured) and OpenFGA —
+    the product instance, plus the RBAC instance when it's a different
+    URL — checked concurrently, each bounded to `CHECK_TIMEOUT_SECONDS`
+    with no retries. **503** if any fails, so a load balancer stops
+    routing to an instance that can't serve.
+
+    Before REL3-7 the only probe was `/health`: it always returned 200
+    (a degraded status lived only in the body), checked neither Postgres
+    nor Redis, probed the RBAC store under the name "product", went
+    through the retrying client (6s+ worst case), and echoed raw
+    exception text to unauthenticated callers. Failure details are now
+    logged server-side only.
+    """
+    return await _readiness(checks)
+
+
+@health_router.get("/health")
+async def health(checks: dict = Depends(get_readiness_checks)) -> JSONResponse:
+    """Backwards-compatible alias of `/readyz` — note it now returns 503
+    (not 200 with a "degraded" body) when a dependency is down."""
+    return await _readiness(checks)
 
 
 @router.get(

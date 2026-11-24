@@ -24,7 +24,15 @@ export function AllowedBadge({ allowed }: { allowed: boolean }) {
 
 export function JobStatusBadge({ status }: { status: string }) {
   const tone: Tone =
-    status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "running" ? "info" : "neutral";
+    status === "succeeded"
+      ? "success"
+      : status === "failed" || status === "cancelled"
+        ? "danger"
+        : status === "partial"
+          ? "warning"
+          : status === "running"
+            ? "info"
+            : "neutral";
   return <ToneBadge label={status} tone={tone} />;
 }
 

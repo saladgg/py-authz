@@ -1,5 +1,5 @@
 from py_authz.core.exceptions import ConfigurationError
-from py_authz.utils.deps import require_redis
+from py_authz.utils.deps import REDIS_CLIENT_DEFAULTS, require_redis
 
 redis = require_redis()
 
@@ -10,7 +10,7 @@ def _build_client(url: str | None, client):
     if client is not None:
         return client
     if url is not None:
-        return redis.from_url(url)
+        return redis.from_url(url, **REDIS_CLIENT_DEFAULTS)
     raise ConfigurationError("Either `url` or `client` must be provided")
 
 

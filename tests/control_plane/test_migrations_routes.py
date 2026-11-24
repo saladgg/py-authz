@@ -74,11 +74,17 @@ class FakeMigrationManager:
         self.migrate_calls: list[list[str]] = []
         self.batch_result = MigrationBatchResult(succeeded={"acme": "model-1"}, failed={})
         self.concurrency_seen: list[int] = []
+        self.dry_run_failures: dict[str, Exception] = {}
 
-    async def dry_run_all(self, tenant_ids, *, concurrency=10):
+    async def dry_run_batch(self, tenant_ids, *, concurrency=10):
+        from py_authz.core.migrations_manager import DryRunBatchResult
+
         self.dry_run_calls.append(tenant_ids)
         self.concurrency_seen.append(concurrency)
-        return dict.fromkeys(tenant_ids, True)
+        return DryRunBatchResult(
+            would_change={t: True for t in tenant_ids if t not in self.dry_run_failures},
+            failed={t: self.dry_run_failures[t] for t in tenant_ids if t in self.dry_run_failures},
+        )
 
     async def migrate_all(self, tenant_ids, *, concurrency=10):
         self.migrate_calls.append(tenant_ids)
@@ -163,6 +169,7 @@ async def test_dry_run_runs_synchronously_against_named_tenants(
     assert resp.json() == {
         "dry_run": True,
         "would_change": {"acme": True, "other-corp": True},
+        "failed": {},
     }
     assert migration_manager.dry_run_calls == [["acme", "other-corp"]]
     assert migration_manager.migrate_calls == []
@@ -241,14 +248,16 @@ async def test_real_migration_job_reports_failure(client, rbac_authz, migration_
     resp = client.post("/api/v1/migrations", headers=bearer(), json={"tenant_ids": ["acme"]})
     job_id = resp.json()["id"]
 
-    for _ in range(50):
-        if job_store.jobs[job_id].status != PENDING:
+    for _ in range(200):
+        if job_store.jobs[job_id].status not in (PENDING, "running"):
             break
         await asyncio.sleep(0.01)
 
     resp = client.get(f"/api/v1/migrations/{job_id}", headers=bearer())
     body = resp.json()
-    assert body["status"] == SUCCEEDED  # migrate_all itself doesn't raise — failures are per-tenant
+    # REL3-3: every tenant failed, so the job failed — it used to say
+    # `succeeded` because migrate_all() itself doesn't raise.
+    assert body["status"] == "failed"
     assert body["result"]["failed"] == {"acme": "boom"}
 
 
@@ -278,3 +287,59 @@ async def test_list_migration_jobs_requires_system_auditor(client, rbac_authz, j
     resp = client.get("/api/v1/migrations", headers=bearer())
     assert resp.status_code == 200
     assert len(resp.json()["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_dry_run_reports_a_failing_tenant_instead_of_500ing(
+    client, rbac_authz, migration_manager
+):
+    """REL3-9: one stale/unreachable tenant used to abort the whole preview
+    with an unhandled ExceptionGroup (a raw 500)."""
+    from py_authz.core.exceptions import TenantNotFoundError
+
+    migration_manager.dry_run_failures["ghost"] = TenantNotFoundError("Tenant not found: ghost")
+    await rbac_authz.grant(Identity(id="user:alice"), "operator", System(id=SYSTEM_OBJECT_ID))
+
+    resp = client.post(
+        "/api/v1/migrations",
+        headers=bearer(),
+        json={"dry_run": True, "tenant_ids": ["acme", "ghost"]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["would_change"] == {"acme": True}
+    assert resp.json()["failed"] == {"ghost": "TenantNotFoundError"}
+
+
+@pytest.mark.asyncio
+async def test_a_migration_where_every_tenant_failed_is_not_reported_succeeded(
+    client, rbac_authz, migration_manager, job_store
+):
+    """REL3-3: an all-failed batch used to end `succeeded`."""
+    from py_authz.control_plane.jobs import FAILED, PARTIAL
+
+    await rbac_authz.grant(Identity(id="user:alice"), "operator", System(id=SYSTEM_OBJECT_ID))
+
+    migration_manager.batch_result = MigrationBatchResult(
+        succeeded={}, failed={"acme": RuntimeError("boom")}
+    )
+    job_id = client.post(
+        "/api/v1/migrations", headers=bearer(), json={"tenant_ids": ["acme"]}
+    ).json()["id"]
+    for _ in range(200):
+        if job_store.jobs[job_id].status not in ("pending", "running"):
+            break
+        await asyncio.sleep(0.01)
+    assert job_store.jobs[job_id].status == FAILED
+
+    migration_manager.batch_result = MigrationBatchResult(
+        succeeded={"acme": "m1"}, failed={"other": RuntimeError("boom")}
+    )
+    job_id = client.post(
+        "/api/v1/migrations", headers=bearer(), json={"tenant_ids": ["acme", "other"]}
+    ).json()["id"]
+    for _ in range(200):
+        if job_store.jobs[job_id].status not in ("pending", "running"):
+            break
+        await asyncio.sleep(0.01)
+    assert job_store.jobs[job_id].status == PARTIAL

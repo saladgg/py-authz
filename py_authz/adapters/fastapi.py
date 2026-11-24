@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from py_authz.core.context import set_request_id
-from py_authz.core.exceptions import ExternalServiceError
+from py_authz.core.exceptions import ExternalServiceError, UpstreamRequestRejected
 from py_authz.core.types import Identity
 from py_authz.modeling.base import Relation, ResourceModel
 from py_authz.utils.deps import require_fast_api
@@ -89,6 +89,16 @@ async def _enforce(
     try:
         resolved_authz = await _resolve_authz(authz, request)
         allowed = await resolved_authz.can(relation, user, resource)
+    except UpstreamRequestRejected as exc:
+        # OpenFGA rejected the check itself (unknown relation/type, bad
+        # model) — a misconfiguration, never an outage, so it must NEVER
+        # fail open (ARCH3-7). Before UpstreamRequestRejected existed this
+        # was an ExternalServiceError, and `fail_open=True` let the
+        # request through.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authorization check rejected — server misconfiguration",
+        ) from exc
     except ExternalServiceError as exc:
         if fail_open:
             return

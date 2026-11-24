@@ -34,8 +34,21 @@ class _FakeAlgorithms:
 
 
 def _install_fake_jwt() -> types.ModuleType | None:
-    """Inject a minimal fake ``jwt`` module if the real one is missing."""
+    """Inject a minimal fake ``jwt`` module if the real one is missing.
+
+    "Missing" means *not installed*, not "not imported yet": this used to
+    check only `sys.modules`, so whenever this file happened to be
+    collected before anything imported PyJWT, the fake replaced the real
+    library for the whole test session — silently breaking every later
+    test that needs real signatures (e.g. test_oidc_signed_tokens.py).
+    """
     if "jwt" in sys.modules:
+        return None
+    try:
+        import jwt as _real_jwt  # noqa: F401
+    except ImportError:
+        pass
+    else:
         return None
 
     fake = types.ModuleType("jwt")
@@ -55,6 +68,18 @@ import jwt  # noqa: E402
 
 from py_authz.adapters.keycloak import KeycloakJWTValidator  # noqa: E402
 from py_authz.core.exceptions import AuthenticationError  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_jwk_parsing(monkeypatch):
+    """Every test here mocks `jwt.decode` and feeds placeholder JWKs
+    (`{"kid": "k1"}`), so key parsing is stubbed too. Real signature
+    verification is covered by tests/adapters/test_oidc_signed_tokens.py.
+    (This used to work only because test_keycloak.py could replace PyJWT
+    with a fake for the whole session — see `_install_fake_jwt`.)"""
+    monkeypatch.setattr(
+        jwt.algorithms.RSAAlgorithm, "from_jwk", staticmethod(lambda key: "placeholder-key")
+    )
 
 
 class FakeHTTPClient:

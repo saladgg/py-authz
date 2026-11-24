@@ -129,3 +129,31 @@ async def test_sync_model_delegates_to_model_sync(monkeypatch):
     result = await authz.sync_model()
 
     assert result == "new-model-id"
+
+
+@pytest.mark.asyncio
+async def test_string_action_with_a_resource_model_instance_is_normalized():
+    """ARCH3-5: `can("viewer", user, Doc(id="1"))` used to raise
+    `AttributeError: 'Doc' object has no attribute 'to_fga_object'` —
+    not an `AuthzError`, so the documented catch-at-the-boundary pattern
+    missed it. Same for `enforce()`/`require()`."""
+    from py_authz.core.exceptions import AuthorizationDenied
+    from py_authz.core.types import Identity
+    from py_authz.modeling.base import Relation, ResourceModel
+    from py_authz.modeling.registry import ResourceModelRegistry
+    from py_authz.testkit import make_fake_authz
+
+    class Doc(ResourceModel):
+        type = "doc"
+        viewer = Relation("viewer")
+
+    reg = ResourceModelRegistry()
+    reg.register(Doc)
+    authz = make_fake_authz(model_registry=reg, strict=True)
+    alice = Identity(id="user:alice")
+    await authz.grant(alice, "viewer", Doc(id="1"))
+
+    assert await authz.can("viewer", alice, Doc(id="1")) is True
+    assert await authz.enforce("viewer", alice, Doc(id="2")) is False
+    with pytest.raises(AuthorizationDenied):
+        await authz.require("viewer", alice, Doc(id="2"))

@@ -40,9 +40,10 @@ class FakeRedisModule:
     def __init__(self):
         self.clients: list[FakeAsyncRedis] = []
 
-    def from_url(self, url):
+    def from_url(self, url, **kwargs):
         client = FakeAsyncRedis()
         client.urls.append(url)
+        client.from_url_kwargs = kwargs
         self.clients.append(client)
         return client
 
@@ -236,3 +237,15 @@ async def test_model_registry_delete_removes_mapping(patched_redis):
     await reg.delete("t1")
 
     assert await reg.get("t1") is None
+
+
+def test_clients_built_from_a_url_get_bounded_socket_timeouts(patched_redis):
+    """REL3-5: redis-py defaults to no socket timeout at all, so a
+    black-holed Redis hung every caller indefinitely."""
+    from py_authz.utils.deps import REDIS_CLIENT_DEFAULTS
+
+    store = RedisTenantStore("redis://fake")
+
+    assert store.client.from_url_kwargs == REDIS_CLIENT_DEFAULTS
+    assert REDIS_CLIENT_DEFAULTS["socket_timeout"] is not None
+    assert REDIS_CLIENT_DEFAULTS["socket_connect_timeout"] is not None

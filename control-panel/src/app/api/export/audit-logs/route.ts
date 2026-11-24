@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 
 import { apiFetch } from "@/lib/api";
+import { toCsv } from "@/lib/csv";
 import { getValidSession } from "@/lib/session";
 import type { AuditLogEntry, ListResponse } from "@/lib/types";
 
@@ -46,35 +47,22 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  return new Response(toCsv(result.items), {
+  return new Response(toCsv(result.items as unknown as Record<string, unknown>[], CSV_COLUMNS), {
     headers: {
-      "Content-Type": "text/csv",
+      "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${filename}"`,
     },
   });
 }
 
-function toCsv(rows: AuditLogEntry[]): string {
-  const headers = [
-    "id",
-    "timestamp",
-    "tenant_id",
-    "user_id",
-    "action",
-    "resource",
-    "allowed",
-    "reason",
-    "request_id",
-  ] as const;
-
-  const escape = (value: unknown) => {
-    const str = value === null || value === undefined ? "" : String(value);
-    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-  };
-
-  const lines = [headers.join(",")];
-  for (const row of rows) {
-    lines.push(headers.map((header) => escape(row[header])).join(","));
-  }
-  return lines.join("\n");
-}
+const CSV_COLUMNS = [
+  "id",
+  "timestamp",
+  "tenant_id",
+  "user_id",
+  "action",
+  "resource",
+  "allowed",
+  "reason",
+  "request_id",
+] as const;

@@ -77,9 +77,10 @@ def test_lifespan_wires_and_tears_down_every_dependency(settings):
         assert app.state.redis_cache is not None
         assert app.state.oidc_validator is not None
 
-        resp = client.get("/health")
-        assert resp.status_code == 200
-        assert resp.json()["checks"]["openfga"] == "ok"
+        resp = client.get("/readyz")
+        assert resp.status_code == 200, resp.text
+        # Real Postgres, Redis and OpenFGA all checked (REL3-7).
+        assert resp.json()["checks"] == {"postgres": "ok", "openfga": "ok", "redis": "ok"}
 
     # _teardown() ran on exit — a second close would raise if anything
     # here weren't already idempotent/tolerant of it, so the context
@@ -111,8 +112,9 @@ def test_lifespan_without_redis_configured_leaves_cache_routes_disabled(
     with TestClient(app) as client:
         assert app.state.redis_cache is None
 
-        resp = client.get("/health")
+        resp = client.get("/readyz")
         assert resp.status_code == 200
+        assert "redis" not in resp.json()["checks"]
 
 
 # ---------------------------------------------------------------------------

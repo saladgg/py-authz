@@ -21,14 +21,16 @@ class FakeMetrics:
         self.durations = durations or {}
 
 
-class FakeProductFGAClient:
-    def __init__(self, *, fails=False):
-        self.fails = fails
+def _check(*, fails=False, hangs=False):
+    async def check():
+        if hangs:
+            import asyncio
 
-    async def get_latest_model(self):
-        if self.fails:
-            raise ExternalServiceError("openfga is down")
-        return {"id": "model-1"}
+            await asyncio.sleep(60)
+        if fails:
+            raise ExternalServiceError("openfga is down at http://10.0.0.7:8080 (secret detail)")
+
+    return check
 
 
 @pytest.fixture
@@ -42,7 +44,11 @@ def app(rbac_authz, oidc_validator, operator_store, bootstrapper):
     fastapi_app.state.oidc_validator = oidc_validator
     fastapi_app.state.operator_store = operator_store
     fastapi_app.state.bootstrapper = bootstrapper
-    fastapi_app.state.product_fga_client = FakeProductFGAClient()
+    fastapi_app.state.readiness_checks = {
+        "postgres": _check(),
+        "openfga": _check(),
+        "redis": _check(),
+    }
     fastapi_app.state.metrics = FakeMetrics()
 
     return fastapi_app
@@ -58,20 +64,58 @@ def test_health_is_unauthenticated(client):
     assert resp.status_code == 200
 
 
-def test_health_reports_ok_when_openfga_is_reachable(client):
-    resp = client.get("/health")
-    assert resp.json() == {"status": "ok", "checks": {"openfga": "ok"}}
+def test_livez_checks_no_dependencies(app, client):
+    app.state.readiness_checks["postgres"] = _check(fails=True)
+    assert client.get("/livez").status_code == 200
 
 
-def test_health_reports_degraded_when_openfga_is_unreachable(app, client):
-    app.state.product_fga_client = FakeProductFGAClient(fails=True)
-
-    resp = client.get("/health")
+@pytest.mark.parametrize("path", ["/readyz", "/health"])
+def test_ready_when_every_dependency_answers(client, path):
+    resp = client.get(path)
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "degraded"
-    assert body["checks"]["openfga"].startswith("unreachable:")
+    assert resp.json() == {
+        "status": "ok",
+        "checks": {"postgres": "ok", "openfga": "ok", "redis": "ok"},
+    }
+
+
+@pytest.mark.parametrize("path", ["/readyz", "/health"])
+@pytest.mark.parametrize("failing", ["postgres", "openfga", "redis"])
+def test_any_failing_dependency_is_a_503(app, client, path, failing):
+    """REL3-7: this used to be a 200 with "degraded" in the body (and
+    Postgres/Redis weren't checked at all), so load balancers kept
+    routing to an instance that couldn't serve."""
+    app.state.readiness_checks[failing] = _check(fails=True)
+
+    resp = client.get(path)
+
+    assert resp.status_code == 503
+    assert resp.json()["checks"][failing] == "unavailable"
+
+
+def test_readiness_never_echoes_exception_text(app, client):
+    """SEC3-11: `/health` is unauthenticated — it used to return
+    `f"unreachable: {exc}"`, leaking internal URLs and messages."""
+    app.state.readiness_checks["openfga"] = _check(fails=True)
+
+    body = client.get("/readyz").text
+
+    assert "10.0.0.7" not in body
+    assert "secret detail" not in body
+
+
+def test_a_hanging_dependency_is_bounded(app, client, monkeypatch):
+    import time
+
+    monkeypatch.setattr(health_routes, "CHECK_TIMEOUT_SECONDS", 0.05)
+    app.state.readiness_checks["redis"] = _check(hangs=True)
+
+    started = time.monotonic()
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    assert time.monotonic() - started < 2
 
 
 def test_metrics_requires_system_auditor(client):

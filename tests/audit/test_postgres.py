@@ -68,7 +68,7 @@ async def test_connect_passes_command_timeout_to_pool(patched_asyncpg):
     logger = PostgresAuditLogger(dsn="postgres://fake", command_timeout=3.5)
     await logger.connect()
 
-    assert patched_asyncpg.create_pool_kwargs == {"command_timeout": 3.5}
+    assert patched_asyncpg.create_pool_kwargs["command_timeout"] == 3.5
 
     event = AuditEvent(
         timestamp=datetime(2026, 4, 18, 12, 0, 0),

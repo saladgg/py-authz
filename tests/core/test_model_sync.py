@@ -13,8 +13,8 @@ class MockFGAClient:
     async def get_latest_model(self):
         return self._existing_model
 
-    async def _post(self, path, json):
-        self.post_calls.append((path, json))
+    async def write_authorization_model(self, model):
+        self.post_calls.append((f"/stores/{self.store_id}/authorization-models", model))
         return {"authorization_model_id": "new-model-id"}
 
 

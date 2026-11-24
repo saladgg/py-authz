@@ -8,7 +8,7 @@ class RecordingClient:
         self._response_data = response_data or {}
         self.calls: list[tuple[str, str, dict | None]] = []
 
-    async def request(self, method, path, json=None):
+    async def request(self, method, path, json=None, **_kwargs):
         self.calls.append((method, path, json))
 
         class _R:
@@ -101,6 +101,10 @@ async def test_check_forwards_contextual_tuples_and_context():
         def __init__(self):
             self.payload = None
 
+        async def request(self, method, path, json=None, **_kwargs):
+
+            return await self.post(path, json=json)
+
         async def post(self, path, json=None):
             self.payload = json
 
@@ -143,6 +147,10 @@ async def test_check_omits_contextual_keys_when_not_provided():
     class _Capture:
         def __init__(self):
             self.payload = None
+
+        async def request(self, method, path, json=None, **_kwargs):
+
+            return await self.post(path, json=json)
 
         async def post(self, path, json=None):
             self.payload = json

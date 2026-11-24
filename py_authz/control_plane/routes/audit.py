@@ -2,11 +2,12 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from py_authz.audit.postgres import PostgresAuditQuery
 from py_authz.control_plane.auth import require_system_or_tenant_role_from_query
 from py_authz.control_plane.deps import get_audit_query, get_tenant_store
+from py_authz.control_plane.schemas import MAX_PAGE_SIZE
 from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import TenantNotFoundError
 
@@ -24,8 +25,8 @@ async def list_audit_logs(
     allowed: bool | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
     audit_query: PostgresAuditQuery = Depends(get_audit_query),
     tenant_store=Depends(get_tenant_store),
 ) -> dict:

@@ -70,6 +70,7 @@ async def migrate_command(
     dry_run: bool = False,
     yes: bool = False,
     json_output: bool = False,
+    allow_empty: bool = False,
 ) -> None:
     """
     Roll the current model out across tenants via `MigrationManager`.
@@ -105,6 +106,18 @@ async def migrate_command(
                 print(json.dumps({"tenants_found": 0, "succeeded": {}, "failed": {}}))
             else:
                 print("No tenants found — nothing to migrate.")
+            if backend == "memory":
+                print(
+                    "warning: --backend memory starts empty; did you mean postgres or redis?",
+                    file=sys.stderr,
+                )
+            # DX3-8: a CI job pointing at the wrong (or an empty) backend
+            # used to exit 0 here having migrated nothing.
+            if not allow_empty:
+                raise ConfigurationError(
+                    "--all-tenants found no tenants in the configured backend; "
+                    "pass --allow-empty if that's expected"
+                )
             return
 
         if not dry_run and all_tenants_mode and not yes:
@@ -140,12 +153,26 @@ async def migrate_command(
         )
 
         if dry_run:
-            changes = await manager.dry_run_all(ids)
+            preview = await manager.dry_run_batch(ids)
             if json_output:
-                print(json.dumps({"dry_run": True, "changes": changes}))
+                print(
+                    json.dumps(
+                        {
+                            "dry_run": True,
+                            "changes": preview.would_change,
+                            "failed": {tid: str(err) for tid, err in preview.failed.items()},
+                        }
+                    )
+                )
             else:
-                for tenant_id, would_change in changes.items():
+                for tenant_id, would_change in preview.would_change.items():
                     print(f"{tenant_id}: {'would migrate' if would_change else 'no change'}")
+                for tenant_id, error in preview.failed.items():
+                    print(f"{tenant_id}: could not check ({error})")
+            if preview.failed:
+                raise ExternalServiceError(
+                    f"{len(preview.failed)} of {len(ids)} tenant(s) could not be checked"
+                )
             return
 
         result = await manager.migrate_all(ids)

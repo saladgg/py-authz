@@ -1,6 +1,7 @@
 import argparse
 import functools
 import logging
+import os
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
@@ -64,6 +65,7 @@ Environment variables (used as fallbacks — see "Config precedence" below):
   FGA_STORE_ID        OpenFGA store ID                 (sync)
   FGA_API_URL         OpenFGA API base URL              (sync, migrate)
   FGA_MODEL_ID        OpenFGA authorization model ID    (sync)
+  TENANT_STORE_BACKEND  postgres | redis | memory        (migrate --backend)
   TENANT_STORE_CONN   Postgres DSN / Redis URL          (migrate --backend postgres|redis)
 """
 
@@ -76,11 +78,11 @@ Examples:
   py-authz sync --module myapp.authz.models --api-url http://localhost:8082 --store-id $STORE_ID
 
   # Roll the current model out to every known tenant, previewing first
-  py-authz migrate --module myapp.authz.models --all-tenants --dry-run
-  py-authz migrate --module myapp.authz.models --all-tenants --yes
+  py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --dry-run
+  py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --yes
 
   # Migrate just one tenant, with a machine-readable summary for CI
-  py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json
+  py-authz migrate --backend postgres --tenant acme-corp --api-url http://localhost:8082 --json
 
 {_ENV_VARS}
 Config precedence: an explicit CLI flag always wins over its matching env
@@ -198,10 +200,12 @@ def main():
         "tenant-store backend.",
         epilog=(
             "Examples:\n"
-            "  py-authz migrate --module myapp.authz.models --all-tenants --dry-run\n"
-            "  py-authz migrate --module myapp.authz.models --all-tenants --yes\n"
-            "  py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json\n\n"
-            + _ENV_VARS
+            "  py-authz migrate --backend postgres --module myapp.authz.models \\\n"
+            "      --all-tenants --dry-run\n"
+            "  py-authz migrate --backend postgres --module myapp.authz.models \\\n"
+            "      --all-tenants --yes\n"
+            "  py-authz migrate --backend postgres --tenant acme-corp \\\n"
+            "      --api-url http://localhost:8082 --json\n\n" + _ENV_VARS
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -213,12 +217,18 @@ def main():
     migrate_parser.add_argument(
         "--backend",
         choices=["memory", "postgres", "redis"],
-        default="memory",
+        default=None,
         help=(
             "Where tenant->store mappings and model versions are persisted "
-            "(default: memory, for local testing only — a fresh in-memory "
-            "store has no tenants to find)"
+            "(env: TENANT_STORE_BACKEND). Required: there is no default, since "
+            "the in-memory backend starts empty and would 'migrate' nothing "
+            "while exiting 0 (DX3-8). `memory` is for local testing only."
         ),
+    )
+    migrate_parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Exit 0 when --all-tenants finds no tenants (default: exit non-zero)",
     )
     migrate_parser.add_argument(
         "--conn",
@@ -306,13 +316,22 @@ def main():
         elif args.command == "migrate":
             if not args.all_tenants and not args.tenant_ids:
                 parser.error("migrate requires --all-tenants or at least one --tenant")
+            backend = args.backend or os.environ.get("TENANT_STORE_BACKEND")
+            if not backend:
+                parser.error(
+                    "migrate requires --backend (or TENANT_STORE_BACKEND): postgres, redis, "
+                    "or memory (local testing only)"
+                )
+            if backend not in ("memory", "postgres", "redis"):
+                parser.error(f"invalid backend {backend!r}: expected postgres, redis or memory")
             if args.module:
                 load_module(args.module)
             anyio.run(
                 functools.partial(
                     migrate_command,
                     api_url=args.api_url,
-                    backend=args.backend,
+                    backend=backend,
+                    allow_empty=args.allow_empty,
                     conn=args.conn,
                     tenant_ids=args.tenant_ids,
                     dry_run=args.dry_run,

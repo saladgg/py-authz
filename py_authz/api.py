@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from collections import OrderedDict
 
 from py_authz.clients.openfga import OpenFGAClient
@@ -65,7 +66,7 @@ class Authz:
         self,
         action: str,
         user: Identity,
-        resource: Resource,
+        resource: "Resource | ResourceModel",
         *,
         context: dict | None = None,
         contextual_tuples: list[ContextualTuple] | None = None,
@@ -81,8 +82,11 @@ class Authz:
             user (Identity):
                 The subject performing the action.
 
-            resource (Resource):
-                The target resource.
+            resource (Resource | ResourceModel):
+                The target resource. A `ResourceModel` instance (e.g.
+                `Document(id="roadmap")`) is normalized to a `Resource`
+                (ARCH3-5 — it used to crash with an `AttributeError`,
+                which isn't an `AuthzError`).
 
             context (Optional[dict]):
                 ABAC context forwarded to OpenFGA conditions (e.g., current
@@ -109,7 +113,7 @@ class Authz:
         request = AuthzRequest(
             identity=user,
             action=action,
-            resource=resource,
+            resource=_to_resource(resource),
             context=context,
             contextual_tuples=tuple(contextual_tuples) if contextual_tuples else None,
         )
@@ -193,7 +197,7 @@ class Authz:
         self,
         action: str,
         user: Identity,
-        resource: Resource,
+        resource: "Resource | ResourceModel",
         *,
         context: dict | None = None,
         contextual_tuples: list[ContextualTuple] | None = None,
@@ -491,16 +495,28 @@ class Authz:
         request = AuthzRequest(identity=identity, action=relation, resource=_to_resource(resource))
         await self._engine.invalidate(request)
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, flush_audit_timeout: float | None = 5.0) -> None:
         """
-        Release the underlying `OpenFGAClient`'s HTTP connection pool.
+        Flush in-flight audit writes, then release the underlying
+        `OpenFGAClient`'s HTTP connection pool.
 
         A standalone `Authz` constructed directly (not via
         `MultiTenantAuthz`) owns exactly one `OpenFGAClient` for its whole
         lifetime, so this is usually only worth calling on shutdown of a
         long-running process. `MultiTenantAuthz.aclose()` calls this on
         every cached tenant's `Authz` instance.
+
+        Args:
+            flush_audit_timeout: seconds to wait for background audit
+                writes still in flight (REL3-8) — previously none were
+                awaited, so a shutdown right after a grant could drop the
+                audit row carrying its `reason`/`actor`. `None` waits
+                without bound; `0` skips the flush.
         """
+        if flush_audit_timeout != 0:
+            # Best effort — never block shutdown indefinitely.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._engine.flush_audit_logs(), timeout=flush_audit_timeout)
         fga_client = self._engine.fga_client
         aclose = getattr(fga_client, "aclose", None)
         if aclose is not None:
@@ -598,6 +614,30 @@ class MultiTenantAuthz:
         # here so shutdown doesn't race ahead of them.
         if self._eviction_tasks:
             await asyncio.gather(*self._eviction_tasks, return_exceptions=True)
+
+    async def evict(self, tenant_id: str) -> bool:
+        """
+        Drop `tenant_id`'s cached `Authz` (closing its connection pool)
+        so the next `for_tenant()` re-resolves it from scratch (REL3-4).
+
+        Call after deprovisioning or re-provisioning a tenant: the cached
+        instance is bound to the tenant's *old* OpenFGA store id, and
+        before this existed nothing removed it — every request for a
+        deprovisioned-then-recreated tenant kept hitting the deleted store
+        (OpenFGA 404 → 503) until a restart or LRU eviction, independently
+        on every replica. Only affects this process's cache; other
+        replicas must evict too (the control plane does so per request
+        path that changes a tenant's store).
+
+        Returns:
+            bool: whether an entry was cached.
+        """
+        async with self._resolution_lock:
+            authz = self._cache.pop(tenant_id, None)
+        if authz is None:
+            return False
+        await authz.aclose()
+        return True
 
     async def for_tenant(self, tenant_id: str):
         if tenant_id in self._cache:

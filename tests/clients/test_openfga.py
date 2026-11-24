@@ -36,6 +36,9 @@ class MockResponse:
 
 
 class SuccessClient:
+    async def request(self, method, path, json=None, **_kwargs):
+        return await self.post(path, json=json)
+
     async def post(self, *args, **kwargs):
         return MockResponse({"allowed": True})
 
@@ -115,6 +118,9 @@ def test_for_tenant_accepts_injected_http_client():
 
 
 class TimeoutClient:
+    async def request(self, method, path, json=None, **_kwargs):
+        return await self.post(path, json=json)
+
     async def post(self, *args, **kwargs):
         raise httpx.TimeoutException("Timeout")
 
@@ -139,6 +145,9 @@ async def test_check_timeout_raises():
 
 
 class ConnectionErrorClient:
+    async def request(self, method, path, json=None, **_kwargs):
+        return await self.post(path, json=json)
+
     async def post(self, *args, **kwargs):
         raise httpx.ConnectError("Connection failed")
 
@@ -163,6 +172,9 @@ async def test_check_connection_error():
 
 
 class ErrorResponseClient:
+    async def request(self, method, path, json=None, **_kwargs):
+        return await self.post(path, json=json)
+
     async def post(self, *args, **kwargs):
         return MockResponse(status_code=500)
 
@@ -192,6 +204,10 @@ class FlakyClient:
 
     def __init__(self):
         self.calls = 0
+
+    async def request(self, method, path, json=None, **_kwargs):
+
+        return await self.post(path, json=json)
 
     async def post(self, *args, **kwargs):
         self.calls += 1
@@ -234,7 +250,7 @@ class RecordingClient:
         self.calls: list[tuple[str, str, dict | None]] = []
         self.aclose_called = False
 
-    async def request(self, method, path, json=None):
+    async def request(self, method, path, json=None, **_kwargs):
         self.calls.append((method, path, json))
         return MockResponse(self._response_data, status_code=self._status_code)
 
@@ -278,7 +294,7 @@ async def test_get_latest_model_returns_first_model():
     model = await client.get_latest_model()
 
     assert model == {"authorization_model_id": "newest"}
-    assert http.calls == [("GET", "/stores/s1/authorization-models", None)]
+    assert http.calls == [("GET", "/stores/s1/authorization-models?page_size=1", None)]
 
 
 @pytest.mark.asyncio
@@ -360,33 +376,141 @@ async def test_request_maps_connect_error_to_service_unavailable():
 
 
 class FlakyRequestClient:
-    """Fails once, then succeeds — mirrors `FlakyClient` for `check()`."""
+    """Fails once with `error`, then succeeds."""
 
-    def __init__(self):
+    def __init__(self, error=None, data=None):
         self.calls = 0
+        self.error = error or httpx.ReadTimeout("Temporary failure")
+        self.data = data or {"id": "store-abc"}
 
     async def request(self, *args, **kwargs):
         self.calls += 1
         if self.calls == 1:
-            raise httpx.TimeoutException("Temporary failure")
-        return MockResponse({"id": "store-abc"})
+            raise self.error
+        return MockResponse(self.data)
 
 
 @pytest.mark.asyncio
-async def test_request_retries_and_succeeds():
-    flaky = FlakyRequestClient()
+async def test_request_retries_a_read_call_after_a_read_timeout():
+    flaky = FlakyRequestClient(data={"authorization_models": [{"id": "m1"}]})
     client = OpenFGAClient(
-        api_url="http://fake",
-        store_id=None,
-        model_id=None,
-        http_client=flaky,
-        max_retries=1,
+        api_url="http://fake", store_id="s", model_id=None, http_client=flaky, max_retries=1
     )
 
-    store_id = await client.create_store(name="t")
+    model = await client.get_latest_model()
 
-    assert store_id == "store-abc"
+    assert model == {"id": "m1"}
     assert flaky.calls == 2  # retried once
+
+
+@pytest.mark.asyncio
+async def test_create_store_is_not_retried_after_a_read_timeout():
+    """REL3-6: the server may already have created the store — a retry
+    would make a second, orphaned one."""
+    flaky = FlakyRequestClient()
+    client = OpenFGAClient(
+        api_url="http://fake", store_id=None, model_id=None, http_client=flaky, max_retries=2
+    )
+
+    with pytest.raises(ServiceTimeout):
+        await client.create_store(name="t")
+    assert flaky.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_create_store_is_retried_when_the_request_never_reached_the_server():
+    flaky = FlakyRequestClient(error=httpx.ConnectError("refused"))
+    client = OpenFGAClient(
+        api_url="http://fake", store_id=None, model_id=None, http_client=flaky, max_retries=1
+    )
+
+    assert await client.create_store(name="t") == "store-abc"
+    assert flaky.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_writes_are_not_retried_after_a_read_timeout():
+    flaky = FlakyRequestClient(data={})
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s",
+        model_id=None,
+        http_client=flaky,
+        max_retries=2,
+        idempotent_writes=False,
+    )
+
+    with pytest.raises(ServiceTimeout):
+        await client.write_tuples([{"user": "user:1", "relation": "viewer", "object": "doc:1"}])
+    assert flaky.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotent_writes_are_retried_after_a_read_timeout():
+    flaky = FlakyRequestClient(data={})
+    client = OpenFGAClient(
+        api_url="http://fake", store_id="s", model_id=None, http_client=flaky, max_retries=1
+    )
+
+    await client.write_tuples([{"user": "user:1", "relation": "viewer", "object": "doc:1"}])
+    assert flaky.calls == 2
+
+
+class StatusSequenceClient:
+    def __init__(self, statuses, data=None):
+        self.statuses = list(statuses)
+        self.data = data or {}
+        self.calls = 0
+
+    async def request(self, *args, **kwargs):
+        self.calls += 1
+        status = self.statuses.pop(0) if self.statuses else 200
+        return MockResponse(self.data, status_code=status)
+
+
+@pytest.mark.asyncio
+async def test_transient_statuses_are_retried_for_idempotent_calls():
+    """REL3-17: 429/503 used to fail immediately."""
+    http = StatusSequenceClient([429, 503], data={"allowed": True})
+    client = OpenFGAClient(
+        api_url="http://fake", store_id="s", model_id=None, http_client=http, max_retries=2
+    )
+
+    assert await client.check("user:1", "viewer", "doc:1") is True
+    assert http.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_a_4xx_is_an_upstream_rejection_not_an_outage():
+    """ARCH3-7: OpenFGA saying "your request is invalid" used to be an
+    ExternalServiceError (a 503), retried pointlessly and failed open."""
+    from py_authz.core.exceptions import InvalidAuthzRequest, UpstreamRequestRejected
+
+    http = StatusSequenceClient([400], data={"code": "validation_error", "message": "bad type"})
+    client = OpenFGAClient(
+        api_url="http://fake", store_id="s", model_id=None, http_client=http, max_retries=2
+    )
+
+    with pytest.raises(UpstreamRequestRejected) as info:
+        await client.check("user:1", "viewer", "doc:1")
+
+    assert isinstance(info.value, InvalidAuthzRequest)
+    assert not isinstance(info.value, ExternalServiceError)
+    assert info.value.status_code == 400
+    assert info.value.detail == "bad type"
+    assert http.calls == 1  # never retried
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_already_deleted_store_succeeds():
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s",
+        model_id=None,
+        http_client=StatusSequenceClient([404]),
+    )
+
+    await client.delete_store("gone")  # no exception
 
 
 class UnexpectedErrorRequestClient:
@@ -434,7 +558,7 @@ class DeleteRecordingClient:
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
 
-    async def request(self, method, path, json=None):
+    async def request(self, method, path, json=None, **_kwargs):
         self.calls.append((method, path))
         return NoContentResponse()
 

@@ -1,5 +1,5 @@
 from py_authz.cache.base import BaseCache
-from py_authz.utils.deps import require_redis
+from py_authz.utils.deps import REDIS_CLIENT_DEFAULTS, require_redis
 
 redis = require_redis()
 
@@ -49,7 +49,9 @@ class RedisCache(BaseCache):
                 monkeypatch the private `_client` attribute after
                 construction.
         """
-        self._client = client if client is not None else redis.from_url(url)
+        self._client = (
+            client if client is not None else redis.from_url(url, **REDIS_CLIENT_DEFAULTS)
+        )
         self._prefix = prefix
 
     def _key(self, key: str) -> str:
@@ -107,10 +109,7 @@ class RedisCache(BaseCache):
         WARNING:
             This scans and deletes keys—can be expensive in large datasets.
         """
-        pattern = f"{self._prefix}*"
-
-        async for key in self._client.scan_iter(match=pattern):
-            await self._client.delete(key)
+        await self._delete_matching(f"{_glob_escape(self._prefix)}*")
 
     async def close(self) -> None:
         """
@@ -139,9 +138,10 @@ class RedisCache(BaseCache):
         those also containing `fragment` (e.g. a tenant's `cache_namespace`
         or an `AuthzRequest.identity_prefix(...)` result).
         """
-        pattern = f"{self._prefix}*{fragment}*" if fragment else f"{self._prefix}*"
+        prefix = _glob_escape(self._prefix)
+        pattern = f"{prefix}*{_glob_escape(fragment)}*" if fragment else f"{prefix}*"
         count = 0
-        async for _ in self._client.scan_iter(match=pattern):
+        async for _ in self._client.scan_iter(match=pattern, count=_SCAN_COUNT):
             count += 1
         return count
 
@@ -171,9 +171,56 @@ class RedisCache(BaseCache):
         if not fragment:
             raise ValueError("fragment must be non-empty — use clear() to delete everything")
 
-        pattern = f"{self._prefix}*{fragment}*"
+        # Escaped (SEC3-6): `fragment` comes from an API caller, and an
+        # unescaped `*`/`?`/`[` would widen the match — `"*"` used to wipe
+        # the entire cache.
+        return await self._delete_matching(
+            f"{_glob_escape(self._prefix)}*{_glob_escape(fragment)}*"
+        )
+
+    async def delete_by_prefix(self, key_prefix: str) -> int:
+        """
+        Bulk-delete every key whose (unprefixed) cache key *starts with*
+        `key_prefix` — e.g. `f"{store_id}:"` for every decision cached by
+        one tenant's engine (`AuthzEngine(cache_namespace=store_id)`), or
+        `f"{store_id}:{AuthzRequest.identity_prefix(user)}"` for one user
+        within one tenant. Prefer this over `delete_by_fragment()`
+        whenever the scope is known: a prefix can't accidentally match a
+        key where the same text happens to appear later on (SEC3-6).
+
+        Returns:
+            int: number of keys deleted.
+        """
+        if not key_prefix:
+            raise ValueError("key_prefix must be non-empty — use clear() to delete everything")
+        return await self._delete_matching(f"{_glob_escape(self._prefix + key_prefix)}*")
+
+    async def _delete_matching(self, pattern: str) -> int:
+        """`SCAN` with a large `COUNT` and `UNLINK` in batches (REL3-18) —
+        previously one `DELETE` round trip per key on a `COUNT 10` scan,
+        i.e. ~100k SCANs and up to 1M round trips for 1M keys."""
         deleted = 0
-        async for key in self._client.scan_iter(match=pattern):
-            await self._client.delete(key)
-            deleted += 1
+        batch: list = []
+        async for key in self._client.scan_iter(match=pattern, count=_SCAN_COUNT):
+            batch.append(key)
+            if len(batch) >= _DELETE_BATCH:
+                deleted += await self._client.unlink(*batch)
+                batch.clear()
+        if batch:
+            deleted += await self._client.unlink(*batch)
         return deleted
+
+
+_SCAN_COUNT = 1000
+_DELETE_BATCH = 500
+
+
+def _glob_escape(value: str) -> str:
+    """Escape Redis `MATCH` glob metacharacters so `value` matches only
+    itself."""
+    out = []
+    for ch in value:
+        if ch in "\\*?[]":
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)

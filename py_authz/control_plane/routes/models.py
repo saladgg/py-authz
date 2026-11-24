@@ -1,6 +1,6 @@
 """Model view/sync/dry-run, version history, rollback (CP-6)."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.control_plane.auth import (
@@ -11,7 +11,7 @@ from py_authz.control_plane.auth import (
 )
 from py_authz.control_plane.deps import get_model_version_store, get_settings, get_tenant_store
 from py_authz.control_plane.model_versions import ModelVersionStore
-from py_authz.control_plane.schemas import ModelRollbackRequest
+from py_authz.control_plane.schemas import MAX_PAGE_SIZE, ModelRollbackRequest
 from py_authz.control_plane.scopes import Scope
 from py_authz.control_plane.settings import ControlPlaneSettings
 from py_authz.core.exceptions import InvalidAuthzRequest, TenantNotFoundError
@@ -105,8 +105,8 @@ async def sync_model(
 @router.get("/tenants/{tenant_id}/models/history", dependencies=[Depends(_require_tenant_auditor)])
 async def model_history(
     tenant_id: str,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
     model_version_store: ModelVersionStore = Depends(get_model_version_store),
 ) -> dict:
     versions = await model_version_store.history(tenant_id, limit=limit, offset=offset)

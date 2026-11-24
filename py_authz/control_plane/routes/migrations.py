@@ -5,7 +5,7 @@ returns a job immediately; the actual work runs via `JobRunner` (CP-7)
 using the existing `MigrationManager` unchanged.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from py_authz.control_plane.auth import CurrentPrincipal, require_system_role
 from py_authz.control_plane.deps import (
@@ -16,7 +16,7 @@ from py_authz.control_plane.deps import (
     get_tenant_store,
 )
 from py_authz.control_plane.jobs import Job, JobRunner, JobStore
-from py_authz.control_plane.schemas import MigrationRequest
+from py_authz.control_plane.schemas import MAX_PAGE_SIZE, MigrationRequest
 from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import InvalidAuthzRequest
 from py_authz.core.migrations_manager import MigrationManager
@@ -64,15 +64,21 @@ async def start_migration(
 ) -> dict:
     """
     `dry_run=true` runs synchronously (a dry run is read-only and bounded
-    by the same concurrency `MigrationManager.dry_run_all()` already
+    by the same concurrency `MigrationManager.dry_run_batch()` already
     uses — no need for the job machinery just to preview). Otherwise
     returns a `pending` job immediately; poll `GET /migrations/{job_id}`.
     """
     tenant_ids = await _resolve_tenant_ids(body, tenant_store)
 
     if body.dry_run:
-        results = await migration_manager.dry_run_all(tenant_ids, concurrency=concurrency)
-        return {"dry_run": True, "would_change": results}
+        batch = await migration_manager.dry_run_batch(tenant_ids, concurrency=concurrency)
+        return {
+            "dry_run": True,
+            "would_change": batch.would_change,
+            # REL3-9: per-tenant failures are reported, not a raw 500. The
+            # error *type* only — exception text can carry internal URLs.
+            "failed": {tid: type(exc).__name__ for tid, exc in batch.failed.items()},
+        }
 
     async def work() -> dict:
         batch = await migration_manager.migrate_all(tenant_ids, concurrency=concurrency)
@@ -100,7 +106,9 @@ async def get_migration_job(job_id: str, job_store: JobStore = Depends(get_job_s
 
 @router.get("", dependencies=[Depends(_require_auditor)])
 async def list_migration_jobs(
-    limit: int = 50, offset: int = 0, job_store: JobStore = Depends(get_job_store)
+    limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
+    job_store: JobStore = Depends(get_job_store),
 ) -> dict:
     jobs = await job_store.list(kind="migrate", limit=limit, offset=offset)
     return {"items": [_job_dict(j) for j in jobs]}

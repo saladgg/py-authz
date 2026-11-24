@@ -49,14 +49,15 @@ SCHEMA_FILES = (
 async def apply_schema(dsn: str) -> None:
     """
     Create every table these storage classes need against `dsn`, if it
-    doesn't already exist. Opens and closes its own connection pool —
-    doesn't require an existing `PostgresTenantStore`/etc. instance.
+    doesn't already exist. Opens and closes its own single connection
+    (REL3-14 — it used to open a default 10-connection pool to run DDL on
+    one of them) — doesn't require an existing `PostgresTenantStore`/etc.
+    instance.
     """
-    pool = await asyncpg.create_pool(dsn)
+    conn = await asyncpg.connect(dsn)
     try:
-        async with pool.acquire() as conn:
-            for filename in SCHEMA_FILES:
-                sql = (_SQL_DIR / filename).read_text()
-                await conn.execute(sql)
+        for filename in SCHEMA_FILES:
+            sql = (_SQL_DIR / filename).read_text()
+            await conn.execute(sql)
     finally:
-        await pool.close()
+        await conn.close()

@@ -14,6 +14,12 @@ make format-check    # ruff format --check
 make lint            # ruff check + mypy
 make check-dist      # build the wheel, assert extras / py.typed / SQL files ship
 make test            # pytest with coverage
+make check           # everything CI's lint-test job runs, in one shot
+make test-py         # unit suite on Python 3.14 too (CI's matrix), PY=... to override
+make test-integration  # start the docker-compose stack, run tests/live
+make test-live       # rerun tests/live against an already-running stack
+make panel-check     # everything CI's control-panel job runs
+make check-all       # check + panel-check
 ```
 
 Pre-commit hooks run `ruff` (lint, with `--fix`), `ruff format`,

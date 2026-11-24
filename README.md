@@ -28,6 +28,7 @@
 - [Quickstart](#quickstart)
 - [Declarative Modeling](#declarative-modeling)
 - [FastAPI Integration](#fastapi-integration)
+- [Synchronous Code (Django, Flask, scripts)](#synchronous-code-django-flask-scripts)
 - [Keycloak JWT Validation](#keycloak-jwt-validation)
 - [Caching](#caching)
 - [Multi-Tenancy](#multi-tenancy)
@@ -289,6 +290,23 @@ The bundled `request_context_middleware` attaches an `X-Request-ID` header and p
 
 ---
 
+## Synchronous Code (Django, Flask, scripts)
+
+`Authz` is async. From synchronous code, wrap it in `SyncAuthz`, which runs every call on one long-lived background event loop. Don't use `asyncio.run(authz.can(...))` per call: the HTTP client's pooled connections are bound to the loop that created them, so a fresh loop per call breaks every other request.
+
+```python
+from py_authz import SyncAuthz
+
+authz = SyncAuthz(Authz(engine))  # create once, at startup
+if authz.can("viewer", user, Document(id="roadmap")):
+    ...
+authz.close()  # at shutdown (or use `with SyncAuthz(...)`)
+```
+
+Every `Authz` coroutine method is available as a blocking method of the same name, and the object is safe to share across threads. The `@authorize` decorator's sync path uses the same mechanism automatically.
+
+---
+
 ## Keycloak JWT Validation
 
 `KeycloakJWTValidator` fetches JWKS once and validates RS256 tokens into a normalized `Identity`.
@@ -416,11 +434,11 @@ py-authz generate-model --module myapp.authz.models --output model.json
 py-authz sync --module myapp.authz.models --api-url http://localhost:8082 --store-id $STORE_ID
 
 # Roll the current model out across every known tenant (preview first, then confirm)
-py-authz migrate --module myapp.authz.models --all-tenants --dry-run
-py-authz migrate --module myapp.authz.models --all-tenants --yes
+py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --dry-run
+py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --yes
 
 # Or just one tenant, with a machine-readable JSON summary for CI
-py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json
+py-authz migrate --backend postgres --tenant acme-corp --api-url http://localhost:8082 --json
 ```
 
 Every command accepts its config either as a CLI flag or via an environment

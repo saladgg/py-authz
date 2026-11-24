@@ -203,10 +203,13 @@ def test_invalid_oidc_token_is_401(client):
 # -------------------------------------------------------------------
 
 
-def test_valid_operator_token_records_login_and_runs_bootstrap(client, app):
-    client.get("/me", headers=_bearer("good-token"))
+def test_authenticating_runs_bootstrap_but_no_longer_records_a_login(client, app):
+    """SEC3-8/REL3-19: `record_login` ran on every request, before any role
+    check (a Postgres upsert per API call, and any realm user's token
+    created an operators row). It now happens only in `GET /auth/me`."""
+    client.get("/system", headers=_bearer("good-token"))
 
-    assert app.state.operator_store.logins == ["alice"]
+    assert app.state.operator_store.logins == []
     assert len(app.state.bootstrapper.calls) == 1
     assert app.state.bootstrapper.calls[0].id == "user:alice"
 
@@ -587,3 +590,69 @@ async def test_scopes_are_enforced_on_a_real_production_route(app, rbac_authz):
 
     assert client.get("/api/v1/metrics", headers=_bearer(no_scope)).status_code == 403
     assert client.get("/api/v1/metrics", headers=_bearer(scoped)).status_code == 200
+
+
+def test_unknown_or_malformed_account_ids_are_not_tracked_by_the_rate_limiter(client, app):
+    """SEC3-9: 20,000 unauthenticated requests with made-up ids used to
+    leave 20,000 tracked keys behind."""
+    limiter = app.state.service_account_rate_limiter
+
+    for i in range(50):
+        assert client.get("/system", headers=_bearer(f"pasa_sa_nope{i}.x")).status_code == 401
+        assert client.get("/system", headers=_bearer(f"pasa_garbage{i}")).status_code == 401
+
+    assert limiter._failure_times == {}
+
+
+def test_in_memory_rate_limiter_sweeps_expired_keys(monkeypatch):
+    import asyncio
+
+    from py_authz.control_plane import rate_limit
+
+    limiter = rate_limit.InMemoryRateLimiter(rate_limit.RateLimitPolicy(lockout_seconds=1))
+    monkeypatch.setattr(rate_limit.InMemoryRateLimiter, "MAX_TRACKED_KEYS", 5)
+    clock = [1000.0]
+    monkeypatch.setattr(rate_limit.time, "monotonic", lambda: clock[0])
+
+    async def run():
+        for i in range(5):
+            await limiter.record_failure(f"sa_{i}")
+        clock[0] += 10  # every window has expired
+        await limiter.record_failure("sa_new")
+
+    asyncio.run(run())
+
+    assert set(limiter._failure_times) == {"sa_new"}
+
+
+@pytest.mark.asyncio
+async def test_a_verified_secret_skips_argon2_until_the_hash_changes(client, app, monkeypatch):
+    """REL3-13: argon2 used to run on the event loop on every request.
+    Successful verifications are cached against the *stored hash*, so a
+    rotate/revoke invalidates the cache immediately."""
+    from py_authz.control_plane import auth as auth_module
+
+    auth_module._VERIFIED.clear()
+    calls = []
+    real_verify = auth_module.verify_secret
+
+    def counting_verify(token, secret_hash):
+        calls.append(token)
+        return real_verify(token, secret_hash)
+
+    monkeypatch.setattr(auth_module, "verify_secret", counting_verify)
+    secret = _make_service_account(app, account_id="sa_1", name="ci-bot", scopes=[])
+
+    for _ in range(3):
+        assert client.get("/me", headers=_bearer(secret)).status_code == 200
+    assert len(calls) == 1
+
+    # Rotation replaces the stored hash: the old secret is re-verified
+    # (and now fails) instead of being served from the cache.
+    from py_authz.control_plane.security import generate_secret, hash_secret
+
+    app.state.service_account_store.accounts["sa_1"].secret_hash = hash_secret(
+        generate_secret("sa_1")
+    )
+    assert client.get("/me", headers=_bearer(secret)).status_code == 401
+    assert len(calls) == 2

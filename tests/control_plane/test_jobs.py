@@ -6,7 +6,16 @@ from contextlib import asynccontextmanager
 import pytest
 
 from py_authz.control_plane import jobs as jobs_module
-from py_authz.control_plane.jobs import FAILED, PENDING, RUNNING, SUCCEEDED, JobRunner, JobStore
+from py_authz.control_plane.jobs import (
+    CANCELLED,
+    FAILED,
+    PARTIAL,
+    PENDING,
+    RUNNING,
+    SUCCEEDED,
+    JobRunner,
+    JobStore,
+)
 from py_authz.core.exceptions import ConfigurationError
 
 
@@ -25,7 +34,10 @@ class FakeConnection:
         return rows
 
     async def execute(self, query, *args):
-        self.pool._apply(query, args)
+        if self.pool.fail_next_execute:
+            self.pool.fail_next_execute -= 1
+            raise ConnectionError("postgres blip")
+        return self.pool._apply(query, args)
 
 
 class FakePool:
@@ -33,6 +45,7 @@ class FakePool:
         self.rows: dict[str, dict] = {}
         self.closed = False
         self._counter = 0
+        self.fail_next_execute = 0
 
     @asynccontextmanager
     async def acquire(self, timeout=None):
@@ -58,6 +71,12 @@ class FakePool:
             }
             self.rows[job_id] = row
             return row
+        if "WHERE status IN" in query:
+            status, result_json, *from_statuses = args
+            hit = [r for r in self.rows.values() if r["status"] in from_statuses]
+            for row in hit:
+                row["status"], row["result_json"], row["finished_at"] = status, result_json, "now"
+            return f"UPDATE {len(hit)}"
         if "SET status" in query and "started_at" in query:
             job_id, status = args
             row = self.rows[job_id]
@@ -265,3 +284,92 @@ async def test_runner_aclose_with_no_jobs_submitted_is_a_noop(patched_asyncpg):
     runner = JobRunner(store)
 
     await runner.aclose()  # must not raise even though nothing was ever submitted
+
+
+# ---------------------------------------------------------------------------
+# REL3-3: no job may be left pending/running forever
+# ---------------------------------------------------------------------------
+
+
+async def _store():
+    store = JobStore(dsn="postgres://fake")
+    await store.connect()
+    return store
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mark_running_still_ends_in_a_terminal_status(patched_asyncpg):
+    """Used to leave the row `pending` forever (mark_running ran outside
+    the try)."""
+    store = await _store()
+    runner = JobRunner(store)
+
+    async def work():
+        return {"ok": True}
+
+    job = await store.create(kind="sync", params={}, initiated_by=None)
+    patched_asyncpg.fail_next_execute = 1  # mark_running's UPDATE fails
+    await runner._run(job.id, work)
+
+    assert (await store.get(job.id)).status == FAILED
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_a_long_job_after_the_timeout_and_records_it(patched_asyncpg):
+    """`aclose()` used to wait forever, and a cancellation skipped the
+    status write (leaving `running`)."""
+    store = await _store()
+    runner = JobRunner(store, shutdown_timeout=0.05)
+    started = asyncio.Event()
+
+    async def forever():
+        started.set()
+        await asyncio.sleep(3600)
+
+    job = await runner.submit(kind="migrate", params={}, initiated_by=None, work=forever)
+    await started.wait()
+    await runner.aclose()
+
+    finished = await store.get(job.id)
+    assert finished.status == CANCELLED
+    assert finished.result["error_type"] == "Cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"succeeded": {"a": "m"}, "failed": {}}, SUCCEEDED),
+        ({"succeeded": {"a": "m"}, "failed": {"b": "boom"}}, PARTIAL),
+        ({"succeeded": {}, "failed": {"b": "boom"}}, FAILED),
+    ],
+)
+async def test_batch_results_with_failures_are_not_reported_succeeded(
+    patched_asyncpg, result, expected
+):
+    store = await _store()
+    runner = JobRunner(store)
+
+    async def work():
+        return result
+
+    job = await runner.submit(kind="migrate", params={}, initiated_by=None, work=work)
+    await runner.aclose()
+
+    assert (await store.get(job.id)).status == expected
+
+
+@pytest.mark.asyncio
+async def test_startup_reaper_fails_jobs_orphaned_by_a_previous_process(patched_asyncpg):
+    store = await _store()
+    pending = await store.create(kind="sync", params={}, initiated_by=None)
+    running = await store.create(kind="migrate", params={}, initiated_by=None)
+    await store.mark_running(running.id)
+    done = await store.create(kind="sync", params={}, initiated_by=None)
+    await store.mark_finished(done.id, status=SUCCEEDED, result={})
+
+    assert await store.fail_interrupted() == 2
+
+    assert (await store.get(pending.id)).status == FAILED
+    assert (await store.get(running.id)).result["error_type"] == "Interrupted"
+    assert (await store.get(done.id)).status == SUCCEEDED

@@ -362,3 +362,62 @@ async def test_for_tenant_defaults_leave_engine_capabilities_unconfigured():
     assert authz._engine.audit_logger is None
     assert authz._engine.metrics is None
     assert authz._engine.raise_on_denied is False
+
+
+@pytest.mark.asyncio
+async def test_evict_closes_the_cached_client_and_forces_re_resolution():
+    """Regression test for REL3-4: after a tenant is deprovisioned and
+    recreated under a new store, the cached instance must not keep
+    routing to the deleted store."""
+    resolver = FakeResolver({"t1": "store-old"})
+    mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=resolver)
+    old = await mt.for_tenant("t1")
+
+    resolver.mapping["t1"] = "store-new"
+    assert await mt.evict("t1") is True
+
+    assert FakeFGAClient.instances[0].closed
+    new = await mt.for_tenant("t1")
+    assert new is not old
+    assert new._engine.fga_client.store_id == "store-new"
+
+
+@pytest.mark.asyncio
+async def test_evict_of_an_uncached_tenant_is_a_noop():
+    mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=FakeResolver({}))
+    assert await mt.evict("never-seen") is False
+
+
+@pytest.mark.asyncio
+async def test_authz_aclose_flushes_in_flight_audit_writes_first():
+    """REL3-8: shutdown used to close everything without awaiting
+    background audit writes, dropping e.g. a just-made grant's audit row
+    (with its reason/actor)."""
+    from py_authz.api import Authz
+    from py_authz.core.enforcement import AuthzEngine
+    from py_authz.core.types import Identity, Resource
+
+    landed = []
+    gate = asyncio.Event()
+
+    class SlowAuditLogger:
+        async def log(self, event):
+            await gate.wait()
+            landed.append(event)
+
+    class AllowClient:
+        store_id = "s"
+
+        async def check(self, **kwargs):
+            return True
+
+        async def aclose(self):
+            pass
+
+    authz = Authz(AuthzEngine(fga_client=AllowClient(), audit_logger=SlowAuditLogger()))
+    await authz.can("viewer", Identity(id="user:1"), Resource(type="doc", id="1"))
+    asyncio.get_running_loop().call_later(0.01, gate.set)
+
+    await authz.aclose()
+
+    assert len(landed) == 1

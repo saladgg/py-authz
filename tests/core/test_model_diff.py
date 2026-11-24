@@ -233,3 +233,58 @@ def test_summarize_diff_no_change_reports_unchanged():
     summary = ModelDiffer.summarize_diff(model, model)
 
     assert summary == "schema unchanged at the type/relation-name level"
+
+
+# ---------------------------------------------------------------------------
+# ARCH3-3: wildcards and conditions are schema
+# ---------------------------------------------------------------------------
+
+_BASE = {
+    "schema_version": "1.1",
+    "type_definitions": [
+        {"type": "user"},
+        {
+            "type": "doc",
+            "relations": {"viewer": {"this": {}}},
+            "metadata": {
+                "relations": {"viewer": {"directly_related_user_types": [{"type": "user"}]}}
+            },
+        },
+    ],
+}
+
+
+def _with_viewer_subjects(subjects):
+    import copy
+
+    model = copy.deepcopy(_BASE)
+    model["type_definitions"][1]["metadata"]["relations"]["viewer"][
+        "directly_related_user_types"
+    ] = subjects
+    return model
+
+
+def test_a_public_wildcard_is_a_schema_change():
+    public = _with_viewer_subjects([{"type": "user"}, {"type": "user", "wildcard": {}}])
+
+    assert not ModelDiffer.is_equal(_BASE, public)
+
+
+def test_a_condition_is_a_schema_change():
+    conditional = {
+        **_BASE,
+        "conditions": {
+            "in_hours": {
+                "name": "in_hours",
+                "expression": "hour >= 9 && hour < 17",
+                "parameters": {"hour": {"type_name": "TYPE_NAME_INT"}},
+            }
+        },
+    }
+
+    assert not ModelDiffer.is_equal(_BASE, conditional)
+
+
+def test_absent_and_empty_conditions_compare_equal():
+    """A server echoes `conditions: {}` for a model that has none."""
+    assert ModelDiffer.is_equal(_BASE, {**_BASE, "conditions": {}})

@@ -83,8 +83,6 @@ def get_metrics(request: Request):
     return request.app.state.metrics
 
 
-def get_product_fga_client(request: Request):
-    """A plain `OpenFGAClient` (no `store_id`) against the *product*
-    OpenFGA instance — used only for `GET /health`'s reachability probe,
-    which doesn't need any particular store."""
-    return request.app.state.product_fga_client
+def get_readiness_checks(request: Request) -> dict:
+    """Name -> zero-argument async callable, built by `_wire()` (REL3-7)."""
+    return request.app.state.readiness_checks

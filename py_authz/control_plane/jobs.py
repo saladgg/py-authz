@@ -35,6 +35,11 @@ _NOT_CONNECTED = (
 #: them (barring the `pending` -> `failed` shortcut a submission-time
 #: validation error can take).
 PENDING, RUNNING, SUCCEEDED, FAILED = "pending", "running", "succeeded", "failed"
+#: Terminal statuses added by REL3-3: `partial` — a batch job where some
+#: items failed and some succeeded (previously reported `succeeded`);
+#: `cancelled` — the job was still running when the process shut down.
+PARTIAL, CANCELLED = "partial", "cancelled"
+TERMINAL_STATUSES = frozenset({SUCCEEDED, FAILED, PARTIAL, CANCELLED})
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,40 @@ class JobStore:
                 json.dumps(result),
             )
 
+    async def fail_interrupted(self) -> int:
+        """
+        Mark every `pending`/`running` job as `failed` with an
+        "interrupted" error, and return how many there were (REL3-3).
+
+        Call once at startup: in the single-process deployment this job
+        system assumes (see the module docstring), any job still
+        non-terminal when a process starts was orphaned by the previous
+        process — a deploy, crash or OOM mid-migration. Without this the
+        row stayed `running` forever and the panel polled it forever.
+        **Don't** call this with several control-plane replicas sharing a
+        database: it would fail jobs another live replica is running.
+        """
+        pool = self._require_pool()
+        async with pool.acquire(timeout=self.command_timeout) as conn:
+            result = await conn.execute(
+                """
+                UPDATE control_plane_jobs
+                SET status = $1, result_json = $2, finished_at = now()
+                WHERE status IN ($3, $4)
+                """,
+                FAILED,
+                json.dumps(
+                    {
+                        "error": "interrupted: the control plane restarted while this job ran",
+                        "error_type": "Interrupted",
+                    }
+                ),
+                PENDING,
+                RUNNING,
+            )
+        # asyncpg returns e.g. "UPDATE 3"
+        return int(result.split()[-1]) if result else 0
+
     async def get(self, job_id: str) -> Job | None:
         pool = self._require_pool()
         async with pool.acquire(timeout=self.command_timeout) as conn:
@@ -185,8 +224,9 @@ class JobRunner:
     it across every job-submitting route.
     """
 
-    def __init__(self, store: JobStore):
+    def __init__(self, store: JobStore, *, shutdown_timeout: float = 30.0):
         self.store = store
+        self.shutdown_timeout = shutdown_timeout
         self._tasks: set[asyncio.Task] = set()
 
     async def submit(
@@ -201,6 +241,11 @@ class JobRunner:
         Create the `pending` row and start `work()` in the background.
         Returns immediately with the (still-`pending`) `Job` — poll
         `JobStore.get(job.id)` for progress.
+
+        `work()`'s result decides the final status: a result carrying a
+        non-empty `failed` mapping (a batch job's per-item failures, e.g.
+        `MigrationManager.migrate_all()`'s) ends `partial` if anything
+        also `succeeded`, else `failed` — not `succeeded` (REL3-3).
         """
         job = await self.store.create(kind=kind, params=params, initiated_by=initiated_by)
         task = asyncio.create_task(self._run(job.id, work))
@@ -208,21 +253,58 @@ class JobRunner:
         task.add_done_callback(self._tasks.discard)
         return job
 
+    @staticmethod
+    def _status_for(result: dict[str, Any]) -> str:
+        failed = result.get("failed")
+        if isinstance(failed, dict) and failed:
+            return PARTIAL if result.get("succeeded") else FAILED
+        return SUCCEEDED
+
     async def _run(self, job_id: str, work: Callable[[], Awaitable[dict[str, Any]]]) -> None:
-        await self.store.mark_running(job_id)
+        """
+        Every exit path writes a terminal status (REL3-3). Previously
+        `mark_running` ran outside the `try` (a failure there left the row
+        `pending` forever), only `Exception` was caught (a cancellation at
+        shutdown skipped the status write, leaving it `running` forever),
+        and a failing `mark_finished` in the error branch left it
+        `running` too. The final write is shielded so a cancellation
+        can't interrupt it halfway.
+        """
+        status, result = FAILED, {"error": "job did not complete", "error_type": "Unknown"}
         try:
+            await self.store.mark_running(job_id)
             result = await work()
-            await self.store.mark_finished(job_id, status=SUCCEEDED, result=result)
+            status = self._status_for(result)
+        except asyncio.CancelledError:
+            status = CANCELLED
+            result = {"error": "cancelled: the control plane shut down", "error_type": "Cancelled"}
+            raise
         except Exception as exc:
             logger.exception(json.dumps({"event": "control_plane_job_failed", "job_id": job_id}))
-            await self.store.mark_finished(
-                job_id,
-                status=FAILED,
-                result={"error": str(exc), "error_type": type(exc).__name__},
-            )
+            status = FAILED
+            result = {"error": str(exc), "error_type": type(exc).__name__}
+        finally:
+            try:
+                await asyncio.shield(self.store.mark_finished(job_id, status=status, result=result))
+            except Exception:
+                # Nothing more to do in-process; the startup reaper
+                # (`JobStore.fail_interrupted`) will settle the row.
+                logger.exception(
+                    json.dumps({"event": "control_plane_job_status_write_failed", "job_id": job_id})
+                )
 
     async def aclose(self) -> None:
-        """Await every in-flight job's background task — call on process
-        shutdown so it doesn't race ahead of jobs still updating their row."""
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        """
+        On shutdown: give in-flight jobs up to `shutdown_timeout` seconds,
+        then cancel the rest (each records `cancelled`). Previously this
+        waited without bound, so one long migration could hang shutdown
+        until the orchestrator SIGKILLed the process.
+        """
+        if not self._tasks:
+            return
+        tasks = list(self._tasks)
+        _done, pending = await asyncio.wait(tasks, timeout=self.shutdown_timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)

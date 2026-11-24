@@ -9,6 +9,7 @@ picked rather than left at whatever the library's own default happens to
 be, and a rotated/revoked secret's hash is never reused or recoverable.
 """
 
+import re
 import secrets
 
 from py_authz.utils.deps import require_argon2
@@ -60,18 +61,37 @@ def generate_secret(account_id: str) -> str:
     return f"{SECRET_PREFIX}{account_id}.{secrets.token_urlsafe(_SECRET_ENTROPY_BYTES)}"
 
 
+#: Shape of a well-formed account id (`_new_id()` produces
+#: `sa_<32 hex>`; the bound is looser to accept any id this store ever
+#: issued). Anything else is rejected before touching the store or the
+#: rate limiter (SEC3-9).
+ACCOUNT_ID_PATTERN = re.compile(r"^sa_[A-Za-z0-9_-]{1,64}$")
+
+
+class MalformedServiceAccountToken(ValueError):
+    """The bearer has the service-account prefix but not its shape."""
+
+
 def parse_account_id(secret: str) -> str | None:
     """
     Extract the `account_id` embedded by `generate_secret()`, or `None`
     if `secret` isn't shaped like a service-account secret at all (e.g.
     it's an operator's OIDC bearer token — the two are distinguished by
     this prefix before either verification path is attempted).
+
+    Raises:
+        MalformedServiceAccountToken: the token carries the prefix but its
+            account id isn't well-formed (SEC3-9). Previously any string
+            was accepted, looked up in Postgres, and recorded as a failed
+            attempt under an attacker-chosen, unbounded key.
     """
     if not secret.startswith(SECRET_PREFIX):
         return None
     rest = secret[len(SECRET_PREFIX) :]
-    account_id, sep, _random_part = rest.partition(".")
-    return account_id if sep and account_id else None
+    account_id, sep, random_part = rest.partition(".")
+    if not (sep and random_part and ACCOUNT_ID_PATTERN.fullmatch(account_id)):
+        raise MalformedServiceAccountToken("malformed service-account token")
+    return account_id
 
 
 def hash_secret(secret: str) -> str:
