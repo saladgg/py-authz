@@ -79,7 +79,10 @@ check-dist: ## Build the wheel and assert every install extra is in its metadata
 
 .PHONY: audit
 audit: ## Scan dependencies for known vulnerabilities (see SEC2-8)
-	uv run pip-audit
+	# --skip-editable: the project itself is installed editable and is not on
+	# PyPI yet, so pip-audit can only report it as "could not be audited" —
+	# noise that buried the real findings when this step failed.
+	uv run pip-audit --skip-editable
 
 .PHONY: check
 check: format-check lint audit test ## Run format-check + lint + audit + test — mirrors CI's lint-test job in one shot

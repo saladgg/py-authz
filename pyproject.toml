@@ -76,7 +76,10 @@ keycloak = [
   # major is exactly the kind of unreviewed change this library
   # shouldn't let a downstream resolver pick up silently. Dependabot
   # (SEC2-8) will still flag a new 2.x release quickly.
-  "pyjwt[crypto]>=2.13.0,<3"
+  # Floor raised to 2.15 (PYSEC-2026-4140..4152/4183, GHSA-pxh4-856f-4h89
+  # — fixed in 2.14/2.15): this library is the identity boundary, so a
+  # consumer resolving the vulnerable range must be impossible.
+  "pyjwt[crypto]>=2.15.0,<3"
 ]
 
 all = [
