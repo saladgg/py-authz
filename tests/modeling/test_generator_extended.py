@@ -47,15 +47,39 @@ def test_metadata_lists_subject_types():
     assert {"type": "organization"} in owner_subjects
 
 
-def test_build_relation_returns_empty_when_no_parts():
-    gen = OpenFGAModelGenerator()
+def test_build_relation_rejects_a_relation_nothing_can_hold():
+    """An explicit `subjects=[]` with no other rewrite would emit an empty
+    rewrite OpenFGA rejects — fail at generation time instead."""
+    import pytest
 
-    rel = Relation("empty", subjects=[])
-    rel.subjects = []  # ensure direct part is skipped
+    from py_authz.core.exceptions import ModelValidationError
 
-    result = gen._build_relation(rel)
+    with pytest.raises(ModelValidationError, match="nothing can ever hold it"):
+        OpenFGAModelGenerator()._build_relation(Relation("empty", subjects=[]))
 
-    assert result == {}
+
+def test_explicit_empty_subjects_is_honoured():
+    """ARCH3-4: `subjects=[]` used to be silently replaced with
+    `["user"]` (a truthiness check), making every computed relation
+    directly grantable."""
+    assert Relation("r", subjects=[], union=["owner"]).subjects == []
+
+
+def test_intersection_relation_is_not_directly_grantable_by_default():
+    """ARCH3-4: a direct tuple on an intersection relation would bypass
+    its AND entirely, so an intersection defaults to no direct subjects
+    (same as `from_parent`)."""
+    rel = Relation("access", intersection=["editor", "verified"])
+
+    assert rel.subjects == []
+    assert OpenFGAModelGenerator()._build_relation(rel) == {
+        "intersection": {
+            "child": [
+                {"computedUserset": {"relation": "editor"}},
+                {"computedUserset": {"relation": "verified"}},
+            ]
+        }
+    }
 
 
 class Folder(ResourceModel):
@@ -127,10 +151,10 @@ def test_parent_relation_metadata_restricts_subject_type():
 
 
 def test_intersection_emits_intersection_child_alongside_this():
-    """`subjects` default (["user"]) plus `intersection=[...]` composes:
+    """Explicit `subjects=["user"]` plus `intersection=[...]` composes:
     this OR (editor AND verified) — intersection nests as just another
     `union` child, matching OpenFGA's own grammar."""
-    rel = Relation("access", intersection=["editor", "verified"])
+    rel = Relation("access", subjects=["user"], intersection=["editor", "verified"])
     gen = OpenFGAModelGenerator()
 
     result = gen._build_relation(rel)
@@ -150,9 +174,6 @@ def test_intersection_emits_intersection_child_alongside_this():
 
 def test_intersection_alone_with_no_subjects_emits_bare_intersection():
     rel = Relation("access", intersection=["editor", "verified"], subjects=[])
-    rel.subjects = []  # `subjects=[]` alone falls back to ["user"] (see
-    # `test_build_relation_returns_empty_when_no_parts` above) — set
-    # directly to actually exercise the "no direct assignment" case.
     gen = OpenFGAModelGenerator()
 
     result = gen._build_relation(rel)
@@ -204,7 +225,6 @@ def test_exclude_wraps_full_union_when_multiple_base_parts():
 
 def test_exclude_with_no_base_raises():
     rel = Relation("viewer", exclude="banned", subjects=[])
-    rel.subjects = []  # see note in test_intersection_alone_... above
     gen = OpenFGAModelGenerator()
 
     with pytest.raises(ModelValidationError, match="no base relation-def"):

@@ -6,7 +6,8 @@ IDs match that file.
 
 > **Status (2026-11-24):** Tier 0 shipped (REL3-1, REL3-11, REL3-20,
 > REL3-21), plus REL3-22 (CI hygiene) pulled forward since it touched
-> the same workflow. Remaining tiers open.
+> the same workflow. Second batch (2026-11-24): REL3-2, REL3-4, REL3-5 and
+> REL3-18. Remaining items open.
 
 ---
 
@@ -41,17 +42,37 @@ IDs match that file.
 
 ## Tier 1 — Data-integrity and hang risks
 
-- [ ] **REL3-2 — Lock tenant provisioning in the control plane**
+- [x] **REL3-2 — Lock tenant provisioning in the control plane**
   (`RedisLockManager` or a per-tenant `asyncio.Lock`, plus an
   `ON CONFLICT` insert).
+  Shipped:
+  - `_wire()` passes `RedisLockManager` when Redis is configured,
+    otherwise the new `core.locks.InProcessLockManager`, which drops
+    idle keys so it doesn't grow without bound. `TenantManager`'s
+    existing re-check under the lock does the rest.
+  - Tests: the unlocked case reproduces two stores; with the in-process
+    lock, 5 concurrent provisions create one store; and a wiring check.
+  - The `ON CONFLICT` insert was not added: the lock plus re-check
+    already makes the loser reuse the winner's store.
 - [ ] **REL3-6 — Retry non-idempotent calls only on connect errors.**
   Ship with `11`'s ARCH3-10.
-- [ ] **REL3-5 — Default Redis socket/connect timeouts and a health-check
+- [x] **REL3-5 — Default Redis socket/connect timeouts and a health-check
   interval.**
+  `utils.deps.REDIS_CLIENT_DEFAULTS` (0.5 s socket, 0.5 s connect, 30 s
+  health check) applies to every client built from a URL (`RedisCache`,
+  `RedisTenantStore`/`RedisModelRegistry`, and the control plane). The
+  control plane now opens **one** shared Redis client for the cache, the
+  rate limiter and the provisioning lock, and closes it once.
 - [ ] **REL3-3 — Job runner: `BaseException`-safe status writes, startup
   reaper, bounded `aclose()`, partial/failed outcome, poller give-up.**
-- [ ] **REL3-4 — `MultiTenantAuthz.evict()` on deprovision/provision,
+- [x] **REL3-4 — `MultiTenantAuthz.evict()` on deprovision/provision,
   plus a store-scoped cache purge.** Ship with `10`'s SEC3-6/SEC3-7.
+  `MultiTenantAuthz.evict(tenant_id)` pops the entry under the
+  resolution lock, closes it, and returns whether one was cached. The
+  create, provision and deprovision routes evict, and deprovision also
+  purges `f"{store_id}:"` from the cache. The library test shows
+  re-resolution onto the new store; the route tests cover evict and
+  purge.
 
 ## Tier 2 — Probes, shutdown, capacity
 
@@ -77,7 +98,10 @@ IDs match that file.
 - [ ] **REL3-16 — Batched audit writer plus a dropped-events metric.**
 - [ ] **REL3-17 — list-objects timeout and truncation; `page_size=1`;
   429/503 retry with jitter.**
-- [ ] **REL3-18 — `SCAN COUNT 1000` plus pipelined `UNLINK`.**
+- [x] **REL3-18 — `SCAN COUNT 1000` plus pipelined `UNLINK`.**
+  `RedisCache._delete_matching()` scans with `COUNT 1000` and UNLINKs
+  in batches of 500. Used by `clear()`, `delete_by_fragment()` and
+  `delete_by_prefix()`; `count_keys()` uses the large count too. Tested.
 - [ ] **REL3-19 — Throttled operator upsert; concurrent or batched role
   checks; RBAC cache.**
 

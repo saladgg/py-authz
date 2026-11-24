@@ -333,12 +333,6 @@ def test_cycle_reachable_only_through_intersection_branch_is_detected():
         b = Relation("b", union=["a"])
         c = Relation("c")
 
-    # `subjects=[]` alone falls back to `["user"]` (see
-    # `test_build_relation_returns_empty_when_no_parts` in
-    # tests/modeling/test_generator_extended.py) — set directly so `a`'s
-    # rewrite is a *bare* `intersection`, not `this OR intersection`.
-    CycleIntersectionDoc.a.subjects = []
-
     relations = _generated_relations(CycleIntersectionDoc)["cycle_intersection_doc"]
 
     # Confirm real generator output actually took the intersection shape

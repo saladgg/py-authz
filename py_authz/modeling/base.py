@@ -100,11 +100,13 @@ class Relation:
                 workspace". Each pair becomes its own `tupleToUserset`
                 child.
 
-                When `from_parent` is set and `subjects` is *not*
-                explicitly passed, `subjects` defaults to `[]` rather
-                than `["user"]`: a relation declared as "inherited from a
-                parent" is, by default, not *also* directly assignable —
-                pass `subjects=["user"]` explicitly if you want both.
+                When `from_parent` (or `intersection`) is set and
+                `subjects` is *not* explicitly passed, `subjects` defaults
+                to `[]` rather than `["user"]`: a relation declared as
+                "inherited from a parent" (or "the AND of these") is, by
+                default, not *also* directly assignable — pass
+                `subjects=["user"]` explicitly if you want both. An
+                explicit `subjects=[]` always means "no direct subjects".
 
             intersection (Optional[list[str]]):
                 Other relation names on the *same object* that must
@@ -143,10 +145,21 @@ class Relation:
         self.exclude = exclude
         self.from_parent = from_parent
 
-        if subjects is None and from_parent is not None:
-            self.subjects: list[str] = []
+        # `subjects` defaults to `["user"]` only when nothing else defines
+        # the relation. An explicit `subjects=[]` means "no direct
+        # subjects" and is honoured (ARCH3-4) — it used to be silently
+        # replaced with `["user"]` by a truthiness check, which made every
+        # computed relation directly grantable: one direct tuple bypassed
+        # an `intersection`'s AND (or an `exclude`'s BUT-NOT) entirely.
+        # Likewise, a relation defined by `from_parent` or `intersection`
+        # isn't *also* directly grantable unless `subjects` is passed.
+        self.subjects: list[str]
+        if subjects is not None:
+            self.subjects = list(subjects)
+        elif from_parent is not None or intersection:
+            self.subjects = []
         else:
-            self.subjects = subjects or ["user"]
+            self.subjects = ["user"]
 
         self.resource_cls: type[ResourceModel] | None = None
 

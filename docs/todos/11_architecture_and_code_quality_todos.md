@@ -6,6 +6,7 @@ IDs match that file.
 
 > **Status (2026-11-24):** Tier 0 shipped (ARCH3-1, ARCH3-14), plus
 > ARCH3-9 from Tier 2, pulled forward to back `10`'s service-account fix.
+> Tier 1 (ARCH3-2/3/4/5) shipped in the second batch (2026-11-24).
 > Remaining tiers open.
 
 ---
@@ -35,17 +36,56 @@ IDs match that file.
   `cli` extra is kept as an empty alias so existing install commands
   still work.
 
-## Tier 1 — Authorization-semantics correctness
+## Tier 1 — Authorization-semantics correctness ✅
 
-- [ ] **ARCH3-4 — `subjects=[]` means "no direct subjects".** Emit no
+- [x] **ARCH3-4 — `subjects=[]` means "no direct subjects".** Emit no
   `this` branch. Changelog note: intersection/exclude relations stop
   being directly grantable when declared that way.
-- [ ] **ARCH3-3 — Diff compares `conditions` and preserves `wildcard`.**
+  Shipped:
+  - An explicit `subjects=[]` is honoured.
+  - A relation defined by `intersection` (like `from_parent` before it)
+    now defaults to no direct subjects. **Behaviour change:** add
+    `subjects=["user"]` to keep an intersection relation directly
+    grantable. `exclude` keeps the `["user"]` default, since it's
+    normally layered on a directly-granted base.
+  - A relation nothing can hold (`subjects=[]` and no rewrite) now
+    raises `ModelValidationError` at generation time, instead of
+    emitting an empty rewrite OpenFGA rejects.
+  - Two tests that worked around the old bug by assigning `.subjects`
+    directly were cleaned up.
+- [x] **ARCH3-3 — Diff compares `conditions` and preserves `wildcard`.**
   Strip only the known server defaults. Regression tests for both cases.
-- [ ] **ARCH3-2 — `SyncAuthz` with one long-lived background loop;
+  Shipped: `conditions` is added to `SCHEMA_FIELDS`, and `wildcard` to
+  `_PRESERVE_EVEN_IF_EMPTY`. The generic zero-value stripping was kept
+  rather than swapped for an allow-list: it's applied symmetrically to
+  both sides, so only semantically meaningful empties needed
+  protecting. Absent and empty `conditions` still compare equal.
+  Verified against a real OpenFGA: a wildcard model round-trips as
+  equal, and a second sync reuses the model instead of re-uploading. All
+  36 live tests still pass.
+- [x] **ARCH3-2 — `SyncAuthz` with one long-lived background loop;
   decorator delegates to it.** Regression test with the real
   `OpenFGAClient` and `httpx.MockTransport`, called ≥ 3 times.
-- [ ] **ARCH3-5 — `enforce()` normalizes `ResourceModel` instances.**
+  Shipped:
+  - New `py_authz/sync.py` with `SyncAuthz`: one event loop on a daemon
+    thread and `run_coroutine_threadsafe`. Thread-safe, with a per-call
+    timeout, and closes idempotently (also as a context manager). It
+    exposes typed `can`/`require` plus every other `Authz` coroutine
+    method via `__getattr__`. Exported from `py_authz`.
+  - The decorator keeps the anyio-worker fast path. Otherwise it uses
+    one shared `SyncAuthz` per wrapped `Authz` (weakly keyed), and also
+    accepts a `SyncAuthz` directly.
+  - The regression test uses a real local HTTP server rather than
+    `MockTransport`, because only a real socket reproduces the
+    loop-bound pool failure. Five sequential calls fail on the old code
+    and pass now. Also added: a 40-call, 8-thread concurrency test and a
+    closed-state test.
+  - README gained a "Synchronous Code" section.
+- [x] **ARCH3-5 — `enforce()` normalizes `ResourceModel` instances.**
+  `Authz.enforce()` passes `resource` through `_to_resource()`, so
+  `require()` and string-action `can()` get it too; the signatures now
+  say `Resource | ResourceModel`. Regression test under strict mode
+  covers all three.
 
 ## Tier 2 — Error model and upstream semantics
 

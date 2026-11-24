@@ -6,8 +6,11 @@ from typing import Any
 #: "zero value" — most importantly `"this": {}`, the marker for "this
 #: relation supports direct assignment", and `"child": []`, a (degenerate
 #: but structurally distinct) empty union/intersection/difference operand
-#: list.
-_PRESERVE_EVEN_IF_EMPTY = frozenset({"this", "child"})
+#: list. `"wildcard": {}` (ARCH3-3) is the marker that turns a
+#: `directly_related_user_types` entry from `user` into `user:*` (public
+#: access) — stripping it made a model granting public access compare
+#: equal to one that doesn't, so `ModelSync` skipped uploading it.
+_PRESERVE_EVEN_IF_EMPTY = frozenset({"this", "child", "wildcard"})
 
 
 def _strip_server_defaults(value: Any) -> Any:
@@ -93,8 +96,12 @@ class ModelDiffer:
 
     #: Fields that define the schema itself. Anything else on a model dict
     #: (e.g. OpenFGA's server-assigned ``id``) is metadata, not schema, and
-    #: must be ignored for equality purposes.
-    SCHEMA_FIELDS = ("schema_version", "type_definitions")
+    #: must be ignored for equality purposes. ``conditions`` (ABAC
+    #: condition expressions) is schema (ARCH3-3): leaving it out made a
+    #: model whose only change was a condition compare "unchanged", so it
+    #: was never uploaded. An absent and an empty ``conditions`` still
+    #: compare equal (both normalize away).
+    SCHEMA_FIELDS = ("schema_version", "type_definitions", "conditions")
 
     @classmethod
     def normalize(cls, model: dict[str, Any]) -> str:

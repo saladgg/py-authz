@@ -9,7 +9,8 @@ that file.
 > Tier 1, which touched the same role-assignment function. SEC3-3 is now
 > **reproduced** against a real OpenFGA, not just inferred: the pre-fix
 > model shape returns a 400 on both write and check for a `service:`
-> principal. Remaining tiers open.
+> principal. Tier 1 is now fully shipped too: SEC3-6 and SEC3-7 landed
+> in the second batch (2026-11-24). Remaining tiers open.
 
 ---
 
@@ -90,7 +91,7 @@ that file.
   `test_operator_and_service_account_flows_end_to_end` runs against the
   full compose stack and passes, along with the 35 existing live tests.
 
-## Tier 1 — Operator RBAC and cache correctness
+## Tier 1 — Operator RBAC and cache correctness ✅
 
 - [x] **SEC3-4 — Grants/revokes only strictly below the caller's own
   role.** `tenant#owner` changes require `tenant#owner` or
@@ -106,12 +107,31 @@ that file.
   admin role, and can't revoke an owner; a tenant owner can manage
   owners. The existing accepts-tenant-admin test still passes, because it
   grants `auditor`, which is below admin.
-- [ ] **SEC3-6 — Resolve tenant → store id in `/cache/invalidate`;
+- [x] **SEC3-6 — Resolve tenant → store id in `/cache/invalidate`;
   prefix match; escape glob metacharacters.** Replace the two tests that
   encode the bug. Also needed by `12`'s REL3-4.
-- [ ] **SEC3-7 — Deprovision deletes `tenant:<id>` RBAC tuples** (and
+  Shipped:
+  - The route resolves the store id via `tenant_store` (404 on an
+    unknown tenant). Tenant and tenant+user modes use the new
+    `RedisCache.delete_by_prefix()`; user-across-all-tenants stays a
+    fragment match.
+  - Every caller-supplied fragment or prefix is glob-escaped, so
+    `tenant_id="*"` is now just an unknown tenant.
+  - The route tests were rewritten to run the **real** `RedisCache` over
+    a new shared `tests/fake_redis.py`, which implements Redis's own
+    glob semantics including escapes. Two tenants' keys are written by
+    real `AuthzEngine`s namespaced by store id, and the tests assert
+    which keys survive, not which strings were passed. Four of the new
+    tests fail on the old route.
+- [x] **SEC3-7 — Deprovision deletes `tenant:<id>` RBAC tuples** (and
   optionally `model_versions` rows). Test: re-provision the same id → the
   old admin has no access.
+  Shipped: the deprovision route calls the new
+  `role_grants.delete_object_role_grants()` (paginated read, then revoke
+  each, audited with the acting principal) and reports `roles_removed`.
+  The test covers user and service-account grants removed while another
+  tenant's grants are untouched. `model_versions` rows are deliberately
+  kept as history.
 
 ## Tier 2 — Token acceptance and the RBAC store's own exposure
 

@@ -65,7 +65,7 @@ class Authz:
         self,
         action: str,
         user: Identity,
-        resource: Resource,
+        resource: "Resource | ResourceModel",
         *,
         context: dict | None = None,
         contextual_tuples: list[ContextualTuple] | None = None,
@@ -81,8 +81,11 @@ class Authz:
             user (Identity):
                 The subject performing the action.
 
-            resource (Resource):
-                The target resource.
+            resource (Resource | ResourceModel):
+                The target resource. A `ResourceModel` instance (e.g.
+                `Document(id="roadmap")`) is normalized to a `Resource`
+                (ARCH3-5 — it used to crash with an `AttributeError`,
+                which isn't an `AuthzError`).
 
             context (Optional[dict]):
                 ABAC context forwarded to OpenFGA conditions (e.g., current
@@ -109,7 +112,7 @@ class Authz:
         request = AuthzRequest(
             identity=user,
             action=action,
-            resource=resource,
+            resource=_to_resource(resource),
             context=context,
             contextual_tuples=tuple(contextual_tuples) if contextual_tuples else None,
         )
@@ -193,7 +196,7 @@ class Authz:
         self,
         action: str,
         user: Identity,
-        resource: Resource,
+        resource: "Resource | ResourceModel",
         *,
         context: dict | None = None,
         contextual_tuples: list[ContextualTuple] | None = None,

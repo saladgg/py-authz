@@ -28,6 +28,7 @@
 - [Quickstart](#quickstart)
 - [Declarative Modeling](#declarative-modeling)
 - [FastAPI Integration](#fastapi-integration)
+- [Synchronous Code (Django, Flask, scripts)](#synchronous-code-django-flask-scripts)
 - [Keycloak JWT Validation](#keycloak-jwt-validation)
 - [Caching](#caching)
 - [Multi-Tenancy](#multi-tenancy)
@@ -286,6 +287,23 @@ async def read_document(
 ```
 
 The bundled `request_context_middleware` attaches an `X-Request-ID` header and propagates it to authz logs via a context var.
+
+---
+
+## Synchronous Code (Django, Flask, scripts)
+
+`Authz` is async. From synchronous code, wrap it in `SyncAuthz`, which runs every call on one long-lived background event loop. Don't use `asyncio.run(authz.can(...))` per call: the HTTP client's pooled connections are bound to the loop that created them, so a fresh loop per call breaks every other request.
+
+```python
+from py_authz import SyncAuthz
+
+authz = SyncAuthz(Authz(engine))  # create once, at startup
+if authz.can("viewer", user, Document(id="roadmap")):
+    ...
+authz.close()  # at shutdown (or use `with SyncAuthz(...)`)
+```
+
+Every `Authz` coroutine method is available as a blocking method of the same name, and the object is safe to share across threads. The `@authorize` decorator's sync path uses the same mechanism automatically.
 
 ---
 
