@@ -10,6 +10,7 @@ by the CLI/adapters, just constructed from `ControlPlaneSettings` instead
 of CLI flags.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -57,6 +58,8 @@ from py_authz.utils.deps import redis_from_url
 #: Every connect()-lifecycle store built in `_wire(...)`, keyed by the
 #: `app.state` attribute name — used by both `_wire`/`_teardown` so the
 #: two can't drift out of sync on which stores actually need closing.
+logger = logging.getLogger("py_authz.control_plane")
+
 _STORE_STATE_NAMES = (
     "tenant_store",
     "model_registry",
@@ -101,6 +104,11 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings) -> None:
     await audit_logger.connect()
     app.state._audit_logger = audit_logger  # closed alongside the stores above
 
+    # REL3-3: settle jobs orphaned by a previous process (single-process
+    # deployment assumed — see `JobStore.fail_interrupted`).
+    interrupted = await app.state.job_store.fail_interrupted()
+    if interrupted:
+        logger.warning("marked %d interrupted control-plane job(s) as failed", interrupted)
     app.state.job_runner = JobRunner(app.state.job_store)
 
     # One Redis client shared by the provisioning lock and the
@@ -180,10 +188,8 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings) -> None:
     )
     app.state.rbac_authz = rbac_authz
     app.state.rbac_fga_client = rbac_fga_client
-    # Health probe target (see routes/health.py) — the RBAC store is
-    # always guaranteed to exist once this function returns, unlike any
-    # one particular tenant's.
-    app.state.product_fga_client = rbac_fga_client
+
+    _wire_readiness_checks(app, settings)
 
     app.state.bootstrapper = BreakGlassBootstrapper(
         rbac_authz=rbac_authz,
@@ -198,9 +204,33 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings) -> None:
     )
 
 
+def _wire_readiness_checks(app: FastAPI, settings: ControlPlaneSettings) -> None:
+    """Dependencies `/readyz` checks (REL3-7). OpenFGA probe clients are
+    separate from the serving ones: no retries and a short timeout, so a
+    probe answers within the orchestrator's own deadline."""
+
+    def _probe_client(api_url: str) -> OpenFGAClient:
+        return OpenFGAClient(
+            api_url=api_url, store_id=None, model_id=None, timeout=1.0, max_retries=0
+        )
+
+    probe_clients = {"openfga": _probe_client(settings.fga_api_url)}
+    if settings.rbac_fga_api_url.rstrip("/") != settings.fga_api_url.rstrip("/"):
+        probe_clients["openfga_rbac"] = _probe_client(settings.rbac_fga_api_url)
+    app.state._probe_clients = list(probe_clients.values())
+
+    checks = {"postgres": app.state.tenant_store.ping}
+    checks.update({name: client.ping for name, client in probe_clients.items()})
+    if app.state._redis_client is not None:
+        checks["redis"] = app.state._redis_client.ping
+    app.state.readiness_checks = checks
+
+
 async def _teardown(app: FastAPI) -> None:
     await app.state.multi_tenant_authz.aclose()
     await app.state.rbac_fga_client.aclose()
+    for probe in getattr(app.state, "_probe_clients", []):
+        await probe.aclose()
     await app.state.job_runner.aclose()
     await app.state._audit_logger.close()
     for name in _STORE_STATE_NAMES:

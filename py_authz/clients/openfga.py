@@ -402,6 +402,13 @@ class OpenFGAClient:
             if exc.status_code != 404:
                 raise
 
+    async def ping(self) -> None:
+        """OpenFGA's own `GET /healthz` — reachability only, no store
+        needed. Raises on failure. Intended for readiness probes; build
+        the client with `max_retries=0` and a short `timeout` for that, so
+        a probe can't take several seconds of retries (REL3-7)."""
+        await self._request("GET", "/healthz", idempotent=True)
+
     async def write_authorization_model(self, model: dict) -> dict:
         """Upload a new authorization model version (`POST
         /authorization-models`). Not retried after a read timeout — a

@@ -41,7 +41,8 @@ def test_every_other_route_is_versioned_under_api_v1():
     app = create_app(_settings())
     schema = app.openapi()
 
-    other_paths = [p for p in schema["paths"] if p != "/health"]
+    probes = {"/health", "/livez", "/readyz"}
+    other_paths = [p for p in schema["paths"] if p not in probes]
     assert other_paths, "expected at least one non-health route"
     assert all(p.startswith("/api/v1") for p in other_paths)
 
@@ -52,6 +53,8 @@ def test_expected_route_surface_matches_the_architecture_doc():
 
     expected = {
         "/health",
+        "/livez",
+        "/readyz",
         "/api/v1/metrics",
         "/api/v1/auth/me",
         "/api/v1/service-accounts",

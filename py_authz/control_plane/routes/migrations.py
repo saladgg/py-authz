@@ -64,15 +64,21 @@ async def start_migration(
 ) -> dict:
     """
     `dry_run=true` runs synchronously (a dry run is read-only and bounded
-    by the same concurrency `MigrationManager.dry_run_all()` already
+    by the same concurrency `MigrationManager.dry_run_batch()` already
     uses — no need for the job machinery just to preview). Otherwise
     returns a `pending` job immediately; poll `GET /migrations/{job_id}`.
     """
     tenant_ids = await _resolve_tenant_ids(body, tenant_store)
 
     if body.dry_run:
-        results = await migration_manager.dry_run_all(tenant_ids, concurrency=concurrency)
-        return {"dry_run": True, "would_change": results}
+        batch = await migration_manager.dry_run_batch(tenant_ids, concurrency=concurrency)
+        return {
+            "dry_run": True,
+            "would_change": batch.would_change,
+            # REL3-9: per-tenant failures are reported, not a raw 500. The
+            # error *type* only — exception text can carry internal URLs.
+            "failed": {tid: type(exc).__name__ for tid, exc in batch.failed.items()},
+        }
 
     async def work() -> dict:
         batch = await migration_manager.migrate_all(tenant_ids, concurrency=concurrency)

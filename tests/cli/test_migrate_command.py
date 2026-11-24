@@ -28,9 +28,18 @@ class FakeMigrationManager:
         failed = {tid: self.failures[tid] for tid in tenant_ids if tid in self.failures}
         return MigrationBatchResult(succeeded=succeeded, failed=failed)
 
-    async def dry_run_all(self, tenant_ids):
+    async def dry_run_batch(self, tenant_ids):
+        from py_authz.core.migrations_manager import DryRunBatchResult
+
         self.dry_run_all_calls.append(list(tenant_ids))
-        return {tid: self.dry_run_results.get(tid, True) for tid in tenant_ids}
+        return DryRunBatchResult(
+            would_change={
+                tid: self.dry_run_results.get(tid, True)
+                for tid in tenant_ids
+                if tid not in self.failures
+            },
+            failed={tid: self.failures[tid] for tid in tenant_ids if tid in self.failures},
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -314,7 +323,7 @@ async def test_migrate_command_json_output_dry_run(capsys, monkeypatch):
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload == {"dry_run": True, "changes": {"t1": True}}
+    assert payload == {"dry_run": True, "changes": {"t1": True}, "failed": {}}
 
 
 @pytest.mark.asyncio

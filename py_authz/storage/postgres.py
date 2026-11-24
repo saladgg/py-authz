@@ -69,6 +69,14 @@ class PostgresTenantStore:
             await self._pool.close()
             self._pool = None
 
+    async def ping(self) -> None:
+        """`SELECT 1` — a cheap readiness check (REL3-7). Raises if the
+        pool isn't connected or Postgres doesn't answer."""
+        if self._pool is None:
+            raise RuntimeError("PostgresTenantStore is not connected")
+        async with self._pool.acquire(timeout=self.command_timeout) as conn:
+            await conn.fetchval("SELECT 1")
+
     async def __aenter__(self) -> "PostgresTenantStore":
         await self.connect()
         return self

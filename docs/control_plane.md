@@ -206,8 +206,10 @@ curl -s "http://localhost:8000/api/v1/models/sync?tenant_id=acme-corp" \
 # Audit trail:
 curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/v1/audit-logs?limit=10"
 
-# Health (unauthenticated, unversioned):
-curl -s http://localhost:8000/health
+# Probes (unauthenticated, unversioned):
+curl -s http://localhost:8000/livez    # process alive — use for liveness
+curl -s http://localhost:8000/readyz   # Postgres + Redis + OpenFGA; 503 if any is down
+# /health is an alias of /readyz (it now returns 503, not 200, when degraded).
 ```
 
 Every route, its required role, and its request/response shape is in

@@ -296,3 +296,25 @@ async def test_dry_run_all_reports_every_tenant():
 
     assert set(results) == {"t1", "t2"}
     assert all(isinstance(v, bool) for v in results.values())
+
+
+@pytest.mark.asyncio
+async def test_dry_run_batch_isolates_a_failing_tenant():
+    """REL3-9: one missing tenant used to abort the whole preview with an
+    ExceptionGroup, discarding every other tenant's result."""
+    from py_authz.core.exceptions import TenantNotFoundError
+
+    tenants = InMemoryTenantStore()
+    await tenants.set("t1", "store-1")
+    mgr = MigrationManager(
+        api_url="http://fake", tenant_store=tenants, model_registry=InMemoryModelRegistry()
+    )
+
+    batch = await mgr.dry_run_batch(["t1", "ghost"])
+
+    assert set(batch.would_change) == {"t1"}
+    assert isinstance(batch.failed["ghost"], TenantNotFoundError)
+
+    # The legacy API raises the real error, not a bare ExceptionGroup.
+    with pytest.raises(TenantNotFoundError):
+        await mgr.dry_run_all(["t1", "ghost"])

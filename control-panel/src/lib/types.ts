@@ -84,7 +84,9 @@ export interface ModelSyncResult {
 export interface MigrationJob {
   id: string;
   kind: string;
-  status: "pending" | "running" | "succeeded" | "failed";
+  /** `partial`/`cancelled` added by REL3-3: a batch with some failed
+   * tenants, and a job interrupted by a control-plane shutdown. */
+  status: "pending" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
   params: Record<string, unknown> | null;
   result: {
     succeeded?: Record<string, string>;
