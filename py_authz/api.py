@@ -599,6 +599,30 @@ class MultiTenantAuthz:
         if self._eviction_tasks:
             await asyncio.gather(*self._eviction_tasks, return_exceptions=True)
 
+    async def evict(self, tenant_id: str) -> bool:
+        """
+        Drop `tenant_id`'s cached `Authz` (closing its connection pool)
+        so the next `for_tenant()` re-resolves it from scratch (REL3-4).
+
+        Call after deprovisioning or re-provisioning a tenant: the cached
+        instance is bound to the tenant's *old* OpenFGA store id, and
+        before this existed nothing removed it — every request for a
+        deprovisioned-then-recreated tenant kept hitting the deleted store
+        (OpenFGA 404 → 503) until a restart or LRU eviction, independently
+        on every replica. Only affects this process's cache; other
+        replicas must evict too (the control plane does so per request
+        path that changes a tenant's store).
+
+        Returns:
+            bool: whether an entry was cached.
+        """
+        async with self._resolution_lock:
+            authz = self._cache.pop(tenant_id, None)
+        if authz is None:
+            return False
+        await authz.aclose()
+        return True
+
     async def for_tenant(self, tenant_id: str):
         if tenant_id in self._cache:
             self._cache.move_to_end(tenant_id)  # mark as most-recently-used

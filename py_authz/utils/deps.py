@@ -59,3 +59,30 @@ def require_argon2():
         raise RuntimeError(
             "Service-account credentials require `pip install py-authz[control-plane]`"
         ) from e
+
+
+#: Defaults applied by `redis_from_url()` (REL3-5). redis-py's own default
+#: for both is `None` — block forever — so a black-holed Redis (SYNs
+#: dropped rather than refused, e.g. during a network partition) used to
+#: hang every `enforce()` on its inline `cache.get()`: the graceful
+#: cache-failure degradation only handles *raised* errors, not hangs.
+REDIS_SOCKET_TIMEOUT = 0.5
+REDIS_CONNECT_TIMEOUT = 0.5
+REDIS_HEALTH_CHECK_INTERVAL = 30
+
+
+#: Keyword arguments every Redis client this library builds from a URL is
+#: given (`redis.from_url(url, **REDIS_CLIENT_DEFAULTS)`).
+REDIS_CLIENT_DEFAULTS = {
+    "socket_timeout": REDIS_SOCKET_TIMEOUT,
+    "socket_connect_timeout": REDIS_CONNECT_TIMEOUT,
+    "health_check_interval": REDIS_HEALTH_CHECK_INTERVAL,
+}
+
+
+def redis_from_url(url: str, **overrides):
+    """`redis.asyncio.from_url()` with `REDIS_CLIENT_DEFAULTS` applied.
+    Pass keyword overrides to change any of them (or any other `from_url`
+    option)."""
+    redis = require_redis()
+    return redis.from_url(url, **{**REDIS_CLIENT_DEFAULTS, **overrides})

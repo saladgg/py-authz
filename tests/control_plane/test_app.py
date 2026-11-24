@@ -76,3 +76,17 @@ def test_expected_route_surface_matches_the_architecture_doc():
         "/api/v1/cache/invalidate",
     }
     assert set(schema["paths"]) == expected
+
+
+def test_tenant_manager_is_always_wired_with_a_provisioning_lock():
+    """REL3-2: `_wire()` used to build `TenantManager` without a lock
+    manager, so concurrent creates orphaned OpenFGA stores. Checks the
+    wiring source, since `_wire()` itself needs live services (it's
+    exercised end-to-end by tests/live/test_control_plane_live.py)."""
+    import inspect
+
+    from py_authz.control_plane import app as app_module
+
+    source = inspect.getsource(app_module._wire)
+    assert "lock_manager=lock_manager" in source
+    assert "InProcessLockManager()" in source

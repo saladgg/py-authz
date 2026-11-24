@@ -395,3 +395,57 @@ async def test_deprovision_leaves_mapping_intact_if_store_deletion_fails():
 
     # The tenant is left exactly as provisioned — safe to retry.
     assert await store.get("t1") == "store-1"
+
+
+# -------------------------------------------------------------------
+# REL3-2: concurrent provisioning of the same tenant creates one store
+# -------------------------------------------------------------------
+
+
+class SlowCreateClient(FakeOpenFGAClient):
+    created = 0
+
+    async def create_store(self, name):
+        import asyncio
+
+        SlowCreateClient.created += 1
+        store_id = f"store-{SlowCreateClient.created}"
+        await asyncio.sleep(0.01)  # force the two callers to overlap
+        return store_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_provisioning_without_a_lock_orphans_a_store(monkeypatch):
+    """The reproduced control-plane bug: no lock manager -> two stores."""
+    import asyncio
+
+    SlowCreateClient.created = 0
+    monkeypatch.setattr(tm_module, "OpenFGAClient", SlowCreateClient)
+    manager = TenantManager(api_url="http://fake", tenant_store=InMemoryTenantStore())
+
+    results = await asyncio.gather(manager.provision("acme"), manager.provision("acme"))
+
+    assert SlowCreateClient.created == 2
+    assert results[0] != results[1]
+
+
+@pytest.mark.asyncio
+async def test_in_process_lock_manager_makes_concurrent_provisioning_create_one_store(
+    monkeypatch,
+):
+    import asyncio
+
+    from py_authz.core.locks import InProcessLockManager
+
+    SlowCreateClient.created = 0
+    monkeypatch.setattr(tm_module, "OpenFGAClient", SlowCreateClient)
+    lock_manager = InProcessLockManager()
+    manager = TenantManager(
+        api_url="http://fake", tenant_store=InMemoryTenantStore(), lock_manager=lock_manager
+    )
+
+    results = await asyncio.gather(*(manager.provision("acme") for _ in range(5)))
+
+    assert SlowCreateClient.created == 1
+    assert len(set(results)) == 1
+    assert lock_manager._locks == {}  # released locks don't accumulate

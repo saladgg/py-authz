@@ -148,7 +148,7 @@ class FakeAsyncRedisClient:
 
 
 class FakeRedisModule:
-    def from_url(self, url):
+    def from_url(self, url, **kwargs):
         return FakeAsyncRedisClient()
 
 

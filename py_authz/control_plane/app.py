@@ -43,6 +43,7 @@ from py_authz.control_plane.service_accounts import ServiceAccountStore
 from py_authz.control_plane.settings import ControlPlaneSettings
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.exceptions import AuthzError
+from py_authz.core.locks import InProcessLockManager, RedisLockManager
 from py_authz.core.logging import setup_logging
 from py_authz.core.metrics import Metrics
 from py_authz.core.migrations_manager import MigrationManager
@@ -51,7 +52,7 @@ from py_authz.core.tenant_manager import TenantManager
 from py_authz.core.tenant_resolver import StoreBackedResolver
 from py_authz.storage.postgres import PostgresModelRegistry, PostgresTenantStore
 from py_authz.storage.schema import apply_schema
-from py_authz.utils.deps import require_redis
+from py_authz.utils.deps import redis_from_url
 
 #: Every connect()-lifecycle store built in `_wire(...)`, keyed by the
 #: `app.state` attribute name — used by both `_wire`/`_teardown` so the
@@ -102,8 +103,24 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings) -> None:
 
     app.state.job_runner = JobRunner(app.state.job_store)
 
+    # One Redis client shared by the provisioning lock and the
+    # service-account rate limiter (below), with bounded socket timeouts
+    # (REL3-5).
+    app.state._redis_client = redis_from_url(settings.redis_url) if settings.redis_url else None
+
+    # REL3-2: provisioning was unlocked here, so a double-clicked "Create
+    # tenant" (or two replicas) created two OpenFGA stores and orphaned
+    # one. Redis-backed when configured (coordinates across replicas),
+    # otherwise in-process.
+    lock_manager = (
+        RedisLockManager(app.state._redis_client)
+        if app.state._redis_client is not None
+        else InProcessLockManager()
+    )
     app.state.tenant_manager = TenantManager(
-        api_url=settings.fga_api_url, tenant_store=app.state.tenant_store
+        api_url=settings.fga_api_url,
+        tenant_store=app.state.tenant_store,
+        lock_manager=lock_manager,
     )
     app.state.migration_manager = MigrationManager(
         api_url=settings.fga_api_url,
@@ -111,7 +128,9 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings) -> None:
         model_registry=app.state.model_registry,
     )
 
-    app.state.redis_cache = RedisCache(settings.redis_url) if settings.redis_url else None
+    app.state.redis_cache = (
+        RedisCache(client=app.state._redis_client) if app.state._redis_client is not None else None
+    )
 
     # CP-16: service-account auth lockout. Redis-backed (shared across
     # instances) when Redis is configured, otherwise an in-process
@@ -122,14 +141,11 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings) -> None:
         max_failed_attempts=settings.service_account_rate_limit_max_attempts,
         lockout_seconds=settings.service_account_rate_limit_lockout_seconds,
     )
-    if settings.redis_url:
-        redis_module = require_redis()
-        app.state._rate_limit_redis_client = redis_module.from_url(settings.redis_url)
+    if app.state._redis_client is not None:
         app.state.service_account_rate_limiter = RedisRateLimiter(
-            app.state._rate_limit_redis_client, rate_limit_policy
+            app.state._redis_client, rate_limit_policy
         )
     else:
-        app.state._rate_limit_redis_client = None
         app.state.service_account_rate_limiter = InMemoryRateLimiter(rate_limit_policy)
 
     app.state.multi_tenant_authz = MultiTenantAuthz(
@@ -189,10 +205,10 @@ async def _teardown(app: FastAPI) -> None:
     await app.state._audit_logger.close()
     for name in _STORE_STATE_NAMES:
         await getattr(app.state, name).close()
-    if app.state.redis_cache is not None:
-        await app.state.redis_cache.close()
-    if app.state._rate_limit_redis_client is not None:
-        await app.state._rate_limit_redis_client.aclose()
+    # One shared client backs the cache, the rate limiter and the
+    # provisioning lock — close it exactly once.
+    if app.state._redis_client is not None:
+        await app.state._redis_client.aclose()
 
 
 @asynccontextmanager
