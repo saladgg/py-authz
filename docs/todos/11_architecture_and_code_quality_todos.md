@@ -6,8 +6,10 @@ IDs match that file.
 
 > **Status (2026-11-24):** Tier 0 shipped (ARCH3-1, ARCH3-14), plus
 > ARCH3-9 from Tier 2, pulled forward to back `10`'s service-account fix.
-> Tier 1 (ARCH3-2/3/4/5) shipped in the second batch (2026-11-24).
-> Remaining tiers open.
+> Tier 1 (ARCH3-2/3/4/5) shipped in the second batch (2026-11-24), along
+> with ARCH3-7, ARCH3-10 and ARCH3-15. **Still open:** ARCH3-6, ARCH3-8,
+> the Tier 3 refactors (ARCH3-11/12/13) and Tier 4 polish. ARCH3-17 is
+> partly done (public `write_authorization_model()`).
 
 ---
 
@@ -89,10 +91,21 @@ IDs match that file.
 
 ## Tier 2 — Error model and upstream semantics
 
-- [ ] **ARCH3-7 — Distinguish upstream 4xx (→ 400/409) from 5xx and
+- [x] **ARCH3-7 — Distinguish upstream 4xx (→ 400/409) from 5xx and
   transport errors (→ 503).**
-- [ ] **ARCH3-10 — Idempotent writes (`on_duplicate`/`on_missing`
+  Shipped: new `UpstreamRequestRejected(InvalidAuthzRequest)` for
+  OpenFGA 400/404/409/422, carrying `status_code` and OpenFGA's
+  `message`; the control plane maps it to 400. **Security side effect
+  fixed:** the FastAPI adapter now fails closed with a 500 on it even
+  when `fail_open=True` — before, a misconfigured relation let requests
+  through. The strict testkit raises it too. Verified against real
+  OpenFGA (`invalid relation: relation 'doc#nope' not found`).
+- [x] **ARCH3-10 — Idempotent writes (`on_duplicate`/`on_missing`
   ignore).** Ship with `12`'s REL3-6.
+  Shipped: writes send `on_duplicate`/`on_missing: "ignore"` (verified
+  on OpenFGA v1.19: duplicate grant and missing revoke both succeed);
+  `idempotent_writes=False` for older servers. `delete_store` treats a
+  404 as done.
 - [x] **ARCH3-9 — Testkit looks relations up by `.name`; add
   `strict=True`; use strict mode in control-plane tests.** Expect this to
   surface `10`'s SEC3-3 in unit tests. That's the point.
@@ -128,7 +141,11 @@ IDs match that file.
 - [ ] **ARCH3-13 — Make `ModelRegistry` real (per-tenant model pinning)
   or remove it, along with `MultiTenantAuthz(model_id=)`; fix the
   README.**
-- [ ] **ARCH3-15 — Fold into `12`'s REL3-7.**
+- [x] **ARCH3-15 — Fold into `12`'s REL3-7.**
+  Done with `12`'s REL3-7: `/readyz` probes the product OpenFGA (and the
+  RBAC one when it's a different URL) through dedicated no-retry probe
+  clients. The misnamed `product_fga_client` state and dependency are
+  gone.
 
 ## Tier 4 — Polish
 
