@@ -386,3 +386,38 @@ async def test_evict_closes_the_cached_client_and_forces_re_resolution():
 async def test_evict_of_an_uncached_tenant_is_a_noop():
     mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=FakeResolver({}))
     assert await mt.evict("never-seen") is False
+
+
+@pytest.mark.asyncio
+async def test_authz_aclose_flushes_in_flight_audit_writes_first():
+    """REL3-8: shutdown used to close everything without awaiting
+    background audit writes, dropping e.g. a just-made grant's audit row
+    (with its reason/actor)."""
+    from py_authz.api import Authz
+    from py_authz.core.enforcement import AuthzEngine
+    from py_authz.core.types import Identity, Resource
+
+    landed = []
+    gate = asyncio.Event()
+
+    class SlowAuditLogger:
+        async def log(self, event):
+            await gate.wait()
+            landed.append(event)
+
+    class AllowClient:
+        store_id = "s"
+
+        async def check(self, **kwargs):
+            return True
+
+        async def aclose(self):
+            pass
+
+    authz = Authz(AuthzEngine(fga_client=AllowClient(), audit_logger=SlowAuditLogger()))
+    await authz.can("viewer", Identity(id="user:1"), Resource(type="doc", id="1"))
+    asyncio.get_running_loop().call_later(0.01, gate.set)
+
+    await authz.aclose()
+
+    assert len(landed) == 1

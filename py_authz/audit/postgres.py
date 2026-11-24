@@ -21,7 +21,14 @@ class PostgresAuditLogger(AuditLogger):
     `close()` to release the pool).
     """
 
-    def __init__(self, dsn: str, *, command_timeout: float | None = 5.0):
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        command_timeout: float | None = 5.0,
+        pool_min_size: int = 10,
+        pool_max_size: int = 10,
+    ):
         """
         Args:
             command_timeout: seconds allowed for the pool to acquire a
@@ -38,12 +45,19 @@ class PostgresAuditLogger(AuditLogger):
         """
         self.dsn = dsn
         self.command_timeout = command_timeout
+        self.pool_min_size = pool_min_size
+        self.pool_max_size = pool_max_size
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         if self._pool is not None:
             return
-        self._pool = await asyncpg.create_pool(self.dsn, command_timeout=self.command_timeout)
+        self._pool = await asyncpg.create_pool(
+            self.dsn,
+            command_timeout=self.command_timeout,
+            min_size=self.pool_min_size,
+            max_size=self.pool_max_size,
+        )
 
     async def close(self) -> None:
         if self._pool is not None:

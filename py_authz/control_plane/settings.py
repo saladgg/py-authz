@@ -22,6 +22,13 @@ def _required(name: str) -> str:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class ControlPlaneSettings:
     """
@@ -93,6 +100,25 @@ class ControlPlaneSettings:
     service_account_rate_limit_max_attempts: int = 5
     service_account_rate_limit_lockout_seconds: int = 300
 
+    # -- Postgres pools (REL3-14). Every control-plane store opens its own
+    #    pool; these used to be fixed at min == max (10/5 each), so one
+    #    replica opened ~60 connections at boot with no way to tune it —
+    #    two replicas or a rolling deploy exhausted Postgres's default
+    #    `max_connections=100`. Now each starts with `min` and grows on
+    #    demand up to `max`. --
+    postgres_pool_min_size: int = 1
+    postgres_pool_max_size: int = 5
+
+    #: Run the bundled DDL (`apply_schema()`) at startup (REL3-10 part).
+    #: Set false in production and apply schema out of band, so replicas
+    #: don't race DDL on every boot.
+    apply_schema_on_startup: bool = True
+
+    #: Serve `/docs`, `/redoc` and `/openapi.json` (SEC3-11). Off by
+    #: default: they publish the full admin API surface without
+    #: authentication.
+    expose_docs: bool = False
+
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -120,4 +146,8 @@ class ControlPlaneSettings:
             service_account_rate_limit_lockout_seconds=int(
                 os.environ.get("CONTROL_PLANE_SA_RATE_LIMIT_LOCKOUT_SECONDS", "300")
             ),
+            postgres_pool_min_size=int(os.environ.get("CONTROL_PLANE_PG_POOL_MIN_SIZE", "1")),
+            postgres_pool_max_size=int(os.environ.get("CONTROL_PLANE_PG_POOL_MAX_SIZE", "5")),
+            apply_schema_on_startup=_env_bool("CONTROL_PLANE_APPLY_SCHEMA", True),
+            expose_docs=_env_bool("CONTROL_PLANE_EXPOSE_DOCS", False),
         )

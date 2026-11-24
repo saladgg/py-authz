@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from collections import OrderedDict
 
 from py_authz.clients.openfga import OpenFGAClient
@@ -494,16 +495,28 @@ class Authz:
         request = AuthzRequest(identity=identity, action=relation, resource=_to_resource(resource))
         await self._engine.invalidate(request)
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, flush_audit_timeout: float | None = 5.0) -> None:
         """
-        Release the underlying `OpenFGAClient`'s HTTP connection pool.
+        Flush in-flight audit writes, then release the underlying
+        `OpenFGAClient`'s HTTP connection pool.
 
         A standalone `Authz` constructed directly (not via
         `MultiTenantAuthz`) owns exactly one `OpenFGAClient` for its whole
         lifetime, so this is usually only worth calling on shutdown of a
         long-running process. `MultiTenantAuthz.aclose()` calls this on
         every cached tenant's `Authz` instance.
+
+        Args:
+            flush_audit_timeout: seconds to wait for background audit
+                writes still in flight (REL3-8) — previously none were
+                awaited, so a shutdown right after a grant could drop the
+                audit row carrying its `reason`/`actor`. `None` waits
+                without bound; `0` skips the flush.
         """
+        if flush_audit_timeout != 0:
+            # Best effort — never block shutdown indefinitely.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._engine.flush_audit_logs(), timeout=flush_audit_timeout)
         fga_client = self._engine.fga_client
         aclose = getattr(fga_client, "aclose", None)
         if aclose is not None:

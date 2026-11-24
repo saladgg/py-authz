@@ -93,3 +93,22 @@ def test_tenant_manager_is_always_wired_with_a_provisioning_lock():
     source = inspect.getsource(app_module._wire)
     assert "lock_manager=lock_manager" in source
     assert "InProcessLockManager()" in source
+
+
+def test_interactive_docs_are_off_by_default():
+    """SEC3-11: /docs, /redoc and /openapi.json published the full admin
+    API surface without authentication."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(create_app(_settings()))
+
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+
+
+def test_interactive_docs_can_be_enabled():
+    from starlette.testclient import TestClient
+
+    client = TestClient(create_app(_settings(expose_docs=True)))
+
+    assert client.get("/openapi.json").status_code == 200
