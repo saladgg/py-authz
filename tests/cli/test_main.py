@@ -153,12 +153,25 @@ def test_main_migrate_invokes_migrate_command(patch_cli_entry):
             "dry_run": False,
             "yes": False,
             "json_output": False,
+            "allow_empty": False,
         }
     ]
 
 
 def test_main_migrate_with_specific_tenants(patch_cli_entry):
-    _run_main(["migrate", "--tenant", "t1", "--tenant", "t2", "--api-url", "http://fake"])
+    _run_main(
+        [
+            "migrate",
+            "--tenant",
+            "t1",
+            "--tenant",
+            "t2",
+            "--api-url",
+            "http://fake",
+            "--backend",
+            "memory",
+        ]
+    )
 
     assert patch_cli_entry["migrate"] == [
         {
@@ -169,12 +182,24 @@ def test_main_migrate_with_specific_tenants(patch_cli_entry):
             "dry_run": False,
             "yes": False,
             "json_output": False,
+            "allow_empty": False,
         }
     ]
 
 
 def test_main_migrate_forwards_dry_run_and_yes_flags(patch_cli_entry):
-    _run_main(["migrate", "--all-tenants", "--api-url", "http://fake", "--dry-run", "--yes"])
+    _run_main(
+        [
+            "migrate",
+            "--all-tenants",
+            "--api-url",
+            "http://fake",
+            "--dry-run",
+            "--yes",
+            "--backend",
+            "memory",
+        ]
+    )
 
     assert patch_cli_entry["migrate"] == [
         {
@@ -185,13 +210,16 @@ def test_main_migrate_forwards_dry_run_and_yes_flags(patch_cli_entry):
             "dry_run": True,
             "yes": True,
             "json_output": False,
+            "allow_empty": False,
         }
     ]
 
 
 def test_main_migrate_json_flag_forwards_json_output(patch_cli_entry):
     """Regression test for DX2-15: `--json` must reach `migrate_command`."""
-    _run_main(["migrate", "--tenant", "t1", "--api-url", "http://fake", "--json"])
+    _run_main(
+        ["migrate", "--tenant", "t1", "--api-url", "http://fake", "--json", "--backend", "memory"]
+    )
 
     assert patch_cli_entry["migrate"] == [
         {
@@ -202,6 +230,7 @@ def test_main_migrate_json_flag_forwards_json_output(patch_cli_entry):
             "dry_run": False,
             "yes": False,
             "json_output": True,
+            "allow_empty": False,
         }
     ]
 
@@ -216,7 +245,7 @@ def test_main_migrate_requires_all_tenants_or_tenant_flag(patch_cli_entry, capsy
 
 
 def test_main_migrate_loads_module_when_provided(patch_cli_entry):
-    _run_main(["migrate", "--all-tenants", "--module", "some.module"])
+    _run_main(["migrate", "--all-tenants", "--module", "some.module", "--backend", "postgres"])
 
     assert patch_cli_entry["load_module"] == ["some.module"]
 
@@ -311,3 +340,24 @@ def test_main_does_not_swallow_non_authz_exceptions(patch_cli_entry, monkeypatch
 
     with pytest.raises(RuntimeError, match="not an AuthzError"):
         _run_main(["generate-model"])
+
+
+def test_main_migrate_requires_a_backend(patch_cli_entry, capsys, monkeypatch):
+    """DX3-8: `--backend` used to default to `memory`, so a CI job that
+    forgot it 'migrated' an empty in-memory store and exited 0."""
+    monkeypatch.delenv("TENANT_STORE_BACKEND", raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main(["migrate", "--all-tenants", "--api-url", "http://fake"])
+
+    assert exc_info.value.code != 0
+    assert patch_cli_entry["migrate"] == []
+    assert "--backend" in capsys.readouterr().err
+
+
+def test_main_migrate_reads_the_backend_from_the_environment(patch_cli_entry, monkeypatch):
+    monkeypatch.setenv("TENANT_STORE_BACKEND", "postgres")
+
+    _run_main(["migrate", "--all-tenants", "--api-url", "http://fake"])
+
+    assert patch_cli_entry["migrate"][0]["backend"] == "postgres"

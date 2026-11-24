@@ -119,11 +119,16 @@ async def test_migrate_command_prints_message_when_no_tenants_found(capsys, monk
 
     monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
 
-    await migrate_command(api_url="http://fake")
+    # DX3-8: finding no tenants is an error unless explicitly allowed.
+    with pytest.raises(ConfigurationError, match="found no tenants"):
+        await migrate_command(api_url="http://fake")
 
     assert FakeMigrationManager.instances == []
     captured = capsys.readouterr()
     assert "No tenants found" in captured.out
+    assert "--backend memory starts empty" in captured.err
+
+    await migrate_command(api_url="http://fake", allow_empty=True)  # opt-in: no error
 
 
 # ----------------------------------------------------------------------
@@ -335,7 +340,7 @@ async def test_migrate_command_json_output_no_tenants_found(capsys, monkeypatch)
 
     monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
 
-    await migrate_command(api_url="http://fake", json_output=True)
+    await migrate_command(api_url="http://fake", json_output=True, allow_empty=True)
 
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
@@ -361,6 +366,6 @@ async def test_migrate_command_closes_backends_even_when_no_tenants_found(monkey
 
     monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
 
-    await migrate_command(api_url="http://fake")
+    await migrate_command(api_url="http://fake", allow_empty=True)
 
     assert store.closed is True

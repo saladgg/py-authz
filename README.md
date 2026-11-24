@@ -434,11 +434,11 @@ py-authz generate-model --module myapp.authz.models --output model.json
 py-authz sync --module myapp.authz.models --api-url http://localhost:8082 --store-id $STORE_ID
 
 # Roll the current model out across every known tenant (preview first, then confirm)
-py-authz migrate --module myapp.authz.models --all-tenants --dry-run
-py-authz migrate --module myapp.authz.models --all-tenants --yes
+py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --dry-run
+py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --yes
 
 # Or just one tenant, with a machine-readable JSON summary for CI
-py-authz migrate --tenant acme-corp --api-url http://localhost:8082 --json
+py-authz migrate --backend postgres --tenant acme-corp --api-url http://localhost:8082 --json
 ```
 
 Every command accepts its config either as a CLI flag or via an environment

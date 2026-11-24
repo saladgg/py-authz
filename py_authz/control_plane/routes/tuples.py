@@ -6,7 +6,7 @@ requiring the mandatory `reason` field and passing the acting operator
 through as `actor`.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from py_authz.control_plane.auth import CurrentPrincipal, require_tenant_role
 from py_authz.control_plane.deps import get_multi_tenant_authz
@@ -26,7 +26,8 @@ async def list_tuples(
     user: str | None = None,
     relation: str | None = None,
     object: str | None = None,
-    page_size: int | None = None,
+    # OpenFGA's own Read page-size ceiling is 100.
+    page_size: int | None = Query(None, ge=1, le=100),
     continuation_token: str | None = None,
     multi_tenant_authz=Depends(get_multi_tenant_authz),
 ) -> dict:

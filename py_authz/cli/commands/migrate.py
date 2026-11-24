@@ -70,6 +70,7 @@ async def migrate_command(
     dry_run: bool = False,
     yes: bool = False,
     json_output: bool = False,
+    allow_empty: bool = False,
 ) -> None:
     """
     Roll the current model out across tenants via `MigrationManager`.
@@ -105,6 +106,18 @@ async def migrate_command(
                 print(json.dumps({"tenants_found": 0, "succeeded": {}, "failed": {}}))
             else:
                 print("No tenants found — nothing to migrate.")
+            if backend == "memory":
+                print(
+                    "warning: --backend memory starts empty; did you mean postgres or redis?",
+                    file=sys.stderr,
+                )
+            # DX3-8: a CI job pointing at the wrong (or an empty) backend
+            # used to exit 0 here having migrated nothing.
+            if not allow_empty:
+                raise ConfigurationError(
+                    "--all-tenants found no tenants in the configured backend; "
+                    "pass --allow-empty if that's expected"
+                )
             return
 
         if not dry_run and all_tenants_mode and not yes:

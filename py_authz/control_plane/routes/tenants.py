@@ -6,7 +6,7 @@ Tenant CRUD (CP-4). Creating/listing tenants is a system-wide action
 `auth.require_tenant_admin_or_system_owner`'s docstring).
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from py_authz.control_plane.auth import (
     CurrentPrincipal,
@@ -24,7 +24,7 @@ from py_authz.control_plane.deps import (
 )
 from py_authz.control_plane.rbac_model import Tenant
 from py_authz.control_plane.role_grants import delete_object_role_grants
-from py_authz.control_plane.schemas import TenantCreateRequest
+from py_authz.control_plane.schemas import MAX_PAGE_SIZE, TenantCreateRequest
 from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import TenantNotFoundError
 from py_authz.core.types import Resource
@@ -57,7 +57,9 @@ async def create_tenant(
 
 @router.get("", dependencies=[Depends(_require_auditor_system)])
 async def list_tenants(
-    limit: int = 100, offset: int = 0, tenant_store=Depends(get_tenant_store)
+    limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
+    tenant_store=Depends(get_tenant_store),
 ) -> dict:
     ids = await tenant_store.list_tenant_ids(limit=limit, offset=offset)
     return {"items": ids}

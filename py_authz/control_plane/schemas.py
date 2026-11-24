@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 
 from py_authz.control_plane.scopes import Scope
 
+#: Ceiling for every list endpoint's `limit` (REL3-15). There was none, so
+#: `?limit=100000000` loaded an entire table into API memory, and a
+#: negative value reached asyncpg as a 500.
+MAX_PAGE_SIZE = 500
+
 
 class TenantCreateRequest(BaseModel):
     tenant_id: str
