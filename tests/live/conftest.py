@@ -120,6 +120,9 @@ async def postgres_schema(postgres_dsn):
     finally:
         conn = await asyncpg.connect(postgres_dsn)
         try:
-            await conn.execute("TRUNCATE tenants, tenant_models, audit_logs")
+            await conn.execute(
+                "TRUNCATE tenants, tenant_models, audit_logs, operators, "
+                "service_accounts, model_versions, control_plane_jobs"
+            )
         finally:
             await conn.close()

@@ -10,7 +10,8 @@ factories below (`require_system_role`/`require_tenant_role`), which:
        account (a `Bearer pasa_<id>.<secret>` token, verified against
        `service_accounts.secret_hash`) — see `get_current_principal()`;
     2. for a service account, check its coarse-grained scopes *first*
-       (`service_account_scope`) — before anything per-tenant;
+       (`scope=`, a required argument on every factory — see
+       `scopes.py`; SEC3-1) — before anything per-tenant;
     3. run the actual `authz.can(...)` check against the RBAC store,
        exactly like any other `py-authz` consumer would.
 
@@ -20,9 +21,16 @@ surface as every other route in this API's underlying library.
 
 from dataclasses import dataclass
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
-from py_authz.control_plane.rbac_model import ROLE_CHAIN, SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.rbac_model import (
+    ROLE_CHAIN,
+    SYSTEM_OBJECT_ID,
+    System,
+    Tenant,
+    service_account_principal,
+)
+from py_authz.control_plane.scopes import ANY_PRINCIPAL, Scope
 from py_authz.control_plane.security import parse_account_id, verify_secret
 from py_authz.core.exceptions import AuthenticationError, AuthorizationDenied, InvalidAuthzRequest
 from py_authz.core.types import Identity, Resource
@@ -88,12 +96,18 @@ async def _authenticate_service_account(
     await rate_limiter.record_success(account_id)
     await store.touch_last_used(account_id)
 
+    # Keyed on the immutable account id, never the name (SEC3-2): names
+    # are reusable after revoke, so a name-keyed principal let a newly
+    # created SA silently inherit a revoked SA's RBAC grants. The type
+    # (`service_account`) is one the RBAC model actually defines
+    # (SEC3-3) — the old `service:` prefix was rejected by real OpenFGA.
     identity = Identity(
-        id=f"service:{record.name}",
+        id=service_account_principal(record.id),
         attributes={
             "kind": "service_account",
             "scopes": record.scopes,
             "service_account_id": record.id,
+            "name": record.name,
         },
     )
     return CurrentPrincipal(identity=identity, kind="service_account", scopes=tuple(record.scopes))
@@ -126,8 +140,18 @@ async def get_current_principal(request: Request) -> CurrentPrincipal:
     return principal
 
 
-def _check_service_account_scope(principal: CurrentPrincipal, required_scope: str | None) -> None:
-    if principal.kind != "service_account" or required_scope is None:
+def _validate_scope_declaration(scope: Scope | str) -> None:
+    """Fail at import time (route definition), not request time, if a
+    route declares something that isn't a real scope."""
+    if scope != ANY_PRINCIPAL and scope not in Scope.__members__.values():
+        raise ValueError(f"Unknown scope {scope!r} — must be a `Scope` member or ANY_PRINCIPAL")
+
+
+def check_service_account_scope(principal: CurrentPrincipal, required_scope: Scope | str) -> None:
+    """Deny a service account that doesn't hold `required_scope`. Every
+    route must name a scope (SEC3-1) — there is no "no scope required"
+    value except `ANY_PRINCIPAL`, used only by self-introspection."""
+    if principal.kind != "service_account" or required_scope == ANY_PRINCIPAL:
         return
     if required_scope not in principal.scopes:
         raise AuthorizationDenied(
@@ -148,7 +172,7 @@ async def _check_rbac(
         )
 
 
-def require_system_role(min_relation: str, *, service_account_scope: str | None = None):
+def require_system_role(min_relation: str, *, scope: Scope | str):
     """
     FastAPI dependency: caller must hold `min_relation` (or anything
     above it in `ROLE_CHAIN` — union semantics already make "holds
@@ -157,14 +181,16 @@ def require_system_role(min_relation: str, *, service_account_scope: str | None 
     """
     if min_relation not in ROLE_CHAIN:
         raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+    _validate_scope_declaration(scope)
 
     async def dependency(request: Request) -> CurrentPrincipal:
         principal = await get_current_principal(request)
-        _check_service_account_scope(principal, service_account_scope)
+        check_service_account_scope(principal, scope)
         resource = Resource(type=System.type, id=SYSTEM_OBJECT_ID)
         await _check_rbac(request, principal, min_relation, resource)
         return principal
 
+    dependency.required_scope = scope  # type: ignore[attr-defined]  # see test_route_scopes.py
     return dependency
 
 
@@ -172,7 +198,7 @@ def require_tenant_role(
     min_relation: str,
     *,
     tenant_path_param: str = "tenant_id",
-    service_account_scope: str | None = None,
+    scope: Scope | str,
 ):
     """
     FastAPI dependency: caller must hold `min_relation` (or higher) on
@@ -191,20 +217,22 @@ def require_tenant_role(
     """
     if min_relation not in ROLE_CHAIN:
         raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+    _validate_scope_declaration(scope)
 
     async def dependency(request: Request) -> CurrentPrincipal:
         principal = await get_current_principal(request)
-        _check_service_account_scope(principal, service_account_scope)
+        check_service_account_scope(principal, scope)
         tenant_id = request.path_params[tenant_path_param]
         resource = Resource(type=Tenant.type, id=tenant_id)
         await _check_rbac(request, principal, min_relation, resource)
         return principal
 
+    dependency.required_scope = scope  # type: ignore[attr-defined]  # see test_route_scopes.py
     return dependency
 
 
 def require_tenant_admin_or_system_owner(
-    *, tenant_path_param: str = "tenant_id", service_account_scope: str | None = None
+    *, tenant_path_param: str = "tenant_id", scope: Scope | str
 ):
     """
     FastAPI dependency for the one action CP-4 explicitly gates on either
@@ -214,10 +242,11 @@ def require_tenant_admin_or_system_owner(
     per-tenant grant (see `require_tenant_role`'s docstring on why the
     two scopes don't imply each other everywhere else).
     """
+    _validate_scope_declaration(scope)
 
     async def dependency(request: Request) -> CurrentPrincipal:
         principal = await get_current_principal(request)
-        _check_service_account_scope(principal, service_account_scope)
+        check_service_account_scope(principal, scope)
 
         rbac_authz = request.app.state.rbac_authz
         tenant_id = request.path_params[tenant_path_param]
@@ -233,6 +262,7 @@ def require_tenant_admin_or_system_owner(
             f"{principal.identity.id!r} holds neither tenant:{tenant_id}#admin nor system#owner"
         )
 
+    dependency.required_scope = scope  # type: ignore[attr-defined]  # see test_route_scopes.py
     return dependency
 
 
@@ -240,7 +270,7 @@ def require_tenant_role_from_query(
     min_relation: str,
     *,
     query_param: str = "tenant_id",
-    service_account_scope: str | None = None,
+    scope: Scope | str,
 ):
     """
     Same as `require_tenant_role`, but for the one route (`POST
@@ -250,10 +280,11 @@ def require_tenant_role_from_query(
     """
     if min_relation not in ROLE_CHAIN:
         raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+    _validate_scope_declaration(scope)
 
     async def dependency(request: Request) -> CurrentPrincipal:
         principal = await get_current_principal(request)
-        _check_service_account_scope(principal, service_account_scope)
+        check_service_account_scope(principal, scope)
         tenant_id = request.query_params.get(query_param)
         if not tenant_id:
             raise InvalidAuthzRequest(f"{query_param!r} query parameter is required")
@@ -261,6 +292,7 @@ def require_tenant_role_from_query(
         await _check_rbac(request, principal, min_relation, resource)
         return principal
 
+    dependency.required_scope = scope  # type: ignore[attr-defined]  # see test_route_scopes.py
     return dependency
 
 
@@ -268,7 +300,7 @@ def require_system_or_tenant_role_from_query(
     min_relation: str,
     *,
     query_param: str = "tenant_id",
-    service_account_scope: str | None = None,
+    scope: Scope | str,
 ):
     """
     FastAPI dependency for a route whose scope is optionally narrowed by
@@ -283,10 +315,11 @@ def require_system_or_tenant_role_from_query(
     """
     if min_relation not in ROLE_CHAIN:
         raise ValueError(f"Unknown role {min_relation!r} — must be one of {ROLE_CHAIN}")
+    _validate_scope_declaration(scope)
 
     async def dependency(request: Request) -> CurrentPrincipal:
         principal = await get_current_principal(request)
-        _check_service_account_scope(principal, service_account_scope)
+        check_service_account_scope(principal, scope)
         tenant_id = request.query_params.get(query_param)
         resource = (
             Resource(type=Tenant.type, id=tenant_id)
@@ -296,6 +329,30 @@ def require_system_or_tenant_role_from_query(
         await _check_rbac(request, principal, min_relation, resource)
         return principal
 
+    dependency.required_scope = scope  # type: ignore[attr-defined]  # see test_route_scopes.py
+    return dependency
+
+
+def authenticated(*, scope: Scope | str):
+    """
+    FastAPI dependency for routes that authenticate the caller and
+    enforce the service-account scope, but run their own RBAC logic
+    in-route (e.g. `POST /operators/roles`, whose target resource comes
+    from the request body). Use this instead of `get_current_principal`
+    directly in a route — that function performs no scope check, so a
+    route depending on it alone would let any service account through
+    regardless of scopes (SEC3-1; enforced by
+    `tests/control_plane/test_route_scopes.py`).
+    """
+    _validate_scope_declaration(scope)
+
+    async def dependency(
+        principal: CurrentPrincipal = Depends(get_current_principal),
+    ) -> CurrentPrincipal:
+        check_service_account_scope(principal, scope)
+        return principal
+
+    dependency.required_scope = scope  # type: ignore[attr-defined]  # see test_route_scopes.py
     return dependency
 
 

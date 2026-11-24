@@ -12,6 +12,7 @@ from py_authz.control_plane.auth import (
 from py_authz.control_plane.deps import get_model_version_store, get_settings, get_tenant_store
 from py_authz.control_plane.model_versions import ModelVersionStore
 from py_authz.control_plane.schemas import ModelRollbackRequest
+from py_authz.control_plane.scopes import Scope
 from py_authz.control_plane.settings import ControlPlaneSettings
 from py_authz.core.exceptions import InvalidAuthzRequest, TenantNotFoundError
 from py_authz.core.model_diff import ModelDiffer
@@ -20,10 +21,10 @@ from py_authz.modeling.generator import generate_model
 
 router = APIRouter(tags=["models"])
 
-_require_viewer = require_system_role("viewer")
-_require_sync = require_tenant_role_from_query("admin")
-_require_tenant_auditor = require_tenant_role("auditor")
-_require_tenant_admin = require_tenant_role("admin")
+_require_viewer = require_system_role("viewer", scope=Scope.MODELS_READ)
+_require_sync = require_tenant_role_from_query("admin", scope=Scope.MODELS_WRITE)
+_require_tenant_auditor = require_tenant_role("auditor", scope=Scope.MODELS_READ)
+_require_tenant_admin = require_tenant_role("admin", scope=Scope.MODELS_WRITE)
 
 
 def _version_dict(version) -> dict:

@@ -204,6 +204,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _teardown(app)
 
 
+API_PREFIX = "/api/v1"
+
+#: Every authenticated, versioned router — mounted under `API_PREFIX`.
+#: Module-level (rather than inline in `create_app`) so
+#: `tests/control_plane/test_route_scopes.py` can walk exactly the routes
+#: the app serves and assert each one declares a service-account scope
+#: (SEC3-1).
+API_ROUTERS = (
+    health_routes.router,  # /metrics — authenticated, versioned
+    auth_routes.router,
+    service_accounts_routes.router,
+    operators_routes.router,
+    tenants_routes.router,
+    models_routes.router,
+    migrations_routes.router,
+    audit_routes.router,
+    tuples_routes.router,
+    cache_routes.router,
+)
+
+
 def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     """
     Build the control-plane API app. `settings` defaults to
@@ -221,18 +242,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     # service-account credential to present.
     app.include_router(health_routes.health_router)
 
-    for router in (
-        health_routes.router,  # /metrics — authenticated, versioned
-        auth_routes.router,
-        service_accounts_routes.router,
-        operators_routes.router,
-        tenants_routes.router,
-        models_routes.router,
-        migrations_routes.router,
-        audit_routes.router,
-        tuples_routes.router,
-        cache_routes.router,
-    ):
-        app.include_router(router, prefix="/api/v1")
+    for router in API_ROUTERS:
+        app.include_router(router, prefix=API_PREFIX)
 
     return app

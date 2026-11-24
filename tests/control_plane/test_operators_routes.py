@@ -8,7 +8,7 @@ from starlette.testclient import TestClient
 
 from py_authz.api import Authz
 from py_authz.control_plane.errors import authz_error_handler
-from py_authz.control_plane.rbac_model import SYSTEM_OBJECT_ID, System, Tenant
+from py_authz.control_plane.rbac_model import RBAC_MODELS, SYSTEM_OBJECT_ID, System, Tenant
 from py_authz.control_plane.routes import operators as operators_routes
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.exceptions import AuthzError
@@ -25,6 +25,20 @@ class FakeOperatorStore:
         return self._operators
 
 
+class FakeServiceAccount:
+    def __init__(self, id, revoked=False):
+        self.id = id
+        self.is_revoked = revoked
+
+
+class FakeServiceAccountStore:
+    def __init__(self, accounts=None):
+        self._accounts = {a.id: a for a in (accounts or [])}
+
+    async def get(self, account_id):
+        return self._accounts.get(account_id)
+
+
 class Operator:
     def __init__(self, id, subject, email, created_at):
         self.id = id
@@ -36,9 +50,11 @@ class Operator:
 @pytest.fixture
 def rbac_authz():
     reg = ResourceModelRegistry()
-    reg.register(System)
-    reg.register(Tenant)
-    client = InMemoryFGAClient(model_registry=reg)
+    # Strict mode + the full RBAC model (incl. the `service_account`
+    # subject type): reject what a real OpenFGA rejects (ARCH3-9).
+    for model in RBAC_MODELS:
+        reg.register(model)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
     return Authz(AuthzEngine(fga_client=client))
 
 
@@ -51,6 +67,9 @@ def app(rbac_authz):
     fastapi_app.include_router(operators_routes.router, prefix="/api/v1")
 
     fastapi_app.state.rbac_authz = rbac_authz
+    fastapi_app.state.service_account_store = FakeServiceAccountStore(
+        [FakeServiceAccount("sa_ci"), FakeServiceAccount("sa_gone", revoked=True)]
+    )
     fastapi_app.state.operator_store = FakeOperatorStore(
         [Operator("1", "alice", "alice@example.com", datetime(2026, 1, 1))]
     )
@@ -247,3 +266,100 @@ async def test_grant_rejects_unknown_scope(client, rbac_authz):
     )
 
     assert resp.status_code == 400
+
+
+# -------------------------------------------------------------------
+# SEC3-4: tenant operators may only manage roles strictly below their own
+# -------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_cannot_promote_anyone_to_tenant_owner(client, rbac_authz):
+    await rbac_authz.grant(Identity(id="user:alice"), "admin", Tenant(id="acme"))
+
+    for subject in ("alice", "bob"):
+        resp = client.post(
+            "/api/v1/operators/roles",
+            json={"subject": subject, "scope": "tenant", "tenant_id": "acme", "role": "owner"},
+        )
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_cannot_grant_a_peer_admin_role(client, rbac_authz):
+    await rbac_authz.grant(Identity(id="user:alice"), "admin", Tenant(id="acme"))
+
+    resp = client.post(
+        "/api/v1/operators/roles",
+        json={"subject": "bob", "scope": "tenant", "tenant_id": "acme", "role": "admin"},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_cannot_revoke_a_tenant_owner(client, rbac_authz):
+    await rbac_authz.grant(Identity(id="user:alice"), "admin", Tenant(id="acme"))
+    await rbac_authz.grant(Identity(id="user:carol"), "owner", Tenant(id="acme"))
+
+    resp = client.request(
+        "DELETE",
+        "/api/v1/operators/roles",
+        json={"subject": "carol", "scope": "tenant", "tenant_id": "acme", "role": "owner"},
+    )
+
+    assert resp.status_code == 403
+    assert await rbac_authz.can("owner", Identity(id="user:carol"), Tenant(id="acme").to_resource())
+
+
+@pytest.mark.asyncio
+async def test_tenant_owner_may_manage_any_tenant_role(client, rbac_authz):
+    await rbac_authz.grant(Identity(id="user:alice"), "owner", Tenant(id="acme"))
+
+    resp = client.post(
+        "/api/v1/operators/roles",
+        json={"subject": "bob", "scope": "tenant", "tenant_id": "acme", "role": "owner"},
+    )
+    assert resp.status_code == 200
+
+
+# -------------------------------------------------------------------
+# SEC3-3: roles can be granted to service accounts (by id)
+# -------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_system_owner_can_grant_a_role_to_a_service_account(client, rbac_authz):
+    await rbac_authz.grant(Identity(id="user:alice"), "owner", System(id=SYSTEM_OBJECT_ID))
+
+    resp = client.post(
+        "/api/v1/operators/roles",
+        json={
+            "subject": "sa_ci",
+            "subject_kind": "service_account",
+            "scope": "tenant",
+            "tenant_id": "acme",
+            "role": "operator",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert await rbac_authz.can(
+        "operator", Identity(id="service_account:sa_ci"), Tenant(id="acme").to_resource()
+    )
+
+
+@pytest.mark.asyncio
+async def test_granting_a_role_to_an_unknown_or_revoked_service_account_is_400(client, rbac_authz):
+    await rbac_authz.grant(Identity(id="user:alice"), "owner", System(id=SYSTEM_OBJECT_ID))
+
+    for subject in ("sa_missing", "sa_gone"):
+        resp = client.post(
+            "/api/v1/operators/roles",
+            json={
+                "subject": subject,
+                "subject_kind": "service_account",
+                "scope": "system",
+                "role": "viewer",
+            },
+        )
+        assert resp.status_code == 400

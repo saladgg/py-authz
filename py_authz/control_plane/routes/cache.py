@@ -8,13 +8,14 @@ from py_authz.cache.redis import RedisCache
 from py_authz.control_plane.auth import require_system_role
 from py_authz.control_plane.deps import get_redis_cache
 from py_authz.control_plane.schemas import CacheInvalidateRequest
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import InvalidAuthzRequest
 from py_authz.core.types import AuthzRequest
 
 router = APIRouter(prefix="/cache", tags=["cache"])
 
-_require_auditor = require_system_role("auditor")
-_require_operator = require_system_role("operator")
+_require_auditor = require_system_role("auditor", scope=Scope.CACHE_READ)
+_require_operator = require_system_role("operator", scope=Scope.CACHE_WRITE)
 
 
 def _require_cache(cache: RedisCache | None) -> RedisCache:

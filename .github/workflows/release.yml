@@ -1,15 +1,33 @@
 name: Release
 
+# Gated on a green CI run (REL3-20): previously this triggered on
+# `push: main` in parallel with `ci.yml`, so a commit that broke lint,
+# unit or live-integration tests was still tagged, released and (once
+# trusted publishing is registered) uploaded to PyPI. `workflow_run`
+# fires only after CI finishes; the job-level `if` requires that run to
+# have succeeded, on a push to main (never a PR run).
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 permissions:
   contents: write   # required to create tags & releases
 
+# Two quick merges must not race `semantic-release` on tag push — queue
+# them instead, and never cancel a release mid-flight.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     outputs:
       released: ${{ steps.detect-release.outputs.released }}
@@ -19,8 +37,24 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0   # REQUIRED for semantic-release
+          ref: main
       - name: Fetch all tags
         run: git fetch --force --tags
+
+      - name: Skip if main moved past the commit CI verified
+        # semantic-release needs a branch checkout (not a detached SHA),
+        # so check out `main` and make sure it's still exactly the commit
+        # the triggering CI run tested. If a newer commit has landed, its
+        # own CI run will trigger its own release — skip this one rather
+        # than release something CI never saw.
+        id: verified
+        run: |
+          if [ "$(git rev-parse HEAD)" = "${{ github.event.workflow_run.head_sha }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved past ${{ github.event.workflow_run.head_sha }}; skipping"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Debug Git state
         run: |
@@ -29,11 +63,13 @@ jobs:
           git describe --tags --abbrev=0 || echo "No tags found"
 
       - name: Set up Python
+        if: steps.verified.outputs.ok == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Install dependencies
+        if: steps.verified.outputs.ok == 'true'
         # Pinned (see REL2-12): this job holds `contents: write` and cuts
         # every real release — an unpinned `pip install` here means an
         # upstream major-version bump (python-semantic-release has a
@@ -45,10 +81,12 @@ jobs:
         run: pip install python-semantic-release==10.6.2 build==1.6.0
 
       - name: Capture tag before release
+        if: steps.verified.outputs.ok == 'true'
         id: before
         run: echo "tag=$(git describe --tags --abbrev=0 2>/dev/null || echo none)" >> "$GITHUB_OUTPUT"
 
       - name: Semantic Release
+        if: steps.verified.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -56,6 +94,7 @@ jobs:
           semantic-release publish
 
       - name: Detect whether a new version was actually released
+        if: steps.verified.outputs.ok == 'true'
         id: detect-release
         run: |
           after="$(git describe --tags --abbrev=0 2>/dev/null || echo none)"
@@ -66,7 +105,7 @@ jobs:
           fi
 
       - name: Upload built distribution for the PyPI publish job
-        if: steps.detect-release.outputs.released == 'true'
+        if: steps.verified.outputs.ok == 'true' && steps.detect-release.outputs.released == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
@@ -79,6 +118,7 @@ jobs:
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
     environment: pypi
+    timeout-minutes: 10
     permissions:
       id-token: write   # required for PyPI trusted publishing (OIDC) — no API token needed
 

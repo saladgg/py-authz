@@ -55,6 +55,10 @@ export interface Operator {
   created_at: string;
 }
 
+/** Who a role is granted to — `user:<sub>` or `service_account:<sa_id>`
+ * (SEC3-3). */
+export type SubjectKind = "user" | "service_account";
+
 export interface RoleGrant {
   subject: string;
   role: Role;

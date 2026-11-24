@@ -11,11 +11,13 @@ from py_authz.control_plane.auth import CurrentPrincipal, require_system_role
 from py_authz.control_plane.deps import (
     get_job_runner,
     get_job_store,
+    get_migration_concurrency,
     get_migration_manager,
     get_tenant_store,
 )
 from py_authz.control_plane.jobs import Job, JobRunner, JobStore
 from py_authz.control_plane.schemas import MigrationRequest
+from py_authz.control_plane.scopes import Scope
 from py_authz.core.exceptions import InvalidAuthzRequest
 from py_authz.core.migrations_manager import MigrationManager
 
@@ -25,8 +27,8 @@ router = APIRouter(prefix="/migrations", tags=["migrations"])
 #: tenant admin doesn't get to trigger a rollout naming *other* tenants,
 #: and "all tenants" has no single tenant to scope a `tenant_role` check
 #: to anyway.
-_require_operator = require_system_role("operator")
-_require_auditor = require_system_role("auditor")
+_require_operator = require_system_role("operator", scope=Scope.MIGRATIONS_WRITE)
+_require_auditor = require_system_role("auditor", scope=Scope.MIGRATIONS_READ)
 
 
 def _job_dict(job: Job) -> dict:
@@ -58,6 +60,7 @@ async def start_migration(
     migration_manager: MigrationManager = Depends(get_migration_manager),
     tenant_store=Depends(get_tenant_store),
     job_runner: JobRunner = Depends(get_job_runner),
+    concurrency: int = Depends(get_migration_concurrency),
 ) -> dict:
     """
     `dry_run=true` runs synchronously (a dry run is read-only and bounded
@@ -68,11 +71,11 @@ async def start_migration(
     tenant_ids = await _resolve_tenant_ids(body, tenant_store)
 
     if body.dry_run:
-        results = await migration_manager.dry_run_all(tenant_ids)
+        results = await migration_manager.dry_run_all(tenant_ids, concurrency=concurrency)
         return {"dry_run": True, "would_change": results}
 
     async def work() -> dict:
-        batch = await migration_manager.migrate_all(tenant_ids)
+        batch = await migration_manager.migrate_all(tenant_ids, concurrency=concurrency)
         return {
             "succeeded": batch.succeeded,
             "failed": {tenant_id: str(exc) for tenant_id, exc in batch.failed.items()},

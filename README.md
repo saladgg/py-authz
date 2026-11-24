@@ -44,7 +44,7 @@
 ## Features
 
 - **Async-first core** — every public method is a coroutine; designed for modern Python stacks.
-- **Framework-agnostic** — a minimal core (`openfga-sdk`, `httpx`, `attrs`) with optional adapters, so the library fits any web framework.
+- **Framework-agnostic** — a minimal core (`httpx`, `attrs`, `anyio`) with optional adapters, so the library fits any web framework.
 - **Declarative modeling** — define resources and relations as Python classes; the generator emits an [OpenFGA v1.1](https://openfga.dev/docs/concepts) schema for you.
 - **Model sync & diff** — ships a `ModelSync` that diffs the local model against OpenFGA and uploads only when something changed.
 - **Pluggable caching** — `InMemoryCache` for dev/tests, `RedisCache` for production, or roll your own via `BaseCache`.
@@ -54,7 +54,7 @@
 - **Keycloak adapter** — `KeycloakJWTValidator` fetches JWKS and validates RS256 tokens into `Identity` objects.
 - **Audit logging** — optional structured audit trail of every authorization decision.
 - **Retry & resilience** — the OpenFGA HTTP client uses `httpx` with exponential backoff on transient errors.
-- **Strong typing** — full `mypy` coverage and `ruff` (E, F, I, UP, B, C4, SIM) on every push.
+- **Strong typing** — full `mypy` coverage and `ruff` (E, F, I, UP, B, C4, SIM, S) enforced in CI.
 - **CLI tooling** — `py-authz generate-model` and `py-authz sync` for CI pipelines.
 - **Control-plane API + web UI** — optional FastAPI service (`py_authz.control_plane`) for operating a deployment over HTTP: tenant CRUD, model sync/rollback, migrations, audit querying, service accounts, and a dogfooded operator RBAC model — plus a Next.js frontend (`control-panel/`) on top of it.
 

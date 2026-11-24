@@ -5,6 +5,8 @@ rejected before it reaches a route's own logic."""
 
 from pydantic import BaseModel, Field
 
+from py_authz.control_plane.scopes import Scope
+
 
 class TenantCreateRequest(BaseModel):
     tenant_id: str
@@ -13,7 +15,9 @@ class TenantCreateRequest(BaseModel):
 class ServiceAccountCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
-    scopes: list[str] = Field(default_factory=list)
+    #: Validated against the closed `Scope` enum (SEC3-1) — an unknown
+    #: or misspelled scope is a 422, not a silently useless string.
+    scopes: list[Scope] = Field(default_factory=list)
 
 
 class TupleRef(BaseModel):

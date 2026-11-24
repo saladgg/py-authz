@@ -176,11 +176,26 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/tenants
 # Create a service account (the secret is shown exactly once):
 curl -s -X POST http://localhost:8000/api/v1/service-accounts \
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-    -d '{"name": "ci-bot", "scopes": ["models:sync", "tenants:read"]}'
+    -d '{"name": "ci-bot", "scopes": ["models:write", "tenants:read"]}'
 # {"id": "sa_...", "name": "ci-bot", ..., "secret": "pasa_sa_....<random>"}
 
-# Use that secret as a bearer token — same routes, scope-checked first:
+# A service account needs BOTH a scope and an RBAC role for a route to
+# succeed. Scopes come from a closed list (py_authz/control_plane/scopes.py;
+# an unknown one is a 422) and act as a ceiling; the role is granted like
+# an operator's, but by account id with subject_kind=service_account:
+curl -s -X POST http://localhost:8000/api/v1/operators/roles \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"subject": "sa_...", "subject_kind": "service_account",
+         "scope": "tenant", "tenant_id": "acme-corp", "role": "admin"}'
+
+# Use that secret as a bearer token — same routes, scope-checked first.
+# Its principal is service_account:<id> (never its name, which can be
+# reused after revoke):
 curl -s -H "Authorization: Bearer pasa_sa_....<random>" http://localhost:8000/api/v1/auth/me
+
+# Rotating or revoking an account requires holding every role it holds
+# (system#owner always qualifies) — rotation hands you its secret.
+# Revoking also deletes its role grants.
 
 # Sync the currently-registered model to a tenant (dry-run first):
 curl -s "http://localhost:8000/api/v1/models/sync?tenant_id=acme-corp&dry_run=true" \

@@ -11,7 +11,8 @@ make venv            # .venv with Python 3.13 (via uv)
 make install-dev     # install all dependencies including dev tools
 make format          # ruff format + ruff check --fix
 make format-check    # ruff format --check
-make lint            # mypy
+make lint            # ruff check + mypy
+make check-dist      # build the wheel, assert extras / py.typed / SQL files ship
 make test            # pytest with coverage
 ```
 
@@ -22,7 +23,7 @@ scanning) on commit. Install them once with `uv run pre-commit install`.
 ## Conventions
 
 - Async-only — every public method is a coroutine.
-- Line length 100, ruff rules `E, F, I, UP, B, C4, SIM`.
+- Line length 100, ruff rules `E, F, I, UP, B, C4, SIM, S` (`S` = bandit-equivalent; `make lint` runs `ruff check` + mypy).
 - All custom exceptions inherit from `AuthzError` in
   [`core/exceptions.py`](py_authz/core/exceptions.py).
 - Optional dependencies are loaded on-demand via

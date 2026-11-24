@@ -371,3 +371,120 @@ async def test_multi_from_parent_grants_via_either_parent(multi_from_parent_regi
     assert await authz.can(Document.viewer, alice, doc) is True
     assert await authz.can(Document.viewer, bob, doc) is True
     assert await authz.can(Document.viewer, carol, doc) is False
+
+
+# ---------------------------------------------------------------------------
+# ARCH3-9: relation lookup by OpenFGA name, and strict mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relations_are_looked_up_by_their_openfga_name_not_attribute_name():
+    """`view = Relation("viewer", ...)` defines relation `viewer` — the
+    real generator keys on `Relation.name`, so the fake must too."""
+
+    class Doc(ResourceModel):
+        type = "doc"
+
+        edit = Relation("editor")
+        view = Relation("viewer", union=["editor"])
+
+    reg = ResourceModelRegistry()
+    reg.register(Doc)
+    authz = make_fake_authz(model_registry=reg)
+    alice = Identity(id="user:alice")
+    await authz.grant(alice, "editor", Doc(id="1"))
+
+    assert await authz.can("viewer", alice, Doc(id="1").to_resource()) is True
+    assert await authz.can(Doc.view, alice, Doc(id="1")) is True
+
+
+@pytest.mark.asyncio
+async def test_read_tuples_accepts_a_bare_type_as_object_filter(doc_registry):
+    reg, Document = doc_registry
+    authz = make_fake_authz(model_registry=reg)
+    alice = Identity(id="user:alice")
+    await authz.grant(alice, "owner", Document(id="d1"))
+    await authz.grant(alice, "viewer", Document(id="d2"))
+
+    result = await authz.read_tuples(user="user:alice", object="document:")
+
+    assert {t["object"] for t in result["tuples"]} == {"document:d1", "document:d2"}
+
+
+@pytest.fixture
+def strict_authz(doc_registry):
+    reg, Document = doc_registry
+    return make_fake_authz(model_registry=reg, strict=True), Document
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_an_undefined_user_type(strict_authz):
+    from py_authz.core.exceptions import ExternalServiceError
+
+    authz, Document = strict_authz
+    with pytest.raises(ExternalServiceError, match="type 'service' not found"):
+        await authz.grant(Identity(id="service:ci-bot"), "owner", Document(id="d1"))
+    with pytest.raises(ExternalServiceError):
+        await authz.can("viewer", Identity(id="service:ci-bot"), Document(id="d1").to_resource())
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_undefined_types_and_relations(strict_authz):
+    from py_authz.core.exceptions import ExternalServiceError
+    from py_authz.core.types import Resource
+
+    authz, Document = strict_authz
+    alice = Identity(id="user:alice")
+    with pytest.raises(ExternalServiceError, match="relation"):
+        await authz.grant(alice, "approver", Document(id="d1"))
+    with pytest.raises(ExternalServiceError, match="type 'folder'"):
+        await authz.can("viewer", alice, Resource(type="folder", id="f1"))
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_a_subject_type_the_relation_does_not_allow():
+    from py_authz.core.exceptions import ExternalServiceError
+
+    class Team(ResourceModel):
+        type = "team"
+        member = Relation("member")
+
+    class Doc(ResourceModel):
+        type = "doc"
+        owner = Relation("owner")  # subjects default to ["user"]
+
+    reg = ResourceModelRegistry()
+    reg.register(Team)
+    reg.register(Doc)
+    authz = make_fake_authz(model_registry=reg, strict=True)
+
+    with pytest.raises(ExternalServiceError, match="not an allowed subject"):
+        await authz.grant(Identity(id="team:core"), "owner", Doc(id="1"))
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_duplicate_writes_and_missing_deletes_atomically(strict_authz):
+    from py_authz.core.exceptions import ExternalServiceError
+
+    authz, Document = strict_authz
+    client = authz._engine.fga_client
+    alice = {"user": "user:alice", "relation": "owner", "object": "document:d1"}
+    bob = {"user": "user:bob", "relation": "owner", "object": "document:d1"}
+
+    await client.write_tuples([alice])
+    with pytest.raises(ExternalServiceError, match="already exists"):
+        await client.write_tuples([bob, alice])  # batch rejected as a whole...
+    assert (await client.read_tuples(user="user:bob"))["tuples"] == []  # ...nothing applied
+
+    with pytest.raises(ExternalServiceError, match="does not exist"):
+        await client.write_tuples([], deletes=[bob])
+
+
+@pytest.mark.asyncio
+async def test_non_strict_mode_stays_permissive_for_backwards_compatibility(doc_registry):
+    reg, Document = doc_registry
+    authz = make_fake_authz(model_registry=reg)
+
+    await authz.grant(Identity(id="service:anything"), "owner", Document(id="d1"))
+    await authz.grant(Identity(id="service:anything"), "owner", Document(id="d1"))

@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { grantRole, listRoles, revokeRole } from "@/lib/actions";
 import { ROLE_LABELS } from "@/lib/rbac";
-import type { Role, RoleGrant } from "@/lib/types";
+import type { Role, RoleGrant, SubjectKind } from "@/lib/types";
 
 const ROLES: Role[] = ["owner", "admin", "operator", "auditor", "viewer"];
 
@@ -33,11 +33,21 @@ export function RolesPanel({ tenantIds }: { tenantIds: string[] }) {
   );
 }
 
+/** Role tuples come back as `user:<sub>` or `service_account:<sa_id>`;
+ * the API takes the bare id plus a `subject_kind`. */
+function parseSubject(subject: string): { kind: SubjectKind; id: string } {
+  if (subject.startsWith("service_account:")) {
+    return { kind: "service_account", id: subject.slice("service_account:".length) };
+  }
+  return { kind: "user", id: subject.replace(/^user:/, "") };
+}
+
 function ScopeGrants({ scope, tenantIds }: { scope: "system" | "tenant"; tenantIds?: string[] }) {
   const [tenantId, setTenantId] = useState(tenantIds?.[0] ?? "");
   const [grants, setGrants] = useState<RoleGrant[]>([]);
   const [loading, setLoading] = useState(true);
   const [subject, setSubject] = useState("");
+  const [subjectKind, setSubjectKind] = useState<SubjectKind>("user");
   const [role, setRole] = useState<Role>("auditor");
   const [pending, setPending] = useState(false);
 
@@ -71,7 +81,13 @@ function ScopeGrants({ scope, tenantIds }: { scope: "system" | "tenant"; tenantI
     if (!subject.trim()) return;
     setPending(true);
     try {
-      const result = await grantRole({ subject: subject.trim(), scope, tenantId: activeTenantId, role });
+      const result = await grantRole({
+        subject: subject.trim(),
+        subjectKind,
+        scope,
+        tenantId: activeTenantId,
+        role,
+      });
       if (result.success) {
         toast.success(`Granted ${role} to ${subject}.`);
         setSubject("");
@@ -107,9 +123,23 @@ function ScopeGrants({ scope, tenantIds }: { scope: "system" | "tenant"; tenantI
         <>
           <div className="flex flex-wrap items-end gap-2">
             <div className="grid gap-1">
-              <label className="text-xs font-medium text-muted-foreground">Subject</label>
+              <label className="text-xs font-medium text-muted-foreground">Subject type</label>
+              <Select value={subjectKind} onValueChange={(v) => setSubjectKind(v as SubjectKind)}>
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">Operator</SelectItem>
+                  <SelectItem value="service_account">Service account</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                {subjectKind === "user" ? "Subject (OIDC sub)" : "Service account id"}
+              </label>
               <Input
-                placeholder="alice"
+                placeholder={subjectKind === "user" ? "alice" : "sa_…"}
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 className="w-48"
@@ -151,8 +181,10 @@ function ScopeGrants({ scope, tenantIds }: { scope: "system" | "tenant"; tenantI
                     confirmLabel="Revoke"
                     destructive
                     onConfirm={async () => {
+                      const { kind, id } = parseSubject(g.subject);
                       const result = await revokeRole({
-                        subject: g.subject.replace(/^user:/, ""),
+                        subject: id,
+                        subjectKind: kind,
                         scope,
                         tenantId: activeTenantId,
                         role: g.role,

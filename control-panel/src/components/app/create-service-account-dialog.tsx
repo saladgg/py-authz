@@ -21,7 +21,28 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { createServiceAccount } from "@/lib/actions";
 
-const COMMON_SCOPES = ["models:sync", "models:read", "tenants:read", "audit:read"];
+/** Mirrors the backend's closed `Scope` enum (`py_authz/control_plane/
+ * scopes.py`, SEC3-1) — an unknown scope is rejected with a 422. A scope
+ * is only a ceiling: the account still needs an RBAC role (granted on the
+ * Operators & Roles screen) for any route to succeed. */
+const COMMON_SCOPES = [
+  "tenants:read",
+  "tenants:write",
+  "models:read",
+  "models:write",
+  "migrations:read",
+  "migrations:write",
+  "tuples:read",
+  "tuples:write",
+  "audit:read",
+  "cache:read",
+  "cache:write",
+  "metrics:read",
+  "service_accounts:read",
+  "service_accounts:write",
+  "operators:read",
+  "operators:write",
+];
 
 export function CreateServiceAccountDialog() {
   const [open, setOpen] = useState(false);

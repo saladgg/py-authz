@@ -10,6 +10,7 @@ import type {
   ModelSyncResult,
   RoleGrant,
   ServiceAccountWithSecret,
+  SubjectKind,
   Tenant,
   TupleReadResult,
 } from "./types";
@@ -167,6 +168,8 @@ export async function revokeServiceAccount(id: string): Promise<ActionResult<{ s
 
 interface RoleAssignmentArgs {
   subject: string;
+  /** `service_account` grants to `service_account:<sa_id>` (SEC3-3). */
+  subjectKind?: SubjectKind;
   scope: "system" | "tenant";
   tenantId?: string;
   role: string;
@@ -192,7 +195,13 @@ export async function grantRole(
   const result = await run(() =>
     apiAction<{ status: string }>("/api/v1/operators/roles", {
       method: "POST",
-      body: { subject: args.subject, scope: args.scope, tenant_id: args.tenantId, role: args.role },
+      body: {
+        subject: args.subject,
+        subject_kind: args.subjectKind ?? "user",
+        scope: args.scope,
+        tenant_id: args.tenantId,
+        role: args.role,
+      },
     }),
   );
   if (result.success) revalidatePath("/operators");
@@ -205,7 +214,13 @@ export async function revokeRole(
   const result = await run(() =>
     apiAction<{ status: string }>("/api/v1/operators/roles", {
       method: "DELETE",
-      body: { subject: args.subject, scope: args.scope, tenant_id: args.tenantId, role: args.role },
+      body: {
+        subject: args.subject,
+        subject_kind: args.subjectKind ?? "user",
+        scope: args.scope,
+        tenant_id: args.tenantId,
+        role: args.role,
+      },
     }),
   );
   if (result.success) revalidatePath("/operators");
