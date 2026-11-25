@@ -203,6 +203,9 @@ source = ["py_authz"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+# DX3-4: a floor, so a module can't quietly sit at 47% again (as
+# control_plane/app.py did). `make test` fails below it.
+fail_under = 95
 
 [tool.mypy]
 plugins = "pydantic.mypy"
