@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 
 from py_authz.cache.memory import InMemoryCache
@@ -12,10 +10,22 @@ async def test_cache_set_get(cache):
 
 
 @pytest.mark.asyncio
-async def test_cache_expiry(cache):
+async def test_cache_expiry():
+    """DX3-5: an injected clock replaces a real 1.1 s sleep."""
+    now = [1000.0]
+    cache = InMemoryCache(clock=lambda: now[0])
     await cache.set("key", True, ttl=1)
-    await asyncio.sleep(1.1)
+
+    now[0] += 0.999
+    assert await cache.get("key") is True
+    now[0] += 0.001
     assert await cache.get("key") is None
+
+
+def test_cache_defaults_to_a_monotonic_clock():
+    import time
+
+    assert InMemoryCache()._clock is time.monotonic
 
 
 @pytest.mark.asyncio

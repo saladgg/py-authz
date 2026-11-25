@@ -6,6 +6,25 @@ from py_authz.core.exceptions import LockAcquisitionTimeout
 from py_authz.core.locks import RedisLock, RedisLockManager
 
 
+def _count_renewals(monkeypatch, *, at_least: int) -> asyncio.Event:
+    """Patch `RedisLock.renew` to set the returned event once it has been
+    called `at_least` times (DX3-5: event-driven, no fixed sleeps)."""
+    event = asyncio.Event()
+    calls = 0
+    real_renew = RedisLock.renew
+
+    async def counting_renew(self, key, lock_id, ttl):
+        nonlocal calls
+        result = await real_renew(self, key, lock_id, ttl)
+        calls += 1
+        if calls >= at_least:
+            event.set()
+        return result
+
+    monkeypatch.setattr(RedisLock, "renew", counting_renew)
+    return event
+
+
 class FakeRedis:
     """Minimal async Redis stand-in for distributed lock semantics."""
 
@@ -119,7 +138,7 @@ async def test_renew_extends_ttl_only_when_owner_matches():
 
 
 @pytest.mark.asyncio
-async def test_manager_lock_renews_ttl_while_body_is_running():
+async def test_manager_lock_renews_ttl_while_body_is_running(monkeypatch):
     """
     Regression test for REL-6: a critical section that outlives the
     initial TTL must not have its lock silently expire out from under it
@@ -128,9 +147,11 @@ async def test_manager_lock_renews_ttl_while_body_is_running():
     """
     r = FakeRedis()
     mgr = RedisLockManager(r)
+    renewed = _count_renewals(monkeypatch, at_least=2)
 
-    async with mgr.lock("k6", ttl=1, renew_interval=0.05):
-        await asyncio.sleep(0.22)  # several renewal intervals
+    async with mgr.lock("k6", ttl=1, renew_interval=0.01):
+        # DX3-5: wait for the renewals themselves, not a fixed sleep.
+        await asyncio.wait_for(renewed.wait(), timeout=5)
 
     renewal_calls = [c for c in r.eval_calls if '"expire"' in c[0]]
     assert len(renewal_calls) >= 2
@@ -151,18 +172,22 @@ async def test_manager_lock_renewal_survives_transient_renew_errors():
     call_count = 0
     real_renew = RedisLock.renew
 
+    succeeded = asyncio.Event()
+
     async def flaky_renew(self, key, lock_id, ttl):
         nonlocal call_count
         call_count += 1
         if call_count <= 2:
             raise ConnectionError("redis unavailable")
-        return await real_renew(self, key, lock_id, ttl)
+        result = await real_renew(self, key, lock_id, ttl)
+        succeeded.set()
+        return result
 
     RedisLock.renew = flaky_renew
     try:
         body_completed = False
-        async with mgr.lock("k8", ttl=1, renew_interval=0.02):
-            await asyncio.sleep(0.15)  # several renewal intervals
+        async with mgr.lock("k8", ttl=1, renew_interval=0.01):
+            await asyncio.wait_for(succeeded.wait(), timeout=5)
             body_completed = True
     finally:
         RedisLock.renew = real_renew
@@ -175,7 +200,7 @@ async def test_manager_lock_renewal_survives_transient_renew_errors():
 
 
 @pytest.mark.asyncio
-async def test_manager_lock_renewal_survives_lost_lock_without_crashing():
+async def test_manager_lock_renewal_survives_lost_lock_without_crashing(monkeypatch):
     """
     If renewal discovers the lock is no longer held (e.g. it expired for
     real and someone else acquired it), the renewal loop must stop
@@ -186,11 +211,12 @@ async def test_manager_lock_renewal_survives_lost_lock_without_crashing():
     mgr = RedisLockManager(r)
 
     body_completed = False
+    renewed = _count_renewals(monkeypatch, at_least=1)
 
-    async with mgr.lock("k7", ttl=1, renew_interval=0.02):
+    async with mgr.lock("k7", ttl=1, renew_interval=0.01):
         # Simulate another process having taken over the key.
         r._store["k7"] = "someone-else"
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(renewed.wait(), timeout=5)
         body_completed = True
 
     assert body_completed is True

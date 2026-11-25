@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 
 from .base import BaseCache
 
@@ -28,7 +29,12 @@ class InMemoryCache(BaseCache):
         - For production, consider using Redis or another external cache.
     """
 
-    def __init__(self, *, max_size: int | None = 10_000):
+    def __init__(
+        self,
+        *,
+        max_size: int | None = 10_000,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         """
         Args:
             max_size: maximum number of entries kept at once —
@@ -39,7 +45,12 @@ class InMemoryCache(BaseCache):
                 leak under sustained load in a process using this cache
                 as shipped (see REL2-5). `None` restores the old,
                 unbounded behavior.
+            clock: seconds source used for TTLs (DX3-5). Defaults to
+                `time.monotonic`, so a wall-clock jump (NTP, DST) can't
+                expire or resurrect entries; it was `time.time()`. Tests
+                inject a fake clock instead of sleeping.
         """
+        self._clock = clock
         # Store format:
         # key -> (value, expiry_timestamp)
         # An OrderedDict so both TTL expiry and LRU eviction can share one
@@ -71,7 +82,7 @@ class InMemoryCache(BaseCache):
             value, expiry = item
 
             # Check TTL expiration
-            if expiry < time.time():
+            if expiry <= self._clock():
                 # Remove expired entry
                 del self._store[key]
                 return None
@@ -88,7 +99,7 @@ class InMemoryCache(BaseCache):
             value (bool): Value to store.
             ttl (int): Time-to-live in seconds.
         """
-        expiry = time.time() + ttl
+        expiry = self._clock() + ttl
 
         async with self._lock:
             self._store[key] = (value, expiry)
