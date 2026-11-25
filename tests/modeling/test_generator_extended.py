@@ -327,3 +327,71 @@ def test_intersection_exclude_and_multi_from_parent_combine():
     assert any(
         c.get("tupleToUserset", {}).get("tupleset") == {"relation": "parent_b"} for c in child
     )
+
+
+# ---------------------------------------------------------------------------
+# ARCH3-6 — subject parsing and the implicit `user` type
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("user", {"type": "user"}),
+        ("user:*", {"type": "user", "wildcard": {}}),
+        ("team#member", {"type": "team", "relation": "member"}),
+    ],
+)
+def test_parse_subject(subject, expected):
+    from py_authz.modeling.generator import parse_subject
+
+    assert parse_subject(subject) == expected
+
+
+@pytest.mark.parametrize("subject", ["", ":*", "team#", "#member", "a#b#c", "user:alice", "a#b:*"])
+def test_parse_subject_rejects_malformed(subject):
+    from py_authz.modeling.generator import parse_subject
+
+    with pytest.raises(ModelValidationError):
+        parse_subject(subject)
+
+
+def test_userset_subject_is_emitted_as_type_plus_relation():
+    class Doc(ResourceModel):
+        type = "arch3_6_gen_doc"
+        viewer = Relation("viewer", subjects=["team#member", "user:*"])
+
+    model = OpenFGAModelGenerator().generate(models=[Doc])
+    doc = next(t for t in model["type_definitions"] if t["type"] == "arch3_6_gen_doc")
+    assert doc["metadata"]["relations"]["viewer"]["directly_related_user_types"] == [
+        {"type": "team", "relation": "member"},
+        {"type": "user", "wildcard": {}},
+    ]
+
+
+def test_resource_model_declaring_user_does_not_duplicate_the_user_type():
+    class User(ResourceModel):
+        type = "user"
+        manager = Relation("manager")
+
+    class Doc(ResourceModel):
+        type = "arch3_6_gen_doc2"
+        viewer = Relation("viewer")
+
+    types = [
+        t["type"] for t in OpenFGAModelGenerator().generate(models=[User, Doc])["type_definitions"]
+    ]
+    assert types == ["user", "arch3_6_gen_doc2"]
+
+
+def test_two_models_with_the_same_type_are_rejected():
+    class A(ResourceModel):
+        type = "arch3_6_dup"
+        viewer = Relation("viewer")
+
+    class B(ResourceModel):
+        type = "arch3_6_dup"
+        viewer = Relation("viewer")
+
+    with pytest.raises(ModelValidationError, match="more than one ResourceModel"):
+        OpenFGAModelGenerator().generate(models=[A, B])

@@ -6,6 +6,38 @@ from py_authz.modeling.base import Relation, ResourceModel, from_parent_pairs
 from py_authz.modeling.registry import registry
 
 # -------------------------------------------------------------------
+# Subject parsing
+# -------------------------------------------------------------------
+
+
+def parse_subject(subject: str) -> dict[str, Any]:
+    """
+    Turn one `Relation(subjects=[...])` entry into an OpenFGA
+    `directly_related_user_types` entry (ARCH3-6):
+
+    - `"user"`          -> `{"type": "user"}`
+    - `"user:*"`        -> `{"type": "user", "wildcard": {}}` (public access)
+    - `"team#member"`   -> `{"type": "team", "relation": "member"}` (userset)
+
+    It used to emit `{"type": "team#member"}` verbatim, which OpenFGA
+    rejects.
+    """
+    if subject.endswith(":*"):
+        subject_type = subject[:-2]
+        if not subject_type or "#" in subject_type or ":" in subject_type:
+            raise ModelValidationError(f"Invalid wildcard subject {subject!r}")
+        return {"type": subject_type, "wildcard": {}}
+    if "#" in subject:
+        subject_type, _, relation = subject.partition("#")
+        if not subject_type or not relation or "#" in relation or ":" in subject:
+            raise ModelValidationError(f"Invalid userset subject {subject!r}")
+        return {"type": subject_type, "relation": relation}
+    if not subject or ":" in subject:
+        raise ModelValidationError(f"Invalid subject type {subject!r}")
+    return {"type": subject}
+
+
+# -------------------------------------------------------------------
 # Core Generator
 # -------------------------------------------------------------------
 
@@ -64,12 +96,22 @@ class OpenFGAModelGenerator:
         self, models: Iterable[type[ResourceModel]] | None = None
     ) -> list[dict[str, Any]]:
         types: list[dict[str, Any]] = []
-
-        # Always include base user type
-        types.append({"type": "user"})
+        seen: set[str] = set()
 
         for model in models if models is not None else registry.all():
+            if model.type in seen:
+                # OpenFGA rejects a model that defines a type twice (ARCH3-6).
+                raise ModelValidationError(
+                    f"Type {model.type!r} is defined by more than one ResourceModel"
+                )
+            seen.add(model.type)
             types.append(self._generate_type(model))
+
+        # The base `user` type is implicit, unless a ResourceModel declares
+        # it (e.g. to give users their own relations). Prepending it
+        # unconditionally produced a duplicate `user` type (ARCH3-6).
+        if "user" not in seen:
+            types.insert(0, {"type": "user"})
 
         return types
 
@@ -82,7 +124,7 @@ class OpenFGAModelGenerator:
             "relations": {
                 name: {
                     "directly_related_user_types": [
-                        {"type": subject_type} for subject_type in rel.subjects
+                        parse_subject(subject) for subject in rel.subjects
                     ]
                 }
                 for name, rel in relation_map.items()
