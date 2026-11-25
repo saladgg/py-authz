@@ -4,12 +4,12 @@ Execution checklist for
 [`11_architecture_and_code_quality.md`](11_architecture_and_code_quality.md).
 IDs match that file.
 
-> **Status (2026-11-24):** Tier 0 shipped (ARCH3-1, ARCH3-14), plus
+> **Status (2026-11-25):** Tier 0 shipped (ARCH3-1, ARCH3-14), plus
 > ARCH3-9 from Tier 2, pulled forward to back `10`'s service-account fix.
 > Tier 1 (ARCH3-2/3/4/5) shipped in the second batch (2026-11-24), along
-> with ARCH3-7, ARCH3-10 and ARCH3-15. **Still open:** ARCH3-6, ARCH3-8,
-> the Tier 3 refactors (ARCH3-11/12/13) and Tier 4 polish. ARCH3-17 is
-> partly done (public `write_authorization_model()`).
+> with ARCH3-7, ARCH3-10 and ARCH3-15. Batch 3 (2026-11-25) shipped
+> ARCH3-6, ARCH3-8 and ARCH3-17. **Still open:** the Tier 3 refactors
+> (ARCH3-11/12/13), ARCH3-16 and ARCH3-18.
 
 ---
 
@@ -125,10 +125,23 @@ IDs match that file.
   - Confirmed strict mode rejects the pre-fix `service:` principal with
     "type 'service' not found". Non-strict stays permissive for backwards
     compatibility. Seven new tests in `tests/test_testkit.py`.
-- [ ] **ARCH3-6 — Validator: tupleset, subject-type and duplicate-type
+- [x] **ARCH3-6 — Validator: tupleset, subject-type and duplicate-type
   checks; generator parses `type#relation` and `type:*`.**
-- [ ] **ARCH3-8 — Real `explain()` via `/expand`, or document it as
+  Shipped (batch 3): `parse_subject()` emits usersets and wildcards; the
+  generator stops duplicating `user` and rejects two models sharing a
+  type. The validator checks duplicate types, tupleset relations (at any
+  depth in the rewrite), the computed relation on the tupleset's subject
+  types, and subject types/userset relations. A wildcard+userset model
+  was confirmed accepted by real OpenFGA. Tests also gained an autouse
+  fixture that restores the global model registry after each test.
+- [x] **ARCH3-8 — Real `explain()` via `/expand`, or document it as
   check-only.**
+  Shipped (batch 3): `OpenFGAClient.expand()` plus `explain()`, which
+  walks `/expand` trees (`clients/expand_path.py`, bounded depth and call
+  budget) and returns the userset chain, surfaced as
+  `AuthzExplanation.path`. Live test against real OpenFGA covers
+  computed → parent → userset routes and a wildcard; example 07 prints a
+  real path. `/expand` doesn't evaluate conditions; documented.
 
 ## Tier 3 — Structural refactors (each its own PR)
 
@@ -151,9 +164,16 @@ IDs match that file.
 
 - [ ] **ARCH3-16 — Record both `tenant_id` and `store_id` on audit
   events** (migration `0009`).
-- [ ] **ARCH3-17 — Boundary cleanups** (public
+- [x] **ARCH3-17 — Boundary cleanups** (public
   `write_authorization_model`, move `load_module`, drop `TupleRef`
   duck-typing, `reason`/`actor` on bulk operations, richer `__init__`
   exports plus `__version__`, split `migrate_command`).
+  Shipped (batch 3): `grant_many`/`revoke_many` take `reason`/`actor`;
+  `load_module` lives in `py_authz.utils.modules` (old import aliased);
+  routes pass `TupleRef.to_resource()`; the package root exports
+  `MultiTenantAuthz`, `AuthzExplanation`, the exceptions and
+  `__version__`; `migrate_command` is split into per-step helpers, and
+  the Postgres builder no longer leaks a pool when the second connect
+  fails.
 - [ ] **ARCH3-18 — Panel: generated types from OpenAPI response models;
   reads off Server Actions; no raw error messages to the browser.**

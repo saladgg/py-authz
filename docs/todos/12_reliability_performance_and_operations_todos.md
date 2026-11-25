@@ -4,13 +4,14 @@ Execution checklist for
 [`12_reliability_performance_and_operations.md`](12_reliability_performance_and_operations.md).
 IDs match that file.
 
-> **Status (2026-11-24):** Tier 0 shipped (REL3-1, REL3-11, REL3-20,
+> **Status (2026-11-25):** Tier 0 shipped (REL3-1, REL3-11, REL3-20,
 > REL3-21), plus REL3-22 (CI hygiene) pulled forward since it touched
 > the same workflow. Second batch (2026-11-24): REL3-2, REL3-4, REL3-5 and
 > REL3-18, then Tiers 1–2 in full and REL3-15/17 (partly). **Still open:**
 > REL3-10 (schema migrations), REL3-16 (batched audit writes), REL3-19,
-> REL3-23 (images/compose), REL3-24 (metrics), plus the noted remainders
-> of REL3-14/15/17.
+> REL3-23 (images/compose), REL3-24 (metrics; batch 3 shipped the deque
+> and request ids, the Prometheus exporter is left), plus the noted
+> remainders of REL3-14/15/17.
 
 ---
 
@@ -168,5 +169,10 @@ IDs match that file.
   Keycloak; reference Dockerfiles (API + panel) with compose services.**
 - [ ] **REL3-24 — `deque` metrics, an optional Prometheus exporter,
   request id in logs.**
+  Partly shipped (batch 3): `Metrics.observe()` uses `deque(maxlen)`;
+  control-plane request logs carry `request_id` (a safe caller
+  `X-Request-ID` is reused) and echo it as a response header. Still open:
+  the optional Prometheus exporter and a control-plane request-duration
+  metric.
 - [x] **REL3-25 — See `10`'s SEC3-9.**
   Shipped with `10`'s SEC3-9.
