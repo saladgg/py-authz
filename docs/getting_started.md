@@ -216,7 +216,8 @@ net for every authorization failure.
   is straightforward. See [`examples/03_caching.py`](../examples/03_caching.py).
 - **Multi-tenant** — use `MultiTenantAuthz` to isolate stores per tenant with
   optional auto-provisioning. See [`examples/06_multitenant.py`](../examples/06_multitenant.py).
-- **Explain / bulk** — `AuthzEngine.explain` returns *why* a decision was made;
+- **Explain / bulk** — `AuthzEngine.explain` returns the decision plus, when allowed, the
+  relation path that grants it (built from OpenFGA `/expand`);
   `AuthzEngine.bulk_enforce` checks N requests concurrently. See
   [`examples/07_explain_and_bulk.py`](../examples/07_explain_and_bulk.py).
 - **Architecture** — read [`architecture.md`](architecture.md) for the

@@ -126,8 +126,11 @@ class AuthzEngine:
         if not explanation_data:
             return None
 
-        # depends on OpenFGA response structure
-        # keep generic/fallback for now
+        # `OpenFGAClient.explain()` returns `{"path": [...]}` (ARCH3-8).
+        if isinstance(explanation_data, dict) and isinstance(explanation_data.get("path"), list):
+            return [str(step) for step in explanation_data["path"]]
+
+        # Any other client-specific shape: keep it readable, as before.
         try:
             return [str(explanation_data)]
         except Exception:

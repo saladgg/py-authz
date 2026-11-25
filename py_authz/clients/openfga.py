@@ -1,5 +1,6 @@
 import httpx
 
+from py_authz.clients.expand_path import find_path
 from py_authz.core.exceptions import (
     ExternalServiceError,
     ServiceTimeout,
@@ -478,6 +479,56 @@ class OpenFGAClient:
         )
 
         return list(res.get("objects", []))
+
+    async def expand(
+        self,
+        relation: str,
+        object: str,
+        *,
+        contextual_tuples: list[dict] | None = None,
+    ) -> dict:
+        """
+        OpenFGA `/expand`: one level of the userset tree for
+        `object#relation` (direct users, plus `computed`/`tupleToUserset`
+        references to expand in turn). Returns the response's
+        `tree.root` node, or `{}` when OpenFGA returns no tree.
+        """
+        payload: dict = {
+            "tuple_key": {"relation": relation, "object": object},
+            "authorization_model_id": self.model_id,
+        }
+        if contextual_tuples:
+            payload["contextual_tuples"] = {"tuple_keys": contextual_tuples}
+        data = await self._request(
+            "POST", f"/stores/{self.store_id}/expand", json=payload, idempotent=True
+        )
+        return (data.get("tree") or {}).get("root") or {}
+
+    async def explain(
+        self,
+        user: str,
+        relation: str,
+        object: str,
+        *,
+        contextual_tuples: list[dict] | None = None,
+        context: dict | None = None,
+    ) -> dict | None:
+        """
+        Find the route through which `user` holds `relation` on `object`
+        by walking `/expand` trees (ARCH3-8) — see
+        `py_authz.clients.expand_path` for the format and limits.
+
+        Returns `{"path": [...]}` when a route is found, else `None`.
+        `context` is accepted for signature compatibility but `/expand`
+        doesn't evaluate conditions, so it isn't sent.
+        """
+        del context  # /expand has no condition evaluation
+
+        async def _expand(rel: str, obj: str) -> dict:
+            return await self.expand(rel, obj, contextual_tuples=contextual_tuples)
+
+        path = await find_path(_expand, user, relation, object)
+        return {"path": path} if path else None
 
     async def read_tuples(
         self,
