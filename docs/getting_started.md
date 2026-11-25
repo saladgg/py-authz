@@ -8,7 +8,7 @@ possible snippet, see the [Quickstart in the root README](../README.md#quickstar
 
 ## 1. Install
 
-Requires **Python 3.13+**.
+Requires **Python 3.12+**.
 
 ```bash
 # Core only

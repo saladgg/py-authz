@@ -1,22 +1,25 @@
 [project]
 name = "py-authz"
-version = "v2.0.0"
+version = "2.0.0"
 description = "Authz library based on OpenFGA"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 authors = [{ name = "Salad Guyo", email = "saladguyo60@gmail.com" }]
 license = { text = "MIT" }
 keywords = ["keycloak", "oidc", "jwt", "openfga", "authorization", "authentication"]
 
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Topic :: Security",
     "Topic :: Internet :: WWW/HTTP :: Session",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Intended Audience :: Developers",
-    "Development Status :: 5 - Production/Stable",
+    # Unpublished and still taking breaking changes between majors (DX3-10).
+    "Development Status :: 4 - Beta",
 ]
 
 dependencies = [
@@ -130,10 +133,10 @@ py-authz = "py_authz.cli.main:main"
 py-authz-control-plane = "py_authz.control_plane.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/saladgg/py-authz" # todo
+Homepage = "https://github.com/saladgg/py-authz"
 Repository = "https://github.com/saladgg/py-authz"
-Documentation = "https://github.com/saladgg/py-authz/docs"
-Changelog = "https://github.com/saladgg/py-authz/releases"
+Documentation = "https://github.com/saladgg/py-authz/tree/main/docs"
+Changelog = "https://github.com/saladgg/py-authz/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["setuptools>=84.0.0", "wheel>=0.48.0"]
@@ -209,6 +212,9 @@ fail_under = 95
 
 [tool.mypy]
 plugins = "pydantic.mypy"
+# Type-check against the supported floor (DX3-11), not whichever
+# interpreter happens to run mypy.
+python_version = "3.12"
 packages = ["py_authz"]
 explicit_package_bases = true
 disable_error_code = [
@@ -224,8 +230,16 @@ disable_error_code = [
 
 [tool.semantic_release]
 commit_parser = "conventional"
+# `:nf` writes a canonical PEP 440 "2.0.0" (DX3-10); `:tf` wrote the tag
+# form, "v2.0.0".
 version_toml = [
-    "pyproject.toml:project.version:tf"
+    "pyproject.toml:project.version:nf"
+]
+# Keep the README's version badge and git-install pin in step with each
+# release (DX3-10) — both drifted by two releases before.
+version_variables = [
+    "README.md:message:nf",
+    "README.md:py-authz.git:tf",
 ]
 branch = "main"
 build_command = "python -m build"

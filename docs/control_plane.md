@@ -22,7 +22,7 @@ half of the backend walkthrough below is
 
 ## 1. Install
 
-Requires **Python 3.13+** and the `control-plane` extra (FastAPI,
+Requires **Python 3.12+** and the `control-plane` extra (FastAPI,
 Postgres, Redis, PyJWT, argon2-cffi):
 
 ```bash
