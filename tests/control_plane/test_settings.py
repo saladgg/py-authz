@@ -1,5 +1,7 @@
 """Tests for py_authz.control_plane.settings.ControlPlaneSettings (CP-1)."""
 
+import os
+
 import pytest
 
 from py_authz.control_plane.settings import ControlPlaneSettings
@@ -15,6 +17,11 @@ _REQUIRED_ENV = {
 
 
 def _set_env(monkeypatch, overrides=None):
+    # Start from a clean slate: a developer shell that exports `.env`
+    # (e.g. CONTROL_PLANE_REDIS_URL) must not leak into these assertions.
+    for key in list(os.environ):
+        if key.startswith("CONTROL_PLANE_"):
+            monkeypatch.delenv(key)
     env = {**_REQUIRED_ENV, **(overrides or {})}
     for key, value in env.items():
         monkeypatch.setenv(key, value)
