@@ -427,3 +427,114 @@ def test_intersection_exclude_and_multi_from_parent_pass_full_validator_when_acy
     finally:
         for model in (Folder, Workspace, Doc):
             del registry._models[model.type]
+
+
+# ---------------------------------------------------------------------------
+# ARCH3-6 — models OpenFGA rejects must fail validation locally
+# ---------------------------------------------------------------------------
+
+
+def _generate(*models):
+    return OpenFGAModelGenerator().generate(models=models)
+
+
+def test_misspelled_tupleset_relation_is_rejected(validator):
+    class Folder(ResourceModel):
+        type = "arch3_6_folder"
+        viewer = Relation("viewer")
+
+    class Doc(ResourceModel):
+        type = "arch3_6_doc"
+        parent = Relation("parent", subjects=["arch3_6_folder"])
+        viewer = Relation("viewer", from_parent=("parnet", "viewer"))
+
+    with pytest.raises(ModelValidationError, match="tupleset relation 'parnet'"):
+        validator.validate(_generate(Folder, Doc))
+
+
+def test_tupleset_computed_relation_missing_on_parent_type_is_rejected(validator):
+    class Folder(ResourceModel):
+        type = "arch3_6_folder2"
+        viewer = Relation("viewer")
+
+    class Doc(ResourceModel):
+        type = "arch3_6_doc2"
+        parent = Relation("parent", subjects=["arch3_6_folder2"])
+        viewer = Relation("viewer", from_parent=("parent", "reader"))
+
+    with pytest.raises(ModelValidationError, match="define 'reader'"):
+        validator.validate(_generate(Folder, Doc))
+
+
+def test_tupleset_nested_in_exclusion_is_checked(validator):
+    class Doc(ResourceModel):
+        type = "arch3_6_doc3"
+        banned = Relation("banned")
+        viewer = Relation(
+            "viewer", subjects=["user"], from_parent=("nope", "viewer"), exclude="banned"
+        )
+
+    with pytest.raises(ModelValidationError, match="tupleset relation 'nope'"):
+        validator.validate(_generate(Doc))
+
+
+def test_unknown_subject_type_is_rejected(validator):
+    class Doc(ResourceModel):
+        type = "arch3_6_doc4"
+        viewer = Relation("viewer", subjects=["grup"])
+
+    with pytest.raises(ModelValidationError, match="subject type 'grup'"):
+        validator.validate(_generate(Doc))
+
+
+def test_userset_subject_with_unknown_relation_is_rejected(validator):
+    class Team(ResourceModel):
+        type = "arch3_6_team"
+        member = Relation("member")
+
+    class Doc(ResourceModel):
+        type = "arch3_6_doc5"
+        viewer = Relation("viewer", subjects=["arch3_6_team#membr"])
+
+    with pytest.raises(ModelValidationError, match="has no relation 'membr'"):
+        validator.validate(_generate(Team, Doc))
+
+
+def test_wildcard_and_userset_subjects_validate(validator):
+    class Team(ResourceModel):
+        type = "arch3_6_team2"
+        member = Relation("member")
+
+    class Doc(ResourceModel):
+        type = "arch3_6_doc6"
+        viewer = Relation("viewer", subjects=["user", "user:*", "arch3_6_team2#member"])
+
+    validator.validate(_generate(Team, Doc))
+
+
+def test_duplicate_type_is_rejected(validator):
+    model = {"type_definitions": [{"type": "user"}, {"type": "user"}]}
+    with pytest.raises(ModelValidationError, match="defined more than once"):
+        validator.validate(model)
+
+
+def test_tupleset_without_metadata_only_checks_the_same_type(validator):
+    """Hand-written models may omit metadata; the parent-type check is
+    skipped then, but the tupleset must still exist on the type."""
+    model = {
+        "type_definitions": [
+            {
+                "type": "document",
+                "relations": {
+                    "parent": {"this": {}},
+                    "viewer": {
+                        "tupleToUserset": {
+                            "tupleset": {"relation": "parent"},
+                            "computedUserset": {"relation": "anything"},
+                        }
+                    },
+                },
+            }
+        ]
+    }
+    validator.validate(model)

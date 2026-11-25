@@ -94,6 +94,7 @@ def test_never_logs_request_headers_or_body(client, caplog):
     payload = _last_json_record(caplog)
     assert set(payload.keys()) == {
         "event",
+        "request_id",
         "method",
         "path",
         "status_code",
@@ -102,3 +103,33 @@ def test_never_logs_request_headers_or_body(client, caplog):
         "principal_kind",
     }
     assert "super-secret-value" not in json.dumps(payload)
+
+
+# REL3-24: request ids in request logs and on the response.
+
+
+def test_generates_a_request_id_and_returns_it(client, caplog):
+    with caplog.at_level(logging.INFO, logger="py_authz.control_plane.requests"):
+        resp = client.get("/ok")
+
+    payload = _last_json_record(caplog)
+    assert payload["request_id"]
+    assert resp.headers["X-Request-ID"] == payload["request_id"]
+
+
+def test_reuses_a_safe_caller_request_id(client, caplog):
+    with caplog.at_level(logging.INFO, logger="py_authz.control_plane.requests"):
+        resp = client.get("/ok", headers={"X-Request-ID": "panel-abc.123"})
+
+    assert _last_json_record(caplog)["request_id"] == "panel-abc.123"
+    assert resp.headers["X-Request-ID"] == "panel-abc.123"
+
+
+@pytest.mark.parametrize("bad", ["has space", "x" * 129, 'quote"injection', ""])
+def test_replaces_an_unsafe_caller_request_id(client, caplog, bad):
+    with caplog.at_level(logging.INFO, logger="py_authz.control_plane.requests"):
+        client.get("/ok", headers={"X-Request-ID": bad})
+
+    request_id = _last_json_record(caplog)["request_id"]
+    assert request_id != bad
+    assert len(request_id) == 36  # a fresh uuid4

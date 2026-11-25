@@ -4,6 +4,21 @@ from py_authz.api import Authz
 from py_authz.cache.memory import InMemoryCache
 from py_authz.core.enforcement import AuthzEngine
 from py_authz.core.types import AuthzRequest, Identity, Resource
+from py_authz.modeling.registry import registry as _global_registry
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_model_registry():
+    """
+    Restore the global `ResourceModel` registry after every test, so a
+    model one test registers can't leak into another test's
+    `generate_model()` (and, since ARCH3-6 checks subject types, fail
+    validation there).
+    """
+    snapshot = dict(_global_registry._models)
+    yield
+    _global_registry._models.clear()
+    _global_registry._models.update(snapshot)
 
 
 class MockOpenFGAClient:

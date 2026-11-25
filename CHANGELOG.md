@@ -1,5 +1,8 @@
 # CHANGELOG
 
+Breaking changes and upgrade steps for each release are collected in
+[`docs/upgrading.md`](docs/upgrading.md).
+
 <!-- version list -->
 
 ## v2.0.0 (2026-11-24)

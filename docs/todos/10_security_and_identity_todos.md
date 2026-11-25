@@ -4,15 +4,15 @@ Execution checklist for
 [`10_security_and_identity.md`](10_security_and_identity.md). IDs match
 that file.
 
-> **Status (2026-11-24):** Tier 0 shipped as one change (SEC3-1, SEC3-2,
+> **Status (2026-11-25):** Tier 0 shipped as one change (SEC3-1, SEC3-2,
 > SEC3-3, plus the live end-to-end test), together with SEC3-4 from
 > Tier 1, which touched the same role-assignment function. SEC3-3 is now
 > **reproduced** against a real OpenFGA, not just inferred: the pre-fix
 > model shape returns a 400 on both write and check for a `service:`
 > principal. Tier 1 is now fully shipped too: SEC3-6 and SEC3-7 landed
 > in the second batch (2026-11-24). Batch 2 also shipped Tier 2's SEC3-8
-> and all of Tier 3 except SEC3-13. **Still open:** SEC3-5 (blocked on
-> `11`'s ARCH3-11) and SEC3-13.
+> and all of Tier 3 except SEC3-13. Batch 3 (2026-11-25) shipped SEC3-13.
+> **Still open:** SEC3-5 (blocked on `11`'s ARCH3-11).
 
 ---
 
@@ -187,8 +187,15 @@ that file.
   `form-action`, `X-Frame-Options: DENY`, etc.) are set per request in
   `proxy.ts`, not `next.config.ts`, because the latter resolves at build
   time. Verified against a built `next start`.
-- [ ] **SEC3-13 — Lockout keyed on (account, network), or backoff
+- [x] **SEC3-13 — Lockout keyed on (account, network), or backoff
   instead of a hard lockout.**
+  Shipped (batch 3, 2026-11-25): the limiter key is
+  `<account id>|<client /24 or /64>` (`auth.client_network()`), so a
+  guessing source locks out only itself and the SA keeps working from its
+  own network. Each lockout logs one `service_account_lockout` warning.
+  `docs/control_plane.md` notes the uvicorn `--proxy-headers` setting
+  needed behind a proxy. The old pinning test now asserts the same-network
+  behaviour, and a new test covers attacker vs. CI networks.
 - [x] **SEC3-14 — `KeycloakAuthMiddleware` returns a `JSONResponse`, not
   `raise HTTPException`.**
   Shipped: the middleware returns `JSONResponse` 401 (with `WWW-

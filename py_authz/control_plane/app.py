@@ -20,7 +20,6 @@ from py_authz.adapters.oidc import OIDCJWTValidator
 from py_authz.api import Authz, MultiTenantAuthz
 from py_authz.audit.postgres import PostgresAuditLogger, PostgresAuditQuery
 from py_authz.cache.redis import RedisCache
-from py_authz.cli.utils import load_module
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.control_plane import rbac_model
 from py_authz.control_plane.bootstrap import BreakGlassBootstrapper
@@ -54,6 +53,7 @@ from py_authz.core.tenant_resolver import StoreBackedResolver
 from py_authz.storage.postgres import PostgresModelRegistry, PostgresTenantStore
 from py_authz.storage.schema import apply_schema
 from py_authz.utils.deps import redis_from_url
+from py_authz.utils.modules import load_module
 
 #: Every connect()-lifecycle store built in `_wire(...)`, keyed by the
 #: `app.state` attribute name — used by both `_wire`/`_teardown` so the

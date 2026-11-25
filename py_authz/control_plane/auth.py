@@ -20,6 +20,9 @@ surface as every other route in this API's underlying library.
 """
 
 import hashlib
+import ipaddress
+import json
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -42,6 +45,8 @@ from py_authz.control_plane.security import (
 )
 from py_authz.core.exceptions import AuthenticationError, AuthorizationDenied, InvalidAuthzRequest
 from py_authz.core.types import Identity, Resource
+
+logger = logging.getLogger("py_authz.control_plane.auth")
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,26 @@ async def _authenticate_operator(request: Request, token: str) -> CurrentPrincip
     )
 
 
+def client_network(request: Request) -> str:
+    """
+    The caller's network for lockout keying (SEC3-13): the /24 for IPv4,
+    the /64 for IPv6 (one host usually owns a whole /64). `"unknown"` when
+    the peer address isn't an IP.
+
+    Behind a reverse proxy, run uvicorn with `--proxy-headers` and
+    `--forwarded-allow-ips=<proxy>` so `request.client` is the real
+    caller. Otherwise every request shares the proxy's network and the
+    lockout falls back to being per account.
+    """
+    host = request.client.host if request.client else ""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "unknown"
+    prefix = 24 if ip.version == 4 else 64
+    return str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
+
+
 async def _authenticate_service_account(
     request: Request, token: str, account_id: str
 ) -> CurrentPrincipal:
@@ -94,8 +119,17 @@ async def _authenticate_service_account(
     # CP-16: checked *before* touching the store/argon2 — a locked-out
     # id is refused immediately, without doing the (deliberately
     # expensive, see `security._HASHER`) verify work on every attempt.
+    #
+    # SEC3-13: keyed on (account id, client network), not the account id
+    # alone. SA ids are visible to every auditor and embedded in every
+    # secret, so an id-only lockout let anyone keep a CI/deploy SA at 429
+    # indefinitely with five bad requests every window. Now a brute-force
+    # source only locks itself out; the SA keeps working from its own
+    # network. (Secrets carry 256 random bits, so spreading guesses across
+    # networks doesn't make brute force practical.)
     rate_limiter = request.app.state.service_account_rate_limiter
-    if await rate_limiter.is_locked_out(account_id):
+    limiter_key = f"{account_id}|{client_network(request)}"
+    if await rate_limiter.is_locked_out(limiter_key):
         raise HTTPException(
             status_code=429,
             detail="Too many failed authentication attempts for this service account "
@@ -110,10 +144,21 @@ async def _authenticate_service_account(
         # in-memory limiter without bound under ids of their choosing.
         raise AuthenticationError("Invalid or revoked service-account secret")
     if record.is_revoked or not await _verify_cached(token, record.secret_hash):
-        await rate_limiter.record_failure(account_id)
+        await rate_limiter.record_failure(limiter_key)
+        if await rate_limiter.is_locked_out(limiter_key):
+            # Alertable (SEC3-13): one structured warning per lockout.
+            logger.warning(
+                json.dumps(
+                    {
+                        "event": "service_account_lockout",
+                        "service_account_id": account_id,
+                        "client_network": client_network(request),
+                    }
+                )
+            )
         raise AuthenticationError("Invalid or revoked service-account secret")
 
-    await rate_limiter.record_success(account_id)
+    await rate_limiter.record_success(limiter_key)
     await _touch_last_used_throttled(store, record)
 
     # Keyed on the immutable account id, never the name (SEC3-2): names

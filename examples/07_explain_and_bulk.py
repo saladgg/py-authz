@@ -3,9 +3,10 @@
 
 Three newer APIs exposed on `AuthzEngine` and `Authz` that are easy to miss:
 
-    - `engine.explain(request)` returns an `AuthzExplanation` — allowed + a
-      human-readable reason. Handy for "why was this denied?" UX and for
-      debugging permissions in production.
+    - `engine.explain(request)` returns an `AuthzExplanation` — allowed, a
+      human-readable reason and, when allowed, the relation `path` that
+      grants access (walked from OpenFGA `/expand`). Handy for debugging
+      permissions in production.
 
     - `engine.bulk_enforce(requests)` checks N requests concurrently (bounded
       by `concurrency=`). Useful for list views where you need to know which
@@ -53,6 +54,12 @@ async def main() -> None:
             AuthzRequest(identity=carol, action="editor", resource=roadmap)
         )
         print(f"carol can edit roadmap: {allowed.allowed}  — {allowed.reason}")
+
+        # An allowed decision also carries the relation path that grants it.
+        viewer = await engine.explain(
+            AuthzRequest(identity=alice, action="viewer", resource=roadmap)
+        )
+        print(f"alice can view roadmap: {viewer.allowed}  via {' -> '.join(viewer.path or [])}")
 
         # 2) Bulk enforce — fan out to OpenFGA with bounded concurrency.
         requests = [

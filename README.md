@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/saladgg/py-authz/actions/workflows/ci.yml/badge.svg)](https://github.com/saladgg/py-authz/actions/workflows/ci.yml)
 [![Release](https://github.com/saladgg/py-authz/actions/workflows/release.yml/badge.svg)](https://github.com/saladgg/py-authz/actions/workflows/release.yml)
-[![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.4.0-blueviolet.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/static/v1?label=version&message=2.0.0&color=blueviolet)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-not%20yet%20on%20PyPI-lightgrey.svg)](https://github.com/saladgg/py-authz/releases)
 [![OpenFGA](https://img.shields.io/badge/OpenFGA-compatible-6c5ce7.svg)](https://openfga.dev)
 [![Keycloak](https://img.shields.io/badge/Keycloak-JWT-7c69ef.svg)](https://www.keycloak.org)
@@ -109,7 +109,7 @@ Key components:
 
 ## Installation
 
-Requires **Python 3.13+**.
+Requires **Python 3.12+** (CI tests 3.12, 3.13 and 3.14).
 
 > **Not yet on PyPI, and this repo is currently private.** The commands
 > below are how installation will work once `py-authz` is published to
@@ -120,14 +120,14 @@ Requires **Python 3.13+**.
 > configured for `git`, e.g. via SSH or a PAT):
 >
 > ```bash
-> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v1.4.0"
+> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v2.0.0"
 > ```
 >
-> Swap `[all]` for any extra below, and `v1.4.0` for the tag you want
+> Swap `[all]` for any extra below, and the `@v…` tag for the release you want
 > (see [Releases](https://github.com/saladgg/py-authz/releases)).
 
 ```bash
-# Core only (OpenFGA SDK, httpx, attrs)
+# Core only (httpx, attrs, anyio)
 pip install py-authz
 
 # With FastAPI adapter
@@ -340,7 +340,11 @@ engine = AuthzEngine(fga_client=client, cache=InMemoryCache())
 engine = AuthzEngine(fga_client=client, cache=RedisCache(url="redis://localhost:6379"))
 ```
 
-Cache keys are deterministic (`<user>:<action>:<type>:<id>`) so invalidation is straightforward.
+Cache keys are deterministic per (user, action, resource type, resource id), so
+`Authz.grant`/`revoke` can invalidate the exact entry. The key format itself is
+opaque (each field is length-prefixed so values containing separators can't
+collide; see `AuthzRequest.cache_key()`): don't parse it. To drop every entry
+for one user, build the prefix with `AuthzRequest.identity_prefix(user_id)`.
 
 ---
 
@@ -349,12 +353,21 @@ Cache keys are deterministic (`<user>:<action>:<type>:<id>`) so invalidation is 
 `MultiTenantAuthz` resolves a tenant to its OpenFGA store, optionally auto-provisioning missing tenants with distributed locks.
 
 ```python
-from py_authz.api import MultiTenantAuthz
+from py_authz import MultiTenantAuthz
+from py_authz.core.tenant_resolver import StoreBackedResolver
+from py_authz.storage.postgres import PostgresTenantStore
+
+tenant_store = PostgresTenantStore(dsn=os.environ["TENANT_STORE_CONN"])
+await tenant_store.connect()
 
 mt = MultiTenantAuthz(
     api_url=os.environ["FGA_API_URL"],
-    model_id=None,  # resolved per-tenant
-    tenant_resolver=my_resolver,  # e.g. PostgresTenantStore
+    # None: each tenant's store evaluates against its own latest model.
+    # A non-None id would be sent for every tenant, but model ids are
+    # per store, so leave this None for multi-tenant use.
+    model_id=None,
+    # Resolvers expose `.resolve()`; stores expose `.get()`. Wrap the store.
+    tenant_resolver=StoreBackedResolver(tenant_store),
     tenant_manager=my_manager,  # optional auto-provisioning
 )
 

@@ -1,7 +1,7 @@
 import pytest
 
-from py_authz.cli.utils import load_module
 from py_authz.core.exceptions import ConfigurationError
+from py_authz.utils.modules import load_module
 
 
 def test_load_module_imports_valid_module():

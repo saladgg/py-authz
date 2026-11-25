@@ -29,7 +29,12 @@ async def _build_backends(backend: str, conn: str | None) -> tuple[TenantStore, 
         tenant_store = PostgresTenantStore(dsn=dsn)
         model_registry = PostgresModelRegistry(dsn=dsn)
         await tenant_store.connect()
-        await model_registry.connect()
+        try:
+            await model_registry.connect()
+        except BaseException:
+            # Don't leak the tenant store's pool if the second connect fails.
+            await tenant_store.close()
+            raise
         return tenant_store, model_registry
 
     if backend == "redis":
@@ -102,49 +107,12 @@ async def migrate_command(
         ids = tenant_ids if tenant_ids else await tenant_store.list_tenant_ids()
 
         if not ids:
-            if json_output:
-                print(json.dumps({"tenants_found": 0, "succeeded": {}, "failed": {}}))
-            else:
-                print("No tenants found — nothing to migrate.")
-            if backend == "memory":
-                print(
-                    "warning: --backend memory starts empty; did you mean postgres or redis?",
-                    file=sys.stderr,
-                )
-            # DX3-8: a CI job pointing at the wrong (or an empty) backend
-            # used to exit 0 here having migrated nothing.
-            if not allow_empty:
-                raise ConfigurationError(
-                    "--all-tenants found no tenants in the configured backend; "
-                    "pass --allow-empty if that's expected"
-                )
+            _report_no_tenants(backend=backend, json_output=json_output, allow_empty=allow_empty)
             return
 
-        if not dry_run and all_tenants_mode and not yes:
-            # `--all-tenants` rolls a model change out to every tenant
-            # this backend knows about — a genuinely destructive,
-            # hard-to-undo operation with, until now, no preview and no
-            # confirmation step (see REL2-10). Refuse to guess in a
-            # non-interactive context (no TTY, e.g. a CI pipeline)
-            # instead of blocking forever on `input()` — an automated
-            # caller must pass `--yes` explicitly. Checked (and the
-            # `MigrationManager` constructed) only once we know we're
-            # actually going to need it — a decline/refusal here should
-            # leave no side effects behind.
-            if not sys.stdin.isatty():
-                raise ConfigurationError(
-                    "Refusing to migrate all tenants non-interactively without "
-                    "--yes. Pass --dry-run first to preview, or --yes to confirm."
-                )
-            confirmation = input(
-                f"About to migrate {len(ids)} tenant(s) to the current model. Continue? [y/N] "
-            )
-            if confirmation.strip().lower() not in ("y", "yes"):
-                if json_output:
-                    print(json.dumps({"aborted": True}))
-                else:
-                    print("Aborted.")
-                return
+        needs_confirmation = not dry_run and all_tenants_mode and not yes
+        if needs_confirmation and not _confirm_all_tenants(len(ids), json_output=json_output):
+            return
 
         manager = MigrationManager(
             api_url=api_url,
@@ -153,51 +121,102 @@ async def migrate_command(
         )
 
         if dry_run:
-            preview = await manager.dry_run_batch(ids)
-            if json_output:
-                print(
-                    json.dumps(
-                        {
-                            "dry_run": True,
-                            "changes": preview.would_change,
-                            "failed": {tid: str(err) for tid, err in preview.failed.items()},
-                        }
-                    )
-                )
-            else:
-                for tenant_id, would_change in preview.would_change.items():
-                    print(f"{tenant_id}: {'would migrate' if would_change else 'no change'}")
-                for tenant_id, error in preview.failed.items():
-                    print(f"{tenant_id}: could not check ({error})")
-            if preview.failed:
-                raise ExternalServiceError(
-                    f"{len(preview.failed)} of {len(ids)} tenant(s) could not be checked"
-                )
-            return
-
-        result = await manager.migrate_all(ids)
-
-        if json_output:
-            print(
-                json.dumps(
-                    {
-                        "succeeded": result.succeeded,
-                        "failed": {
-                            tenant_id: str(error) for tenant_id, error in result.failed.items()
-                        },
-                    }
-                )
-            )
+            await _run_dry_run(manager, ids, json_output=json_output)
         else:
-            for tenant_id, model_id in result.succeeded.items():
-                print(f"{tenant_id}: {model_id}")
-
-            for tenant_id, error in result.failed.items():
-                print(f"{tenant_id}: FAILED - {error}", file=sys.stderr)
-
-        if result.failed:
-            raise ExternalServiceError(
-                f"{len(result.failed)} of {len(ids)} tenant(s) failed to migrate"
-            )
+            await _run_migration(manager, ids, json_output=json_output)
     finally:
         await _close_backends(tenant_store, model_registry)
+
+
+# ARCH3-17: `migrate_command` was one function with cyclomatic complexity
+# 20; each step below is one decision it used to make inline.
+
+
+def _report_no_tenants(*, backend: str, json_output: bool, allow_empty: bool) -> None:
+    if json_output:
+        print(json.dumps({"tenants_found": 0, "succeeded": {}, "failed": {}}))
+    else:
+        print("No tenants found — nothing to migrate.")
+    if backend == "memory":
+        print(
+            "warning: --backend memory starts empty; did you mean postgres or redis?",
+            file=sys.stderr,
+        )
+    # DX3-8: a CI job pointing at the wrong (or an empty) backend used to
+    # exit 0 here having migrated nothing.
+    if not allow_empty:
+        raise ConfigurationError(
+            "--all-tenants found no tenants in the configured backend; "
+            "pass --allow-empty if that's expected"
+        )
+
+
+def _confirm_all_tenants(count: int, *, json_output: bool) -> bool:
+    """
+    `--all-tenants` rolls a model change out to every tenant this backend
+    knows about — a destructive, hard-to-undo operation (REL2-10). Refuse
+    to guess in a non-interactive context (no TTY, e.g. CI) instead of
+    blocking forever on `input()`: an automated caller must pass `--yes`.
+    Runs before the `MigrationManager` is built, so a decline leaves no
+    side effects. Returns whether to continue.
+    """
+    if not sys.stdin.isatty():
+        raise ConfigurationError(
+            "Refusing to migrate all tenants non-interactively without "
+            "--yes. Pass --dry-run first to preview, or --yes to confirm."
+        )
+    confirmation = input(
+        f"About to migrate {count} tenant(s) to the current model. Continue? [y/N] "
+    )
+    if confirmation.strip().lower() in ("y", "yes"):
+        return True
+    if json_output:
+        print(json.dumps({"aborted": True}))
+    else:
+        print("Aborted.")
+    return False
+
+
+async def _run_dry_run(manager: MigrationManager, ids: list[str], *, json_output: bool) -> None:
+    preview = await manager.dry_run_batch(ids)
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "changes": preview.would_change,
+                    "failed": {tid: str(err) for tid, err in preview.failed.items()},
+                }
+            )
+        )
+    else:
+        for tenant_id, would_change in preview.would_change.items():
+            print(f"{tenant_id}: {'would migrate' if would_change else 'no change'}")
+        for tenant_id, error in preview.failed.items():
+            print(f"{tenant_id}: could not check ({error})")
+    if preview.failed:
+        raise ExternalServiceError(
+            f"{len(preview.failed)} of {len(ids)} tenant(s) could not be checked"
+        )
+
+
+async def _run_migration(manager: MigrationManager, ids: list[str], *, json_output: bool) -> None:
+    result = await manager.migrate_all(ids)
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "succeeded": result.succeeded,
+                    "failed": {tenant_id: str(error) for tenant_id, error in result.failed.items()},
+                }
+            )
+        )
+    else:
+        for tenant_id, model_id in result.succeeded.items():
+            print(f"{tenant_id}: {model_id}")
+        for tenant_id, error in result.failed.items():
+            print(f"{tenant_id}: FAILED - {error}", file=sys.stderr)
+    if result.failed:
+        raise ExternalServiceError(
+            f"{len(result.failed)} of {len(ids)} tenant(s) failed to migrate"
+        )

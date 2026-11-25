@@ -53,7 +53,7 @@ class ControlPlaneSettings:
     #    this process for `generate_model()`/`ModelSync` (GET /models,
     #    POST /models/sync — CP-6) to see anything beyond the bare `user`
     #    type — same idea as the CLI's `--module` flag
-    #    (`cli/main.py`/`cli/utils.py:load_module`), just read from the
+    #    (`cli/main.py`/`utils/modules.py:load_module`), just read from the
     #    environment instead of a flag since this is a long-running
     #    service, not a one-shot command. `None` (the default) means the
     #    control-plane API's own process is expected to already import

@@ -1,3 +1,6 @@
+from collections import deque
+
+
 class Metrics:
     """
     Minimal in-process counters + duration observations.
@@ -26,7 +29,10 @@ class Metrics:
                 behavior.
         """
         self.counters: dict[str, int] = {}
-        self.durations: dict[str, list[float]] = {}
+        # A `deque(maxlen=...)` drops the oldest observation in O(1)
+        # (REL3-24). The old list did `pop(0)` once full, shifting up to
+        # 10k floats on every `enforce()`.
+        self.durations: dict[str, deque[float]] = {}
         self.max_observations_per_metric = max_observations_per_metric
 
     def incr(self, name: str, amount: int = 1) -> None:
@@ -35,12 +41,10 @@ class Metrics:
     def observe(self, name: str, value: float) -> None:
         """Record a single observation (e.g. a latency in milliseconds)
         under `name`, for later export as a histogram/summary."""
-        bucket = self.durations.setdefault(name, [])
+        bucket = self.durations.get(name)
+        if bucket is None:
+            bucket = self.durations[name] = deque(maxlen=self.max_observations_per_metric)
         bucket.append(value)
-
-        if self.max_observations_per_metric is not None:
-            while len(bucket) > self.max_observations_per_metric:
-                bucket.pop(0)
 
 
 metrics = Metrics()

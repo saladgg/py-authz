@@ -4,7 +4,7 @@ Execution checklist for
 [`13_developer_experience_testing_and_capabilities.md`](13_developer_experience_testing_and_capabilities.md).
 IDs match that file.
 
-> **Status (2026-11-24):** Tier 0 fully shipped (DX3-1, DX3-2, DX3-7,
+> **Status (2026-11-25):** Tier 0 fully shipped (DX3-1, DX3-2, DX3-7,
 > DX3-8), plus DX3-3. **Still open:** the rest of Tier 1 (DX3-4/5/6),
 > Tiers 2–3 (docs and panel UX) and Tier 4 (new capabilities).
 
@@ -55,20 +55,43 @@ IDs match that file.
   confusion, wrong key, iss/aud/exp/nbf, missing claims, typ, azp). Also
   fixed a session-wide test hazard: `test_keycloak.py` replaced PyJWT
   with a fake whenever it was collected first.
-- [ ] **DX3-4 — `fail_under = 95`; cover the lifespan wiring.**
-- [ ] **DX3-5 — Injectable clock; event-driven lock and job tests.**
-- [ ] **DX3-6 — Example import test; run selected examples in the live
+- [x] **DX3-4 — `fail_under = 95`; cover the lifespan wiring.**
+  Shipped (batch 3): `fail_under = 95`; `tests/control_plane/test_app_lifespan.py`
+  runs `_wire`/`_lifespan` offline with patched stores (Redis and
+  no-Redis branches, reverse teardown, cleanup after a startup failure).
+  `control_plane/app.py` went from 42% to covered; total is 97%.
+- [x] **DX3-5 — Injectable clock; event-driven lock and job tests.**
+  Shipped (batch 3): `InMemoryCache(clock=...)`, default
+  `time.monotonic`; lock renewal tests wait on an `asyncio.Event`; job
+  route tests use a deadline-bounded wait (the job runs on TestClient's
+  portal loop, so its task can't be awaited from the test directly).
+- [x] **DX3-6 — Example import test; run selected examples in the live
   job.**
+  Shipped (batch 3): `tests/test_examples.py` imports every numbered
+  example; `tests/live/test_examples_live.py` runs `seed.py` then
+  examples 01, 07, 08, 09, 10 and 11.
 
 ## Tier 2 — Docs and metadata accuracy
 
-- [ ] **DX3-9 — Fix the README multi-tenancy snippet and the `model_id`
+- [x] **DX3-9 — Fix the README multi-tenancy snippet and the `model_id`
   comment.**
-- [ ] **DX3-10 — semantic-release updates the README version; `:nf`
+  Shipped (batch 3): `StoreBackedResolver(PostgresTenantStore(...))`,
+  and the comment says what `model_id=None` really does. ARCH3-13 (real
+  per-tenant pinning) is still open.
+- [x] **DX3-10 — semantic-release updates the README version; `:nf`
   version; URLs; classifier; upgrade notes in the CHANGELOG.**
-- [ ] **DX3-11 — Lower `requires-python` to 3.12 after a runtime check;
+  Shipped (batch 3): `version_variables` stamps the README badge and the
+  `@vX.Y.Z` pin (checked against PSR 10.6.2's own replacer); `:nf`;
+  URLs fixed; `Development Status :: 4 - Beta`; `docs/upgrading.md`
+  holds upgrade notes, linked from the CHANGELOG.
+- [x] **DX3-11 — Lower `requires-python` to 3.12 after a runtime check;
   add the matrix.**
-- [ ] **DX3-12 — README cache-key and ruff-rules corrections.**
+  Shipped (batch 3): full unit suite passes on 3.12; `requires-python
+  = ">=3.12"`, 3.12 added to the CI matrix and classifiers, mypy
+  `python_version = "3.12"`.
+- [x] **DX3-12 — README cache-key and ruff-rules corrections.**
+  Shipped (batch 3): the README calls the cache key opaque and points at
+  `identity_prefix()`. The ruff-rules line was already fixed by REL3-21.
 
 ## Tier 3 — Control-panel UX
 

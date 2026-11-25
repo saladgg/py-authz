@@ -221,9 +221,15 @@ write(s). The bundled Postgres logger is in `audit/`.
 Added alongside the core flow and worth knowing about:
 
 - **`AuthzEngine.explain(request) -> AuthzExplanation`** — returns
-  `allowed`, a human-readable `reason`, an optional `path`, and raw
-  `details` from OpenFGA's explain endpoint (if the client supports it).
-  Useful for "why was this denied?" UIs and debugging.
+  `allowed` (from a real `/check`), a human-readable `reason`, and, when
+  access is granted, a `path`: the chain of usersets that grants it, e.g.
+  `["document:plan#viewer", "document:plan#editor", "folder:eng#editor",
+  "user:alice"]`. `OpenFGAClient.explain()` builds it by walking
+  OpenFGA's `/expand` trees (bounded depth and call count; see
+  `py_authz/clients/expand_path.py`). `/expand` doesn't evaluate
+  conditions, so with conditional tuples the path is the route the tuples
+  allow. Denials have no path. Useful for debugging and "why can they see
+  this?" UIs.
 - **`AuthzEngine.bulk_enforce(requests, *, concurrency=10)`** — fans out to
   OpenFGA with bounded concurrency using an `anyio.Semaphore`. Returns a list
   of `BulkAuthzResult` in completion order (not input order).

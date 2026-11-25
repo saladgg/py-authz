@@ -58,7 +58,7 @@ async def grant_tuple(
     await authz.grant(
         Identity(id=body.user),
         body.relation,
-        body.object,
+        body.object.to_resource(),
         reason=body.reason,
         actor=principal.identity,
     )
@@ -66,7 +66,7 @@ async def grant_tuple(
         "status": "granted",
         "user": body.user,
         "relation": body.relation,
-        "object": body.object.to_fga_object(),
+        "object": body.object.to_resource().to_fga_object(),
     }
 
 
@@ -81,7 +81,7 @@ async def revoke_tuple(
     await authz.revoke(
         Identity(id=body.user),
         body.relation,
-        body.object,
+        body.object.to_resource(),
         reason=body.reason,
         actor=principal.identity,
     )
@@ -89,5 +89,5 @@ async def revoke_tuple(
         "status": "revoked",
         "user": body.user,
         "relation": body.relation,
-        "object": body.object.to_fga_object(),
+        "object": body.object.to_resource().to_fga_object(),
     }

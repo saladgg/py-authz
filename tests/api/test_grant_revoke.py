@@ -426,3 +426,27 @@ async def test_grant_without_reason_keeps_default_reason_string(
     assert event.reason == "grant via Authz.grant"
     assert "reason" not in event.reason_data
     assert "actor" not in event.reason_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+async def test_bulk_operations_record_reason_and_actor(mock_fga_client, operation):
+    """ARCH3-17: `grant_many`/`revoke_many` used to drop the CP-18 audit
+    context that `grant`/`revoke` record."""
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(fga_client=mock_fga_client, cache=None, audit_logger=audit)
+    authz = Authz(engine)
+    operator = Identity(id="user:operator-3")
+    tuples = [
+        (Identity(id="user:a"), "viewer", Resource(type="document", id="1")),
+        (Identity(id="user:b"), "viewer", Resource(type="document", id="1")),
+    ]
+
+    await getattr(authz, f"{operation}_many")(tuples, reason="bulk import", actor=operator)
+    await engine.flush_audit_logs()
+
+    assert len(audit.events) == 2
+    for event in audit.events:
+        assert event.reason == "bulk import"
+        assert event.reason_data["actor"] == operator.id
+        assert event.reason_data["operation"] == operation

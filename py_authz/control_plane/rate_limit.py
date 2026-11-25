@@ -12,11 +12,12 @@ that; this is the mirror case, *inbound*, and the control-plane API is
 that host app for this one endpoint specifically — it can't defer this
 to "someone else's problem" the way `check()`/`list_objects()` can.
 
-Tracked per service-account id (parsed from the presented secret — see
-`security.parse_account_id()` — before it's even looked up), not per
-source IP: an IP is trivially spoofed/rotated, but the account id an
-attacker is brute-forcing the random suffix of stays fixed across every
-attempt.
+The limiter itself is keyed on an opaque string. The control plane
+passes `"<service-account id>|<client network>"` (SEC3-13, see
+`auth.client_network()`): keying on the account id alone let anyone who
+knew an SA id (auditors can list them, and every secret embeds one) keep
+that SA locked out indefinitely. Keyed on both, a brute-force source only
+locks out itself.
 """
 
 import time

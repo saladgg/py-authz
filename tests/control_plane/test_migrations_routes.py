@@ -92,6 +92,21 @@ class FakeMigrationManager:
         return self.batch_result
 
 
+async def _wait_for_job(job_store, job_id, timeout: float = 5.0) -> None:
+    """
+    Wait until a job leaves pending/running (DX3-5). Bounded by a deadline,
+    not an iteration count: the job runs on TestClient's portal loop, so
+    the test can't await its task directly, and a fixed 50 x 10 ms budget
+    was flaky on a slow runner.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while job_store.jobs[job_id].status in (PENDING, "running"):
+        if loop.time() > deadline:
+            raise AssertionError(f"job {job_id} still {job_store.jobs[job_id].status}")
+        await asyncio.sleep(0.005)
+
+
 @pytest.fixture
 def tenant_store():
     return InMemoryTenantStore()
@@ -224,12 +239,9 @@ async def test_real_migration_returns_a_pending_job_that_later_succeeds(
     assert body["initiated_by"] == "user:alice"
     job_id = body["id"]
 
-    # The job runs in a background asyncio task started by JobRunner.submit
-    # — give the event loop a turn to let it finish before polling.
-    for _ in range(50):
-        if job_store.jobs[job_id].status != PENDING:
-            break
-        await asyncio.sleep(0.01)
+    # The job runs in a background task started by JobRunner.submit, on
+    # TestClient's own event loop — wait for it to reach a final state.
+    await _wait_for_job(job_store, job_id)
 
     resp = client.get(f"/api/v1/migrations/{job_id}", headers=bearer())
     assert resp.status_code == 200
@@ -248,10 +260,7 @@ async def test_real_migration_job_reports_failure(client, rbac_authz, migration_
     resp = client.post("/api/v1/migrations", headers=bearer(), json={"tenant_ids": ["acme"]})
     job_id = resp.json()["id"]
 
-    for _ in range(200):
-        if job_store.jobs[job_id].status not in (PENDING, "running"):
-            break
-        await asyncio.sleep(0.01)
+    await _wait_for_job(job_store, job_id)
 
     resp = client.get(f"/api/v1/migrations/{job_id}", headers=bearer())
     body = resp.json()
@@ -326,10 +335,7 @@ async def test_a_migration_where_every_tenant_failed_is_not_reported_succeeded(
     job_id = client.post(
         "/api/v1/migrations", headers=bearer(), json={"tenant_ids": ["acme"]}
     ).json()["id"]
-    for _ in range(200):
-        if job_store.jobs[job_id].status not in ("pending", "running"):
-            break
-        await asyncio.sleep(0.01)
+    await _wait_for_job(job_store, job_id)
     assert job_store.jobs[job_id].status == FAILED
 
     migration_manager.batch_result = MigrationBatchResult(
@@ -338,8 +344,5 @@ async def test_a_migration_where_every_tenant_failed_is_not_reported_succeeded(
     job_id = client.post(
         "/api/v1/migrations", headers=bearer(), json={"tenant_ids": ["acme", "other"]}
     ).json()["id"]
-    for _ in range(200):
-        if job_store.jobs[job_id].status not in ("pending", "running"):
-            break
-        await asyncio.sleep(0.01)
+    await _wait_for_job(job_store, job_id)
     assert job_store.jobs[job_id].status == PARTIAL

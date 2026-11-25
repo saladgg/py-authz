@@ -26,7 +26,10 @@ def test_observe_records_values_under_name():
     m.observe("latency_ms", 7.0)
     m.observe("other", 1.0)
 
-    assert m.durations == {"latency_ms": [12.5, 7.0], "other": [1.0]}
+    assert {k: list(v) for k, v in m.durations.items()} == {
+        "latency_ms": [12.5, 7.0],
+        "other": [1.0],
+    }
 
 
 def test_incr_accepts_custom_amount():
@@ -50,7 +53,7 @@ def test_observe_caps_observations_per_metric():
         m.observe("latency_ms", float(i))
 
     # Oldest dropped first — only the most recent `max` observations survive.
-    assert m.durations["latency_ms"] == [7.0, 8.0, 9.0]
+    assert list(m.durations["latency_ms"]) == [7.0, 8.0, 9.0]
 
 
 def test_observe_unbounded_when_max_is_none():
@@ -60,3 +63,14 @@ def test_observe_unbounded_when_max_is_none():
         m.observe("latency_ms", float(i))
 
     assert len(m.durations["latency_ms"]) == 20
+
+
+def test_observe_is_constant_time_once_full():
+    """REL3-24: the buffer is a bounded deque, not a list shifted with
+    `pop(0)` on every observation."""
+    from collections import deque
+
+    m = Metrics(max_observations_per_metric=2)
+    m.observe("x", 1.0)
+    assert isinstance(m.durations["x"], deque)
+    assert m.durations["x"].maxlen == 2

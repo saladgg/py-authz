@@ -369,3 +369,64 @@ async def test_migrate_command_closes_backends_even_when_no_tenants_found(monkey
     await migrate_command(api_url="http://fake", allow_empty=True)
 
     assert store.closed is True
+
+
+# DX3-8 / ARCH3-17: the real backend builders.
+
+
+@pytest.mark.asyncio
+async def test_build_backends_postgres_connects_both(monkeypatch):
+    from py_authz.storage import postgres as pg
+
+    connected = []
+
+    async def fake_connect(self):
+        connected.append(type(self).__name__)
+
+    monkeypatch.setattr(pg.PostgresTenantStore, "connect", fake_connect)
+    monkeypatch.setattr(pg.PostgresModelRegistry, "connect", fake_connect)
+
+    tenant_store, model_registry = await _build_backends("postgres", "postgres://x/y")
+
+    assert isinstance(tenant_store, pg.PostgresTenantStore)
+    assert isinstance(model_registry, pg.PostgresModelRegistry)
+    assert connected == ["PostgresTenantStore", "PostgresModelRegistry"]
+
+
+@pytest.mark.asyncio
+async def test_build_backends_postgres_closes_tenant_pool_if_registry_connect_fails(monkeypatch):
+    from py_authz.storage import postgres as pg
+
+    closed = []
+
+    async def ok_connect(self):
+        pass
+
+    async def failing_connect(self):
+        raise OSError("connection refused")
+
+    async def record_close(self):
+        closed.append(type(self).__name__)
+
+    monkeypatch.setattr(pg.PostgresTenantStore, "connect", ok_connect)
+    monkeypatch.setattr(pg.PostgresTenantStore, "close", record_close)
+    monkeypatch.setattr(pg.PostgresModelRegistry, "connect", failing_connect)
+
+    with pytest.raises(OSError):
+        await _build_backends("postgres", "postgres://x/y")
+
+    assert closed == ["PostgresTenantStore"]
+
+
+@pytest.mark.asyncio
+async def test_build_backends_redis_and_conn_fallback(monkeypatch):
+    from py_authz.storage.redis import RedisModelRegistry, RedisTenantStore
+
+    monkeypatch.setenv("TENANT_STORE_CONN", "redis://localhost:6399/0")
+    tenant_store, model_registry = await _build_backends("redis", None)
+    try:
+        assert isinstance(tenant_store, RedisTenantStore)
+        assert isinstance(model_registry, RedisModelRegistry)
+    finally:
+        await tenant_store.close()
+        await model_registry.close()
