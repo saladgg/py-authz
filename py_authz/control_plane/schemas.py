@@ -6,6 +6,7 @@ rejected before it reaches a route's own logic."""
 from pydantic import BaseModel, Field
 
 from py_authz.control_plane.scopes import Scope
+from py_authz.core.types import Resource
 
 #: Ceiling for every list endpoint's `limit` (REL3-15). There was none, so
 #: `?limit=100000000` loaded an entire table into API memory, and a
@@ -29,8 +30,11 @@ class TupleRef(BaseModel):
     type: str
     id: str
 
-    def to_fga_object(self) -> str:
-        return f"{self.type}:{self.id}"
+    def to_resource(self) -> Resource:
+        """The core `Resource` this names. Routes pass that to
+        `Authz.grant`/`revoke`, rather than this model duck-typed as one
+        (ARCH3-17)."""
+        return Resource(type=self.type, id=self.id)
 
 
 class GrantRevokeRequest(BaseModel):

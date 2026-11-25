@@ -425,13 +425,18 @@ class Authz:
     async def grant_many(
         self,
         tuples: list[tuple],
+        *,
+        reason: str | None = None,
+        actor: Identity | None = None,
     ) -> None:
         """
         Grant many.
         tuples: [(identity, relation, resource)]
 
         See `grant`'s docstring — invalidates the cache entry for each
-        exact (identity, relation, resource) triple granted.
+        exact (identity, relation, resource) triple granted. `reason`/
+        `actor` are recorded on every tuple's audit event, as for
+        `grant` (ARCH3-17).
         """
         writes = [
             {
@@ -450,19 +455,26 @@ class Authz:
                 relation=relation,
                 resource_object=_to_fga_object(resource),
                 operation="grant",
+                reason=reason,
+                actor=actor,
             )
             await self._invalidate_cache(identity, relation, resource)
 
     async def revoke_many(
         self,
         tuples: list[tuple],
+        *,
+        reason: str | None = None,
+        actor: Identity | None = None,
     ) -> None:
         """
         Revoke many.
         tuples: [(identity, relation, resource)]
 
         See `grant`'s docstring — invalidates the cache entry for each
-        exact (identity, relation, resource) triple revoked.
+        exact (identity, relation, resource) triple revoked. `reason`/
+        `actor` are recorded on every tuple's audit event, as for
+        `revoke` (ARCH3-17).
         """
         deletes = [
             {
@@ -481,6 +493,8 @@ class Authz:
                 relation=relation,
                 resource_object=_to_fga_object(resource),
                 operation="revoke",
+                reason=reason,
+                actor=actor,
             )
             await self._invalidate_cache(identity, relation, resource)
 

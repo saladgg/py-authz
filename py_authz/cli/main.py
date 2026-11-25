@@ -10,7 +10,6 @@ import anyio
 from py_authz.cli.commands.generate import generate_command
 from py_authz.cli.commands.migrate import migrate_command
 from py_authz.cli.commands.sync import sync_command
-from py_authz.cli.utils import load_module
 from py_authz.core.exceptions import (
     AuthzError,
     ConfigurationError,
@@ -19,6 +18,7 @@ from py_authz.core.exceptions import (
     TenantNotFoundError,
 )
 from py_authz.core.logging import setup_logging
+from py_authz.utils.modules import load_module
 
 logger = logging.getLogger("py_authz.cli")
 
