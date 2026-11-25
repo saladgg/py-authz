@@ -54,8 +54,12 @@ async def main() -> None:
             AuthzRequest(identity=carol, action="editor", resource=roadmap)
         )
         print(f"carol can edit roadmap: {allowed.allowed}  — {allowed.reason}")
-        if allowed.path:
-            print(f"  via: {' -> '.join(allowed.path)}")
+
+        # An allowed decision also carries the relation path that grants it.
+        viewer = await engine.explain(
+            AuthzRequest(identity=alice, action="viewer", resource=roadmap)
+        )
+        print(f"alice can view roadmap: {viewer.allowed}  via {' -> '.join(viewer.path or [])}")
 
         # 2) Bulk enforce — fan out to OpenFGA with bounded concurrency.
         requests = [
