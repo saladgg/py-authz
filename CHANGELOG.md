@@ -5,6 +5,64 @@ Breaking changes and upgrade steps for each release are collected in
 
 <!-- version list -->
 
+## v2.1.0 (2026-11-25)
+
+### Bug Fixes
+
+- **control-plane**: Key SA lockout on account and client network (SEC3-13)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+- **modeling**: Validator and generator reject models OpenFGA rejects (ARCH3-6)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+### Documentation
+
+- README accuracy, release metadata, Python 3.12 support (DX3-9, DX3-10, DX3-11, DX3-12)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+- **todos**: Record round-3 batch 3 in the 10-13 checklists
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+### Features
+
+- **clients**: Real explain() paths via OpenFGA /expand (ARCH3-8)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+### Performance Improvements
+
+- **metrics**: Deque observation buffer; request ids in control-plane logs (REL3-24)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+### Refactoring
+
+- Boundary cleanups (ARCH3-17) ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+### Testing
+
+- 95% coverage floor and unit coverage of control-plane lifespan (DX3-4)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+- Import every example; run seed + six examples in the live job (DX3-6)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+- Injectable cache clock and event-driven lock/job tests (DX3-5)
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+- Isolate control-plane settings tests from exported CONTROL_PLANE_* vars
+  ([#28](https://github.com/saladgg/py-authz/pull/28),
+  [`3e715c4`](https://github.com/saladgg/py-authz/commit/3e715c4f6126386e6c59a6627cfb4eef9dd124b5))
+
+
 ## v2.0.0 (2026-11-24)
 
 ### Bug Fixes

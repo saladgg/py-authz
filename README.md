@@ -4,7 +4,7 @@
 [![Release](https://github.com/saladgg/py-authz/actions/workflows/release.yml/badge.svg)](https://github.com/saladgg/py-authz/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/static/v1?label=version&message=2.0.0&color=blueviolet)](CHANGELOG.md)
+[![Version](https://img.shields.io/static/v1?label=version&message=2.1.0&color=blueviolet)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-not%20yet%20on%20PyPI-lightgrey.svg)](https://github.com/saladgg/py-authz/releases)
 [![OpenFGA](https://img.shields.io/badge/OpenFGA-compatible-6c5ce7.svg)](https://openfga.dev)
 [![Keycloak](https://img.shields.io/badge/Keycloak-JWT-7c69ef.svg)](https://www.keycloak.org)
@@ -120,7 +120,7 @@ Requires **Python 3.12+** (CI tests 3.12, 3.13 and 3.14).
 > configured for `git`, e.g. via SSH or a PAT):
 >
 > ```bash
-> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v2.0.0"
+> pip install "py-authz[all] @ git+https://github.com/saladgg/py-authz.git@v2.1.0"
 > ```
 >
 > Swap `[all]` for any extra below, and the `@v…` tag for the release you want
