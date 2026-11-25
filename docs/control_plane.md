@@ -255,8 +255,13 @@ for the `curl`-driven `GET /auth/me` in step 5, landing you as
 
 - **Rate limiting / secrets hardening.** Already shipped (CP-16, CP-17)
   — the service-account secret-verification path locks out after
-  repeated failures per account id, and a revoked/rotated secret's hash
-  is actually invalidated, not just flagged.
+  repeated failures per (account id, client /24 or /64), so a source
+  guessing secrets locks out only itself (SEC3-13), and each lockout logs
+  a `service_account_lockout` warning to alert on. A revoked/rotated
+  secret's hash is actually invalidated, not just flagged. Behind a
+  reverse proxy, run uvicorn with `--proxy-headers
+  --forwarded-allow-ips=<proxy>` so the lockout sees the real client
+  address.
 - **Production deployment.** This doc is a local dev walkthrough. For
   anything beyond that: run behind TLS termination, don't reuse the dev
   Keycloak realm/credentials, and read `ControlPlaneSettings`'s own

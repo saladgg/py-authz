@@ -410,9 +410,10 @@ def test_repeated_bad_secrets_eventually_lock_out(client, app):
     assert locked_resp.status_code == 429
 
 
-def test_lockout_also_blocks_the_correct_secret(client, app):
-    """Once locked out, even the *correct* secret is refused until the
-    lockout window elapses — the point of a lockout, not a bypass."""
+def test_lockout_also_blocks_the_correct_secret_from_the_same_network(client, app):
+    """Once locked out, even the *correct* secret is refused from that
+    network until the lockout window elapses — the point of a lockout,
+    not a bypass."""
     secret = _make_service_account(app, account_id="sa_1", name="ci-bot", scopes=[])
 
     for _ in range(5):
@@ -420,6 +421,61 @@ def test_lockout_also_blocks_the_correct_secret(client, app):
 
     resp = client.get("/system", headers=_bearer(secret))
     assert resp.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_lockout_from_one_network_does_not_lock_out_the_account_elsewhere(app, rbac_authz):
+    """SEC3-13: anyone who knows an SA id (auditors can list them) used to
+    be able to keep it at 429 indefinitely. The lockout is now keyed on
+    (account, client network): the attacker's /24 is locked, the SA's own
+    network isn't."""
+    secret = _make_service_account(app, account_id="sa_1", name="ci-bot", scopes=[])
+    await rbac_authz.grant(
+        Identity(id="service_account:sa_1"), "operator", System(id=SYSTEM_OBJECT_ID)
+    )
+    attacker = TestClient(app, client=("203.0.113.7", 40000))
+    attacker_neighbour = TestClient(app, client=("203.0.113.99", 40000))
+    ci = TestClient(app, client=("198.51.100.20", 40000))
+
+    for _ in range(5):
+        attacker.get("/system", headers=_bearer("pasa_sa_1.wrong-secret"))
+
+    assert attacker.get("/system", headers=_bearer(secret)).status_code == 429
+    # Same /24 shares the lockout.
+    assert attacker_neighbour.get("/system", headers=_bearer(secret)).status_code == 429
+    # The SA's real caller is unaffected.
+    assert ci.get("/system", headers=_bearer(secret)).status_code == 200
+
+
+def test_lockout_is_logged_once_as_an_alertable_event(client, app, caplog):
+    _make_service_account(app, account_id="sa_1", name="ci-bot", scopes=[])
+
+    with caplog.at_level("WARNING", logger="py_authz.control_plane.auth"):
+        for _ in range(5):
+            client.get("/system", headers=_bearer("pasa_sa_1.wrong-secret"))
+        client.get("/system", headers=_bearer("pasa_sa_1.wrong-secret"))  # refused: 429
+
+    lockouts = [r for r in caplog.records if "service_account_lockout" in r.getMessage()]
+    assert len(lockouts) == 1
+    assert '"service_account_id": "sa_1"' in lockouts[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("203.0.113.7", "203.0.113.0/24"),
+        ("2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"),
+        ("testclient", "unknown"),
+        ("", "unknown"),
+    ],
+)
+def test_client_network(host, expected):
+    from types import SimpleNamespace
+
+    from py_authz.control_plane.auth import client_network
+
+    request = SimpleNamespace(client=SimpleNamespace(host=host) if host else None)
+    assert client_network(request) == expected
 
 
 @pytest.mark.asyncio
