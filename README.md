@@ -142,6 +142,9 @@ pip install "py-authz[postgres]"
 # CLI tooling
 pip install "py-authz[cli]"
 
+# Prometheus exporter for the built-in metrics (py_authz.core.prometheus)
+pip install "py-authz[prometheus]"
+
 # Everything
 pip install "py-authz[all]"
 
@@ -452,12 +455,17 @@ py-authz migrate --backend postgres --module myapp.authz.models --all-tenants --
 
 # Or just one tenant, with a machine-readable JSON summary for CI
 py-authz migrate --backend postgres --tenant acme-corp --api-url http://localhost:8082 --json
+
+# Apply py-authz's own Postgres schema migrations (needs the postgres extra too);
+# `db status --check` exits 1 while any are pending
+py-authz db migrate --dsn $POSTGRES_DSN
+py-authz db status --dsn $POSTGRES_DSN --check
 ```
 
 Every command accepts its config either as a CLI flag or via an environment
 variable (a flag always wins) — `--store-id`/`FGA_STORE_ID`,
-`--api-url`/`FGA_API_URL`, `--model-id`/`FGA_MODEL_ID`, and `migrate
---conn`/`TENANT_STORE_CONN`. See `py-authz <command> --help` for the exact
+`--api-url`/`FGA_API_URL`, `--model-id`/`FGA_MODEL_ID`, `migrate
+--conn`/`TENANT_STORE_CONN`, and `db --dsn`/`POSTGRES_DSN`. See `py-authz <command> --help` for the exact
 list per command.
 
 ---

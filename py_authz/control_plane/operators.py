@@ -9,6 +9,9 @@ the RBAC store itself only ever records grants, never identities that
 hold none yet.
 """
 
+import time
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -20,6 +23,9 @@ _NOT_CONNECTED = (
     "OperatorStore is not connected — call `await store.connect()` first, "
     "or use it as an async context manager."
 )
+
+
+_RECENT_LOGINS_MAX = 10_000
 
 
 @dataclass(frozen=True)
@@ -38,8 +44,20 @@ class OperatorStore:
         pool_min_size: int = 5,
         pool_max_size: int = 5,
         command_timeout: float | None = 5.0,
+        login_interval: float = 300.0,
+        clock: Callable[[], float] = time.monotonic,
     ):
+        """
+        Args:
+            login_interval: `record_login` skips the upsert for a subject
+                (with the same email) recorded less than this many seconds
+                ago by this process (REL3-19). 0 records every call.
+        """
         self.dsn = dsn
+        self.login_interval = login_interval
+        self._clock = clock
+        #: subject -> (email, when recorded); bounded LRU.
+        self._recent_logins: OrderedDict[str, tuple[str | None, float]] = OrderedDict()
         self.pool_min_size = pool_min_size
         self.pool_max_size = pool_max_size
         self.command_timeout = command_timeout
@@ -72,14 +90,18 @@ class OperatorStore:
             raise ConfigurationError(_NOT_CONNECTED)
         return self._pool
 
-    async def record_login(self, *, subject: str, email: str | None) -> Operator:
+    async def record_login(self, *, subject: str, email: str | None) -> Operator | None:
         """
-        Upsert: record that `subject` has just authenticated. Called from
-        the `get_current_principal` auth dependency on every successful
-        operator token validation (see `auth.py`) — cheap (`INSERT ...
-        ON CONFLICT DO UPDATE`), and idempotent regardless of how often
-        it's called for the same subject.
+        Upsert: record that `subject` has just authenticated. Called by
+        `GET /auth/me`, which the panel hits on every page load. Skipped
+        (returns `None`) when this process recorded the same subject and
+        email within `login_interval` seconds, so a page load no longer
+        costs a Postgres write (REL3-19).
         """
+        now = self._clock()
+        recent = self._recent_logins.get(subject)
+        if recent is not None and recent[0] == email and now - recent[1] < self.login_interval:
+            return None
         pool = self._require_pool()
         async with pool.acquire(timeout=self.command_timeout) as conn:
             row = await conn.fetchrow(
@@ -93,6 +115,10 @@ class OperatorStore:
                 subject,
                 email,
             )
+        self._recent_logins[subject] = (email, now)
+        self._recent_logins.move_to_end(subject)
+        while len(self._recent_logins) > _RECENT_LOGINS_MAX:
+            self._recent_logins.popitem(last=False)
         return Operator(
             id=row["id"], subject=row["subject"], email=row["email"], created_at=row["created_at"]
         )

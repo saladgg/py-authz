@@ -363,3 +363,28 @@ async def test_granting_a_role_to_an_unknown_or_revoked_service_account_is_400(c
             },
         )
         assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_revoking_a_role_from_a_revoked_service_account_still_works(client, rbac_authz):
+    """Only a *grant* refuses an unknown/revoked account — revoking a
+    leftover role from one is cleanup and must succeed."""
+    await rbac_authz.grant(Identity(id="user:alice"), "owner", System(id=SYSTEM_OBJECT_ID))
+    gone = Identity(id="service_account:sa_gone")
+    await rbac_authz.grant(gone, "operator", Tenant(id="acme"))
+
+    resp = client.request(
+        "DELETE",
+        "/api/v1/operators/roles",
+        json={
+            "subject": "sa_gone",
+            "subject_kind": "service_account",
+            "scope": "tenant",
+            "tenant_id": "acme",
+            "role": "operator",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["subject_kind"] == "service_account"
+    assert await rbac_authz.can("operator", gone, Tenant(id="acme").to_resource()) is False

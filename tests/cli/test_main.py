@@ -1,5 +1,8 @@
 import asyncio
+import runpy
 import sys
+import warnings
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 
@@ -361,3 +364,52 @@ def test_main_migrate_reads_the_backend_from_the_environment(patch_cli_entry, mo
     _run_main(["migrate", "--all-tenants", "--api-url", "http://fake"])
 
     assert patch_cli_entry["migrate"][0]["backend"] == "postgres"
+
+
+def test_main_sync_loads_module_when_provided(patch_cli_entry):
+    _run_main(["sync", "--api-url", "http://fake", "--store-id", "s", "--module", "some.module"])
+
+    assert patch_cli_entry["load_module"] == ["some.module"]
+    assert patch_cli_entry["sync"][0]["store_id"] == "s"
+
+
+def test_main_migrate_rejects_an_unknown_backend(patch_cli_entry, capsys, monkeypatch):
+    monkeypatch.setenv("TENANT_STORE_BACKEND", "carrier-pigeon")
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main(["migrate", "--all-tenants", "--api-url", "http://fake"])
+
+    assert exc_info.value.code == 2
+    assert patch_cli_entry["migrate"] == []
+    assert "invalid backend 'carrier-pigeon'" in capsys.readouterr().err
+
+
+def test_main_version_falls_back_when_package_metadata_is_missing(
+    patch_cli_entry, capsys, monkeypatch
+):
+    """DX2-13: a never-installed source checkout must not crash on `--version`."""
+
+    def _missing(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr(main_module, "version", _missing)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_main(["--version"])
+
+    assert exc_info.value.code == 0
+    assert "unknown (not installed)" in capsys.readouterr().out
+
+
+def test_module_is_runnable_with_python_dash_m(capsys, monkeypatch):
+    """`python -m py_authz.cli.main` runs the CLI entry point."""
+    monkeypatch.setattr(sys, "argv", ["py-authz", "--version"])
+
+    with warnings.catch_warnings():
+        # runpy warns that the module is already imported (by this test file).
+        warnings.simplefilter("ignore", RuntimeWarning)
+        with pytest.raises(SystemExit) as exc_info:
+            runpy.run_module("py_authz.cli.main", run_name="__main__")
+
+    assert exc_info.value.code == 0
+    assert "py-authz" in capsys.readouterr().out

@@ -165,3 +165,84 @@ async def test_context_manager_connects_and_closes(patched_asyncpg):
         await query.query()
 
     assert patched_asyncpg.closed is True
+
+
+@pytest.mark.asyncio
+async def test_connect_is_idempotent(patched_asyncpg, monkeypatch):
+    calls = 0
+    create_pool = audit_pg_module.asyncpg.create_pool
+
+    async def _counting_create_pool(dsn, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await create_pool(dsn, **kwargs)
+
+    monkeypatch.setattr(audit_pg_module.asyncpg, "create_pool", _counting_create_pool)
+    query = PostgresAuditQuery(dsn="postgres://fake")
+
+    await query.connect()
+    await query.connect()
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_without_connect_is_a_noop(patched_asyncpg):
+    query = PostgresAuditQuery(dsn="postgres://fake")
+
+    await query.close()  # must not raise
+
+    assert patched_asyncpg.closed is False
+
+
+@pytest.mark.asyncio
+async def test_close_releases_the_pool_so_queries_fail_until_reconnect(patched_asyncpg):
+    query = PostgresAuditQuery(dsn="postgres://fake")
+    await query.connect()
+
+    await query.close()
+
+    assert patched_asyncpg.closed is True
+    with pytest.raises(ConfigurationError):
+        await query.query()
+
+
+@pytest.mark.asyncio
+async def test_legacy_store_id_matches_pre_0009_rows(patched_asyncpg):
+    """ARCH3-16: old rows held the store id in `tenant_id` and no `store_id`."""
+    query = PostgresAuditQuery(dsn="postgres://fake")
+    await query.connect()
+
+    await query.query(tenant_id="acme", legacy_store_id="store-1", store_id="store-1")
+
+    sql, params = patched_asyncpg.fetch_calls[0]
+    assert "(tenant_id = $1 OR (store_id IS NULL AND tenant_id = $2))" in sql
+    assert "store_id = $3" in sql
+    assert params[:3] == ("acme", "store-1", "store-1")
+
+
+@pytest.mark.asyncio
+async def test_before_adds_a_keyset_condition(patched_asyncpg):
+    """REL3-15: keyset pagination on ("timestamp", id)."""
+    query = PostgresAuditQuery(dsn="postgres://fake")
+    await query.connect()
+    ts = datetime(2026, 1, 1)
+
+    await query.query(user_id="user:1", before=(ts, 42), limit=10)
+
+    sql, params = patched_asyncpg.fetch_calls[0]
+    assert '("timestamp", id) < ($2, $3)' in sql
+    assert params == ("user:1", ts, 42, 10, 0)
+
+
+def test_cursor_round_trips_and_rejects_garbage():
+    from datetime import UTC
+
+    from py_authz.audit.postgres import decode_cursor, encode_cursor
+    from py_authz.core.exceptions import InvalidAuthzRequest
+
+    ts = datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+    assert decode_cursor(encode_cursor(ts, 7)) == (ts, 7)
+    for bad in ("!!!", encode_cursor(ts, 7)[:-4], "bm90LWEtY3Vyc29y"):
+        with pytest.raises(InvalidAuthzRequest):
+            decode_cursor(bad)

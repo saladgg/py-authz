@@ -157,3 +157,19 @@ async def test_string_action_with_a_resource_model_instance_is_normalized():
     assert await authz.enforce("viewer", alice, Doc(id="2")) is False
     with pytest.raises(AuthorizationDenied):
         await authz.require("viewer", alice, Doc(id="2"))
+
+
+@pytest.mark.asyncio
+async def test_list_objects_with_unbound_relation_uses_the_explicit_resource_type():
+    from py_authz.modeling.registry import ResourceModelRegistry
+    from py_authz.testkit import make_fake_authz
+
+    reg = ResourceModelRegistry()
+    reg.register(Doc)
+    authz = make_fake_authz(model_registry=reg)
+    alice = Identity(id="user:alice")
+    await authz.grant(alice, "viewer", Doc("1"))
+
+    unbound = Relation("viewer")
+
+    assert await authz.list_objects(unbound, alice, resource_type="document") == ["document:1"]

@@ -60,6 +60,13 @@ IDs match that file.
   runs `_wire`/`_lifespan` offline with patched stores (Redis and
   no-Redis branches, reverse teardown, cleanup after a startup failure).
   `control_plane/app.py` went from 42% to covered; total is 97%.
+  Batch 4 (2026-11-27): raised to `fail_under = 100` (lines and
+  branches), checked on 3.12, 3.13 and 3.14. Closing the gap found a
+  real testkit bug (`InMemoryFGAClient.check()` ignored `user:*`
+  wildcard tuples; fixed) and removed four unreachable fallbacks: a
+  redundant `(AuthzError, …)` row in the CLI exit-code and HTTP status
+  tables, a `SyncAuthz` branch in `_runner_for`, and an MRO walk in
+  the testkit's relation lookup.
 - [x] **DX3-5 — Injectable clock; event-driven lock and job tests.**
   Shipped (batch 3): `InMemoryCache(clock=...)`, default
   `time.monotonic`; lock renewal tests wait on an `asyncio.Event`; job

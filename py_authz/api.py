@@ -502,6 +502,10 @@ class Authz:
         if not self._engine.cache:
             return
 
+        if self._engine.invalidate_identity_on_write:
+            await self._engine.invalidate_identity(identity.id)
+            return
+
         # Routed through `AuthzEngine.invalidate()` (rather than touching
         # `self._engine.cache` directly) so this respects `cache_namespace`
         # scoping — required once a cache is shared across engines/tenants
@@ -696,6 +700,7 @@ class MultiTenantAuthz:
             fga_client=client,
             cache=self.cache,
             cache_namespace=store_id,
+            tenant_id=tenant_id,
             raise_on_denied=self.raise_on_denied,
             audit_logger=self.audit_logger,
             metrics=self.metrics,

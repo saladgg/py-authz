@@ -174,3 +174,32 @@ async def test_bulk_delete_scans_with_a_large_count_and_unlinks_in_batches():
     assert deleted == redis_module._DELETE_BATCH * 2 + 7
     assert calls == [redis_module._DELETE_BATCH, redis_module._DELETE_BATCH, 7]
     assert fake.scan_counts[-1] == redis_module._SCAN_COUNT
+
+
+@pytest.mark.asyncio
+async def test_delete_by_prefix_rejects_empty_prefix(redis_cache):
+    # An empty prefix would match every key; clear() is the explicit way to do that.
+    await redis_cache.set("k1", True)
+
+    with pytest.raises(ValueError, match="non-empty"):
+        await redis_cache.delete_by_prefix("")
+
+    assert await redis_cache.get("k1") is True
+
+
+@pytest.mark.asyncio
+async def test_close_closes_the_underlying_client():
+    from py_authz.cache.redis import RedisCache
+
+    class ClosableRedis(MockRedis):
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    client = ClosableRedis()
+    cache = RedisCache(client=client)
+
+    await cache.close()
+
+    assert client.closed is True

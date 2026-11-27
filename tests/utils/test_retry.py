@@ -54,3 +54,23 @@ async def test_non_retryable_exception_propagates_immediately():
         await retry_async(flaky, retryable=(TimeoutError,), max_retries=5, base_delay=0.001)
 
     assert flaky.calls == 1  # no retry attempted at all
+
+
+@pytest.mark.asyncio
+async def test_without_jitter_backoff_doubles_exactly(monkeypatch):
+    import py_authz.utils.retry as retry_module
+
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(retry_module.asyncio, "sleep", fake_sleep)
+    flaky = Flaky(fail_times=3, exc=TimeoutError())
+
+    result = await retry_async(
+        flaky, retryable=(TimeoutError,), max_retries=3, base_delay=0.5, jitter=False
+    )
+
+    assert result == "ok"
+    assert delays == [1.0, 2.0, 4.0]  # base_delay * 2**attempt, no randomisation

@@ -145,3 +145,54 @@ async def test_invalid_request_raises(engine):
 
     with pytest.raises(InvalidAuthzRequest):
         await engine.enforce(bad_request)
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_without_a_resource_raises():
+    from py_authz.core.enforcement import AuthzEngine
+    from py_authz.core.types import AuthzRequest, Identity
+    from tests.conftest import MockOpenFGAClient
+
+    client = MockOpenFGAClient()
+    engine = AuthzEngine(fga_client=client, cache=None)
+    request = AuthzRequest(identity=Identity(id="user:1"), action="view", resource=None)
+
+    with pytest.raises(InvalidAuthzRequest, match="Resource must be provided"):
+        await engine.enforce(request)
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_enforce_logs_a_structured_decision_line_for_live_checks_and_cache_hits(caplog):
+    """When INFO is enabled, every decision — upstream or cached — emits
+    one JSON `authz_check` line (REL2-16 only skips building it when no
+    one would read it)."""
+    import json
+    import logging
+
+    from py_authz.cache.memory import InMemoryCache
+    from py_authz.core.enforcement import AuthzEngine
+    from py_authz.core.types import AuthzRequest, Identity, Resource
+    from tests.conftest import MockOpenFGAClient
+
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(allowed=True), cache=InMemoryCache())
+    request = AuthzRequest(
+        identity=Identity(id="user:1"), action="view", resource=Resource(type="doc", id="1")
+    )
+
+    caplog.set_level(logging.INFO, logger="py_authz")
+    assert await engine.enforce(request) is True  # live check
+    assert await engine.enforce(request) is True  # cache hit
+
+    lines = [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.name == "py_authz" and '"authz_check"' in r.getMessage()
+    ]
+    assert [line["cache_hit"] for line in lines] == [False, True]
+    for line in lines:
+        assert line["user"] == "user:1"
+        assert line["relation"] == "view"
+        assert line["resource"] == "doc:1"
+        assert line["allowed"] is True
+        assert line["tenant"] == "store-test"

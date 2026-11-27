@@ -120,3 +120,30 @@ async def test_model_sync_uses_custom_model_factory_instead_of_global_registry()
     assert model_id == "new-model-id"
     _path, uploaded = client.post_calls[0]
     assert uploaded == custom_model
+
+
+@pytest.mark.asyncio
+async def test_model_sync_validates_before_uploading():
+    """With a validator, an invalid model fails locally and is never sent
+    to OpenFGA; a valid one is uploaded as usual."""
+    from py_authz.core.exceptions import ModelValidationError
+    from py_authz.core.model_sync import ModelSync
+    from py_authz.validation.default import DefaultModelValidator
+
+    invalid = {
+        "schema_version": "1.1",
+        "type_definitions": [
+            {"type": "doc", "relations": {"viewer": {"computedUserset": {"relation": "owner"}}}}
+        ],
+    }
+    client = MockFGAClient(existing_model=None)
+    sync = ModelSync(client, DefaultModelValidator(), model_factory=lambda: invalid)
+
+    with pytest.raises(ModelValidationError, match="unknown relation 'owner'"):
+        await sync.sync()
+    assert client.post_calls == []
+
+    valid = {"schema_version": "1.1", "type_definitions": [{"type": "user"}]}
+    sync = ModelSync(client, DefaultModelValidator(), model_factory=lambda: valid)
+    assert await sync.sync() == "new-model-id"
+    assert client.post_calls[0][1] == valid

@@ -126,6 +126,23 @@ class ControlPlaneSettings:
     #: authentication.
     expose_docs: bool = False
 
+    #: Seconds the RBAC engine caches a role decision (REL3-19); 0 turns
+    #: the cache off. A grant or revoke made through this replica drops
+    #: that principal's cached decisions at once; other replicas see the
+    #: change within this many seconds.
+    rbac_cache_ttl: int = 5
+
+    #: How often (seconds) `GET /auth/me` re-records an operator's login
+    #: (REL3-19). The panel calls it on every page load.
+    operator_login_interval: int = 300
+
+    #: Serve Prometheus text-format metrics at `/metrics` (REL3-24; needs
+    #: the `prometheus` extra). Unversioned and outside `/api/v1`, for a
+    #: scraper. Restrict it at the network level, and/or set
+    #: `metrics_token` to require `Authorization: Bearer <token>`.
+    prometheus_metrics: bool = False
+    metrics_token: str | None = None
+
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -157,6 +174,12 @@ class ControlPlaneSettings:
             postgres_pool_max_size=int(os.environ.get("CONTROL_PLANE_PG_POOL_MAX_SIZE", "5")),
             apply_schema_on_startup=_env_bool("CONTROL_PLANE_APPLY_SCHEMA", True),
             expose_docs=_env_bool("CONTROL_PLANE_EXPOSE_DOCS", False),
+            prometheus_metrics=_env_bool("CONTROL_PLANE_PROMETHEUS_METRICS", False),
+            metrics_token=os.environ.get("CONTROL_PLANE_METRICS_TOKEN") or None,
+            rbac_cache_ttl=int(os.environ.get("CONTROL_PLANE_RBAC_CACHE_TTL", "5")),
+            operator_login_interval=int(
+                os.environ.get("CONTROL_PLANE_OPERATOR_LOGIN_INTERVAL", "300")
+            ),
             oidc_expected_typ=os.environ.get("CONTROL_PLANE_OIDC_EXPECTED_TYP") or None,
             oidc_allowed_azp=tuple(
                 a.strip()

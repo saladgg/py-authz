@@ -133,3 +133,34 @@ def test_replaces_an_unsafe_caller_request_id(client, caplog, bad):
     request_id = _last_json_record(caplog)["request_id"]
     assert request_id != bad
     assert len(request_id) == 36  # a fresh uuid4
+
+
+def test_records_request_count_errors_and_duration(app, client):
+    """REL3-24: a control-plane request-duration metric."""
+    from py_authz.core.metrics import Metrics
+
+    app.state.metrics = Metrics()
+
+    client.get("/ok")
+    client.get("/boom")
+
+    assert app.state.metrics.counters == {
+        "control_plane_requests_total": 2,
+        "control_plane_request_errors_total": 1,
+    }
+    assert len(app.state.metrics.durations["control_plane_request_duration_ms"]) == 2
+
+
+def test_counts_a_5xx_response_as_an_error(app, client):
+    from fastapi.responses import JSONResponse
+
+    from py_authz.core.metrics import Metrics
+
+    @app.get("/unavailable")
+    async def unavailable():
+        return JSONResponse({}, status_code=503)
+
+    app.state.metrics = Metrics()
+    client.get("/unavailable")
+
+    assert app.state.metrics.counters["control_plane_request_errors_total"] == 1

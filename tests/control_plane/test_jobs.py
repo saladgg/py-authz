@@ -373,3 +373,29 @@ async def test_startup_reaper_fails_jobs_orphaned_by_a_previous_process(patched_
     assert (await store.get(pending.id)).status == FAILED
     assert (await store.get(running.id)).result["error_type"] == "Interrupted"
     assert (await store.get(done.id)).status == SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_status_write_is_logged_and_left_for_the_reaper(
+    patched_asyncpg, caplog
+):
+    """If even `mark_finished` fails, the runner can't do more in-process:
+    it logs an alertable event and leaves the row for `fail_interrupted`
+    to settle on the next boot, rather than raising out of the task."""
+    store = await _store()
+    runner = JobRunner(store)
+
+    async def work():
+        return {"ok": True}
+
+    job = await store.create(kind="sync", params={}, initiated_by=None)
+    patched_asyncpg.fail_next_execute = 2  # mark_running *and* mark_finished fail
+    await runner._run(job.id, work)
+
+    assert "control_plane_job_status_write_failed" in caplog.text
+    assert job.id in caplog.text
+    # Never reached a terminal status in-process...
+    assert (await store.get(job.id)).status == PENDING
+    # ...so the startup reaper is what settles it.
+    assert await store.fail_interrupted() == 1
+    assert (await store.get(job.id)).status == FAILED

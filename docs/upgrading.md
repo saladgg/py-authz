@@ -6,6 +6,62 @@ break or surprise an existing deployment. Newest first.
 
 ## Unreleased
 
+- **Schema migrations are versioned** (REL3-10). `apply_schema()` records
+  each file in a new `schema_migrations` table and runs it only once,
+  under an advisory lock. On an existing database, the first run re-runs
+  0001-0008 (all `IF NOT EXISTS`, so nothing changes) and records them.
+  New: `py-authz db migrate` and `py-authz db status [--check]`. For
+  production, set `CONTROL_PLANE_APPLY_SCHEMA=false` and run
+  `py-authz db migrate` as a deploy step. `apply_schema()` now returns the
+  versions it applied.
+- **New migrations 0009 and 0010.** `0009` adds a nullable
+  `audit_logs.store_id` (catalog-only, with a 5 s `lock_timeout`). `0010`
+  adds `(user_id, timestamp, id)` and `(resource, timestamp, id)` indexes,
+  built `CONCURRENTLY` so audit writes keep flowing. `0008` is now built
+  `CONCURRENTLY` too. If you apply the files with your own tool, run
+  0008 and 0010 outside a transaction, one statement at a time.
+- **`AuditEvent.tenant_id` is now the tenant id; the store id moved to
+  the new `AuditEvent.store_id`** (ARCH3-16). `tenant_id` used to hold the
+  OpenFGA store id. Engines built by `MultiTenantAuthz` set both; a
+  standalone `AuthzEngine` records `tenant_id=None` unless you pass
+  `AuthzEngine(tenant_id=...)`. A custom `AuditLogger`, or anything that
+  reads `audit_logs.tenant_id` directly, should switch to `store_id` where
+  it meant the store. Rows written before the upgrade keep the store id in
+  `tenant_id`; `GET /audit-logs?tenant_id=` still finds them, and
+  `storage/sql/audit_logs_backfill_0009.example.sql` rewrites them if you
+  want the columns consistent.
+- **`GET /audit-logs` no longer 404s for an unknown tenant.** It returns
+  that tenant id's rows, so a deprovisioned tenant's history stays
+  readable. The response gains `next_cursor`; pass it back as `cursor`
+  for keyset paging (REL3-15). `offset` still works, but not together
+  with `cursor`. Rows include `store_id`.
+- **The control plane batches audit writes** (REL3-16) through the new
+  `BatchingAuditLogger`, which COPYs up to 500 events at a time.
+  `PostgresAuditLogger.log()` now uses COPY too, and gains `log_many()`.
+  Dropped events are counted in `audit_events_dropped_total` (queue full
+  or engine backpressure) and failed writes in `audit_events_failed_total`.
+  `AuthzEngine.flush_audit_logs()` also flushes a logger that has an
+  async `flush()`.
+- **The control plane caches RBAC decisions for 5 s** (REL3-19). A role
+  grant or revoke takes effect at once on the replica that made it, and
+  within `CONTROL_PLANE_RBAC_CACHE_TTL` seconds on the others. Set it to
+  `0` for the old behaviour. `GET /auth/me` now records an operator's
+  login at most every `CONTROL_PLANE_OPERATOR_LOGIN_INTERVAL` seconds;
+  `OperatorStore.record_login()` returns `None` when it skips.
+- **`AuthzEngine` takes `cache_ttl`** (default 60, unchanged) and
+  `invalidate_identity_on_write`. `InMemoryCache` gains
+  `delete_by_prefix()`.
+- **`AuthzEngine.list_objects()` warns when a result reaches the server's
+  cap** (REL3-17), and counts it in `authz_list_objects_truncated_total`.
+  If your OpenFGA sets `OPENFGA_LIST_OBJECTS_MAX_RESULTS`, pass the same
+  value as `OpenFGAClient(list_objects_max_results=...)`.
+- **`testkit.InMemoryFGAClient` honours `user:*` wildcard tuples** in
+  `check()`, as real OpenFGA does. A test that wrote a wildcard tuple and
+  expected a denial was relying on the old bug.
+- **New `prometheus` extra** (REL3-24, also in `all`):
+  `py_authz.core.prometheus.PrometheusMetrics`. The control plane serves
+  it at `/metrics` with `CONTROL_PLANE_PROMETHEUS_METRICS=true`, and now
+  records request count, 5xx count and duration.
 - **Model validation is stricter (ARCH3-6).** `DefaultModelValidator` (run
   by `py-authz generate-model`, `py-authz sync` and `ModelSync`) now
   rejects models that real OpenFGA would reject at upload: duplicate

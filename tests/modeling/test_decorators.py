@@ -128,3 +128,34 @@ def test_sync_authz_refuses_calls_after_close(openfga_stub):
 
     with pytest.raises(RuntimeError, match="closed"):
         sync_authz.can("viewer", Identity(id="user:1"), Resource(type="doc", id="1"))
+
+
+def test_sync_decorator_uses_a_passed_sync_authz_directly():
+    """Handing the decorator a `SyncAuthz` (rather than an async `Authz`)
+    routes checks straight through it, on its own background loop."""
+    from py_authz.core.exceptions import AuthorizationDenied
+    from py_authz.core.types import Identity
+    from py_authz.modeling import Relation, ResourceModel
+    from py_authz.modeling.decorators import authorize
+    from py_authz.modeling.registry import ResourceModelRegistry
+    from py_authz.sync import SyncAuthz
+    from py_authz.testkit import make_fake_authz
+
+    class Doc(ResourceModel):
+        type = "document"
+        view = Relation("viewer")
+
+    reg = ResourceModelRegistry()
+    reg.register(Doc)
+
+    with SyncAuthz(make_fake_authz(model_registry=reg)) as sync_authz:
+        alice = Identity(id="user:alice")
+        sync_authz.grant(alice, "viewer", Doc("1"))
+
+        @authorize(sync_authz, Doc.view, user_getter=lambda u, d: u, resource_getter=lambda u, d: d)
+        def handler(user, doc):
+            return "ok"
+
+        assert handler(alice, Doc("1")) == "ok"
+        with pytest.raises(AuthorizationDenied):
+            handler(alice, Doc("2"))

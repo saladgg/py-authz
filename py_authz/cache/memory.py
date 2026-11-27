@@ -125,3 +125,15 @@ class InMemoryCache(BaseCache):
         """
         async with self._lock:
             self._store.clear()
+
+    async def delete_by_prefix(self, prefix: str) -> int:
+        """
+        Delete every key starting with `prefix`; returns how many. Same
+        contract as `RedisCache.delete_by_prefix`, so
+        `AuthzEngine.invalidate_identity()` works with either backend.
+        """
+        async with self._lock:
+            doomed = [k for k in self._store if k.startswith(prefix)]
+            for key in doomed:
+                del self._store[key]
+            return len(doomed)

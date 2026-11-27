@@ -538,3 +538,46 @@ def test_tupleset_without_metadata_only_checks_the_same_type(validator):
         ]
     }
     validator.validate(model)
+
+
+def test_null_difference_branch_is_treated_as_empty(validator):
+    """Some JSON serialisers emit an unset field as `null`. A `difference`
+    with a null `subtract` must validate on its `base` alone instead of
+    crashing — and a bad tupleset in that base is still caught."""
+    good = {
+        "type_definitions": [
+            {"type": "user"},
+            {
+                "type": "doc",
+                "relations": {
+                    "owner": {"this": {}},
+                    "viewer": {"difference": {"base": {"this": {}}, "subtract": None}},
+                },
+            },
+        ],
+    }
+    validator.validate(good)
+
+    bad_base = {
+        "type_definitions": [
+            {"type": "user"},
+            {
+                "type": "doc",
+                "relations": {
+                    "viewer": {
+                        "difference": {
+                            "base": {
+                                "tupleToUserset": {
+                                    "tupleset": {"relation": "parnet"},
+                                    "computedUserset": {"relation": "viewer"},
+                                }
+                            },
+                            "subtract": None,
+                        }
+                    },
+                },
+            },
+        ],
+    }
+    with pytest.raises(ModelValidationError, match="'parnet'"):
+        validator.validate(bad_base)

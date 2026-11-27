@@ -591,3 +591,116 @@ async def test_aclose_closes_underlying_http_client():
     await client.aclose()
 
     assert http.aclose_called is True
+
+
+# ----------------------------------------------------------------------
+# Remaining `_request()` paths: retries exhausted on a transient status,
+# non-404 delete failures, `ping()`, model upload, and error-body parsing.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transient_status_after_retries_are_exhausted_is_an_external_service_error():
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    http = StatusSequenceClient([503, 503])
+    client = OpenFGAClient(
+        api_url="http://fake", store_id="s", model_id=None, http_client=http, max_retries=0
+    )
+
+    with pytest.raises(ExternalServiceError) as info:
+        await client.read_tuples()
+
+    assert not isinstance(info.value, UpstreamRequestRejected)
+    assert http.calls == 1  # max_retries=0: the 503 is classified, not retried
+
+
+@pytest.mark.asyncio
+async def test_delete_store_still_raises_rejections_other_than_404():
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s",
+        model_id=None,
+        http_client=StatusSequenceClient([400], data={"message": "invalid store id"}),
+    )
+
+    with pytest.raises(UpstreamRequestRejected) as info:
+        await client.delete_store("bad id")
+
+    assert info.value.status_code == 400
+    assert info.value.detail == "invalid store id"
+
+
+@pytest.mark.asyncio
+async def test_ping_hits_healthz_and_raises_when_unhealthy():
+    http = RecordingClient({"status": "SERVING"})
+    client = OpenFGAClient(api_url="http://fake", store_id=None, model_id=None, http_client=http)
+
+    await client.ping()
+
+    assert http.calls == [("GET", "/healthz", None)]
+
+    down = OpenFGAClient(
+        api_url="http://fake",
+        store_id=None,
+        model_id=None,
+        http_client=StatusSequenceClient([500]),
+        max_retries=0,
+    )
+    with pytest.raises(ExternalServiceError):
+        await down.ping()
+
+
+@pytest.mark.asyncio
+async def test_write_authorization_model_posts_the_model_to_the_store():
+    http = RecordingClient({"authorization_model_id": "m-1"})
+    client = OpenFGAClient(api_url="http://fake", store_id="s1", model_id=None, http_client=http)
+    model = {"schema_version": "1.1", "type_definitions": [{"type": "user"}]}
+
+    result = await client.write_authorization_model(model)
+
+    assert result == {"authorization_model_id": "m-1"}
+    assert http.calls == [("POST", "/stores/s1/authorization-models", model)]
+
+
+class _NonJsonErrorResponse(MockResponse):
+    def json(self):
+        raise ValueError("not JSON")
+
+
+class _SingleResponseClient:
+    def __init__(self, response):
+        self.response = response
+
+    async def request(self, *args, **kwargs):
+        return self.response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        _NonJsonErrorResponse(status_code=400),  # e.g. a proxy's HTML error page
+        MockResponse(["not", "a", "dict"], status_code=400),
+        MockResponse({"code": "validation_error"}, status_code=400),  # no message
+    ],
+    ids=["non-json-body", "non-dict-body", "no-message"],
+)
+async def test_rejection_without_a_usable_error_message_has_no_detail(response):
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    client = OpenFGAClient(
+        api_url="http://fake",
+        store_id="s",
+        model_id=None,
+        http_client=_SingleResponseClient(response),
+    )
+
+    with pytest.raises(UpstreamRequestRejected) as info:
+        await client.check("user:1", "viewer", "doc:1")
+
+    assert info.value.status_code == 400
+    assert info.value.detail is None
+    assert str(info.value).endswith(": 400")

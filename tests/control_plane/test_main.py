@@ -46,3 +46,24 @@ def test_main_reads_host_and_port_from_the_environment(fake_uvicorn, monkeypatch
     _, kwargs = fake_uvicorn[0]
     assert kwargs["host"] == "0.0.0.0"  # noqa: S104 — asserting pass-through only, nothing binds
     assert kwargs["port"] == 9000
+
+
+def test_python_dash_m_invokes_main(fake_uvicorn, monkeypatch):
+    """`python -m py_authz.control_plane` runs `main()` via the
+    `if __name__ == "__main__"` guard."""
+    import runpy
+
+    monkeypatch.delenv("CONTROL_PLANE_HOST", raising=False)
+    monkeypatch.delenv("CONTROL_PLANE_PORT", raising=False)
+    # Already imported above; drop it so runpy executes a fresh copy
+    # (otherwise it warns about re-running an imported module).
+    monkeypatch.delitem(sys.modules, "py_authz.control_plane.__main__", raising=False)
+
+    runpy.run_module("py_authz.control_plane", run_name="__main__")
+
+    assert fake_uvicorn == [
+        (
+            "py_authz.control_plane.app:create_app",
+            {"factory": True, "host": "127.0.0.1", "port": 8000},
+        )
+    ]

@@ -1,13 +1,10 @@
 """
 Tests for py_authz.control_plane.routes.audit (CP-5).
 
-Regression coverage for a bug found via live testing against a real
-stack: `audit_logs.tenant_id` is populated from
-`AuthzEngine.fga_client.store_id` (the OpenFGA store id), not the
-human-readable `tenant_id` every other route in this API uses — so
-`GET /audit-logs?tenant_id=<human-readable-id>` must resolve it via
-`TenantStore` before querying, or it silently returns zero rows forever
-no matter how many matching events exist.
+Since ARCH3-16, `audit_logs.tenant_id` holds the tenant id and
+`store_id` the store id. Rows written before migration 0009 held the
+store id in `tenant_id`, so a tenant filter also passes the tenant's
+current store id as `legacy_store_id`.
 
 Uses `require_system_or_tenant_role_from_query`'s real auth path (a fake
 `OIDCJWTValidator`, matching `test_auth.py`'s pattern) rather than
@@ -68,7 +65,9 @@ class FakeAuditQuery:
 
     async def query(self, **kwargs):
         self.calls.append(kwargs)
-        return [dict(r) for r in self.rows if kwargs.get("tenant_id") in (None, r["tenant_id"])]
+        wanted = {kwargs.get("tenant_id"), kwargs.get("legacy_store_id")} - {None}
+        rows = [dict(r) for r in self.rows if not wanted or r["tenant_id"] in wanted]
+        return rows[: kwargs.get("limit", 50)]
 
 
 ALICE = Identity(id="user:alice")
@@ -131,7 +130,7 @@ def _bearer():
 
 
 @pytest.mark.asyncio
-async def test_filtering_by_human_readable_tenant_id_resolves_to_store_id(
+async def test_tenant_filter_passes_tenant_id_and_legacy_store_id(
     client, rbac_authz, tenant_store, audit_query
 ):
     await tenant_store.set("acme-corp", "store-for-acme")
@@ -141,32 +140,57 @@ async def test_filtering_by_human_readable_tenant_id_resolves_to_store_id(
 
     assert resp.status_code == 200
     items = resp.json()["items"]
+    # The legacy row (store id in `tenant_id`) is found and echoed back
+    # with the requested tenant id.
     assert len(items) == 1
-    # The response echoes back the human-readable tenant_id, not the raw
-    # OpenFGA store id that's actually stored in the row.
     assert items[0]["tenant_id"] == "acme-corp"
-
-    # And the underlying query was actually given the resolved store id,
-    # not the human-readable one — confirms the fix, not just a response
-    # relabeling that happens to look right.
-    assert audit_query.calls[-1]["tenant_id"] == "store-for-acme"
+    assert audit_query.calls[-1]["tenant_id"] == "acme-corp"
+    assert audit_query.calls[-1]["legacy_store_id"] == "store-for-acme"
 
 
 @pytest.mark.asyncio
-async def test_filtering_by_unknown_tenant_id_is_404(client, rbac_authz):
-    # `require_system_or_tenant_role_from_query` checks the RBAC role
-    # *first* — a caller must be authorized for this specific tenant
-    # object before the route body ever runs (see that dependency's own
-    # docstring: a system role doesn't imply a tenant one). Granting a
-    # role directly on the not-yet-provisioned tenant id isolates this
-    # test to the handler's own "does this tenant actually exist" check.
-    await rbac_authz.grant(ALICE, "auditor", Tenant(id="never-provisioned"))
+async def test_unknown_tenant_still_queries_by_tenant_id(client, rbac_authz, audit_query):
+    """ARCH3-16: a deprovisioned tenant's history stays queryable (no 404)."""
+    await rbac_authz.grant(ALICE, "auditor", Tenant(id="gone"))
 
+    resp = client.get("/api/v1/audit-logs", params={"tenant_id": "gone"}, headers=_bearer())
+
+    assert resp.status_code == 200
+    assert audit_query.calls[-1]["tenant_id"] == "gone"
+    assert audit_query.calls[-1]["legacy_store_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_full_page_returns_a_cursor_that_round_trips(client, rbac_authz, audit_query):
+    """REL3-15: keyset pagination."""
+    await rbac_authz.grant(ALICE, "auditor", System(id=SYSTEM_OBJECT_ID))
+
+    first = client.get("/api/v1/audit-logs", params={"limit": 1}, headers=_bearer())
+
+    assert first.status_code == 200
+    cursor = first.json()["next_cursor"]
+    assert cursor is not None
     resp = client.get(
-        "/api/v1/audit-logs", params={"tenant_id": "never-provisioned"}, headers=_bearer()
+        "/api/v1/audit-logs", params={"limit": 1, "cursor": cursor}, headers=_bearer()
     )
+    assert resp.status_code == 200
+    assert audit_query.calls[-1]["before"] == (datetime(2026, 1, 1), 1)
 
-    assert resp.status_code == 404
+    short = client.get("/api/v1/audit-logs", params={"limit": 5}, headers=_bearer())
+    assert short.json()["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [{"cursor": "not-a-cursor!"}, {"cursor": "MjAyNnwx", "offset": 5}],
+)
+async def test_bad_cursor_or_cursor_with_offset_is_400(client, rbac_authz, params):
+    await rbac_authz.grant(ALICE, "auditor", System(id=SYSTEM_OBJECT_ID))
+
+    resp = client.get("/api/v1/audit-logs", params=params, headers=_bearer())
+
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio

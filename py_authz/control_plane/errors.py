@@ -35,7 +35,6 @@ _STATUS_CODES: list[tuple[type[AuthzError], int]] = [
     (InvalidAuthzRequest, 400),
     (ExternalServiceError, 503),
     (ConfigurationError, 500),  # a server misconfiguration, not the caller's fault
-    (AuthzError, 500),  # fallback for any other AuthzError subclass
 ]
 
 
@@ -43,7 +42,7 @@ def status_code_for(exc: AuthzError) -> int:
     for exc_type, code in _STATUS_CODES:
         if isinstance(exc, exc_type):
             return code
-    return 500
+    return 500  # any other AuthzError
 
 
 async def authz_error_handler(request: Request, exc: Exception) -> JSONResponse:

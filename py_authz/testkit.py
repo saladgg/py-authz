@@ -222,6 +222,14 @@ class InMemoryFGAClient:
         if key in self._tuples or key in extra:
             return True
 
+        # A `type:*` wildcard tuple grants the relation to every user of
+        # that type, as in real OpenFGA (a userset subject never matches).
+        user_type, sep, user_id = user.partition(":")
+        if sep and user_id != "*" and "#" not in user_id:
+            wildcard = (f"{user_type}:*", relation, obj)
+            if wildcard in self._tuples or wildcard in extra:
+                return True
+
         if rel is None:
             return False
 
@@ -269,13 +277,11 @@ class InMemoryFGAClient:
         (which keys on `Relation.name`) compiles it. Looking up by
         attribute name made `can("viewer", ...)` silently return False
         here while a real OpenFGA returned True."""
+        # `ResourceModelMeta` copies inherited relations into each
+        # subclass's own namespace, so the class itself is enough.
         for value in vars(model).values():
             if isinstance(value, Relation) and value.name == name:
                 return value
-        for klass in model.__mro__[1:]:
-            for value in vars(klass).values():
-                if isinstance(value, Relation) and value.name == name:
-                    return value
         return None
 
     # ------------------------------------------------------------------

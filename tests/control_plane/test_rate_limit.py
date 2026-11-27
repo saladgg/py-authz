@@ -1,5 +1,7 @@
 """Tests for py_authz.control_plane.rate_limit (CP-16)."""
 
+import time
+
 import pytest
 
 from py_authz.control_plane.rate_limit import (
@@ -146,3 +148,21 @@ async def test_redis_lockout_is_per_key():
 
     assert await limiter.is_locked_out("sa_1") is True
     assert await limiter.is_locked_out("sa_2") is False
+
+
+@pytest.mark.asyncio
+async def test_sweep_keeps_a_live_lockout_after_the_policy_is_shortened(monkeypatch):
+    """A sweep only drops keys whose lockout has expired. Shortening the
+    policy at runtime must not unlock a key that is still locked."""
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    limiter = InMemoryRateLimiter(RateLimitPolicy(max_failed_attempts=1, lockout_seconds=300))
+    monkeypatch.setattr(limiter, "MAX_TRACKED_KEYS", 1)
+    await limiter.record_failure("attacker")
+    assert await limiter.is_locked_out("attacker")
+
+    limiter.policy = RateLimitPolicy(max_failed_attempts=1, lockout_seconds=1)
+    now[0] += 2
+    await limiter.record_failure("other")  # over MAX_TRACKED_KEYS: sweeps
+
+    assert await limiter.is_locked_out("attacker")

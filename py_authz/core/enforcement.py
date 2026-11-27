@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -46,6 +47,9 @@ class AuthzEngine:
         metrics=None,
         cache_namespace: str | None = None,
         max_background_audit_tasks: int = 1000,
+        tenant_id: str | None = None,
+        cache_ttl: int = 60,
+        invalidate_identity_on_write: bool = False,
     ):
         """
         Initialize the authorization engine.
@@ -103,8 +107,31 @@ class AuthzEngine:
                 a warning) rather than queued indefinitely — audit writes
                 are already documented as best-effort, not guaranteed
                 delivery (see REL2-4).
+
+            tenant_id (Optional[str]):
+                The tenant this engine serves, recorded as
+                `AuditEvent.tenant_id` (ARCH3-16). `MultiTenantAuthz` sets
+                it; leave it `None` for a standalone engine. The store id
+                is recorded separately, as `AuditEvent.store_id`.
+
+            cache_ttl (int):
+                Seconds a cached decision lives (default 60).
+
+            invalidate_identity_on_write (bool):
+                When True, `Authz.grant`/`revoke` drop *every* cached
+                decision for the written identity (`invalidate_identity`),
+                not only the exact (identity, relation, resource) entry.
+                That covers relations implied through the model (granting
+                `owner` makes a cached `viewer: false` stale). Needs a
+                cache with `delete_by_prefix` (`InMemoryCache`,
+                `RedisCache`), and costs a keyspace scan per write on
+                Redis, so it's off by default. Other processes still see
+                stale entries until `cache_ttl` expires.
         """
         self.fga_client = fga_client
+        self.tenant_id = tenant_id
+        self.cache_ttl = cache_ttl
+        self.invalidate_identity_on_write = invalidate_identity_on_write
         self.cache = cache
         self.raise_on_denied = raise_on_denied
         self.audit_logger = audit_logger
@@ -144,6 +171,23 @@ class AuthzEngine:
     async def invalidate(self, request: AuthzRequest):
         if self.cache:
             await self.cache.delete(self._scoped_cache_key(request))
+
+    async def invalidate_identity(self, identity_id: str) -> None:
+        """
+        Drop every cached decision for `identity_id` in this engine's
+        namespace. Falls back to clearing the whole cache when the backend
+        has no `delete_by_prefix`.
+        """
+        if not self.cache:
+            return
+        prefix = AuthzRequest.identity_prefix(identity_id)
+        if self.cache_namespace:
+            prefix = f"{self.cache_namespace}:{prefix}"
+        delete_by_prefix = getattr(self.cache, "delete_by_prefix", None)
+        if delete_by_prefix is not None:
+            await delete_by_prefix(prefix)
+        else:
+            await self.cache.clear()
 
     async def enforce(
         self,
@@ -369,7 +413,7 @@ class AuthzEngine:
         )
 
         try:
-            await self.cache.set(cache_key, allowed)
+            await self.cache.set(cache_key, allowed, ttl=self.cache_ttl)
         except Exception:
             # Same fail-safe policy as the cache read (DX2-4): a cache
             # write failure must never affect the decision just made.
@@ -416,7 +460,8 @@ class AuthzEngine:
         reason = self._build_reason(request, allowed, cache_hit)
         event = AuditEvent(
             timestamp=datetime.now(),
-            tenant_id=getattr(self.fga_client, "store_id", None),
+            tenant_id=self.tenant_id,
+            store_id=getattr(self.fga_client, "store_id", None),
             user_id=request.identity.id,
             action=request.action,
             resource=request.resource.to_fga_object(),
@@ -485,7 +530,8 @@ class AuthzEngine:
 
         event = AuditEvent(
             timestamp=datetime.now(),
-            tenant_id=getattr(self.fga_client, "store_id", None),
+            tenant_id=self.tenant_id,
+            store_id=getattr(self.fga_client, "store_id", None),
             user_id=identity.id,
             action=relation,
             resource=resource_object,
@@ -520,6 +566,8 @@ class AuthzEngine:
         task that would grow the backlog without bound (see REL2-4).
         """
         if len(self._background_audit_tasks) >= self.max_background_audit_tasks:
+            if self.metrics:
+                self.metrics.incr("audit_events_dropped_total")
             logger.warning(
                 json.dumps(
                     {
@@ -565,6 +613,13 @@ class AuthzEngine:
         pending = list(self._background_audit_tasks)
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        # A buffering logger (e.g. `BatchingAuditLogger`) has only queued
+        # the events at this point; wait for it to write them too.
+        flush = getattr(self.audit_logger, "flush", None)
+        if flush is not None:
+            result = flush()
+            if inspect.isawaitable(result):
+                await result
 
     # ------------------------------------------------------------------
     # Internal Helpers
@@ -725,7 +780,12 @@ class AuthzEngine:
         list/index pages where checking each row would be O(n) round-trips.
 
         Returns:
-            list[str]: object strings in "<type>:<id>" form.
+            list[str]: object strings in "<type>:<id>" form. OpenFGA caps
+            the result (1000 by default) and stops at its own deadline
+            without saying so; a result at the client's
+            `list_objects_max_results` is logged as possibly truncated and
+            counted in `authz_list_objects_truncated_total`. For large
+            sets, check candidates with `bulk_enforce` instead.
         """
         if not user or not user.id:
             raise InvalidAuthzRequest("Missing or invalid identity")
@@ -762,6 +822,29 @@ class AuthzEngine:
                 }
             )
         )
+
+        # REL3-17: OpenFGA stops at its result cap (and at its own
+        # deadline) without flagging it. A result at the cap is probably
+        # incomplete; say so instead of passing it off as the full set.
+        # A deadline cut-off below the cap can't be told apart here.
+        cap = getattr(self.fga_client, "list_objects_max_results", None)
+        if isinstance(cap, int) and len(objects) >= cap:
+            if self.metrics:
+                self.metrics.incr("authz_list_objects_truncated_total")
+            logger.warning(
+                json.dumps(
+                    {
+                        "event": "authz_list_objects_possibly_truncated",
+                        "request_id": get_request_id(),
+                        "store_id": getattr(self.fga_client, "store_id", None),
+                        "user": user.id,
+                        "relation": relation,
+                        "type": resource_type,
+                        "count": len(objects),
+                        "max_results": cap,
+                    }
+                )
+            )
 
         return objects
 

@@ -11,6 +11,7 @@ are checked on every `make test`.
 import pytest
 from starlette.testclient import TestClient
 
+from py_authz.audit.batching import BatchingAuditLogger
 from py_authz.control_plane import app as app_module
 from py_authz.control_plane.rate_limit import InMemoryRateLimiter, RedisRateLimiter
 from py_authz.control_plane.settings import ControlPlaneSettings
@@ -68,6 +69,12 @@ def patched(monkeypatch, events):
 
     monkeypatch.setattr(app_module, "apply_schema", fake_apply_schema)
 
+    async def fake_pending_migrations(dsn):
+        events.append("pending_migrations")
+        return ["0010_audit_logs_filter_indexes"]
+
+    monkeypatch.setattr(app_module, "pending_migrations", fake_pending_migrations)
+
     class FakeModelSync:
         def __init__(self, client, *, model_factory):
             self.model = model_factory()
@@ -119,6 +126,15 @@ def test_lifespan_wires_everything_and_tears_down_in_reverse(patched, events):
         assert state.redis_cache is not None
         assert set(state.readiness_checks) == {"postgres", "openfga", "redis"}
         assert state.tenant_store.pool == {"pool_min_size": 1, "pool_max_size": 5}
+        # REL3-16: decisions are batched in front of the Postgres writer.
+        assert isinstance(state._audit_logger, BatchingAuditLogger)
+        # REL3-19: a short-TTL RBAC decision cache, invalidated per identity.
+        rbac_engine = state.rbac_authz._engine
+        assert rbac_engine.cache is not None
+        assert rbac_engine.cache_ttl == 5
+        assert rbac_engine.invalidate_identity_on_write is True
+        assert state.operator_store.pool["login_interval"] == 300
+        assert "pending_migrations" not in events
         assert client.get("/livez").status_code == 200
 
     connects = [e.split(":", 1)[1] for e in events if e.startswith("connect:")]
@@ -128,16 +144,22 @@ def test_lifespan_wires_everything_and_tears_down_in_reverse(patched, events):
     assert events.index("close:redis") < events.index("close:PostgresAuditLogger")
 
 
-def test_lifespan_without_redis_uses_in_process_fallbacks(patched, events):
+def test_lifespan_without_redis_uses_in_process_fallbacks(patched, events, caplog):
     settings = _settings(
         apply_schema_on_startup=False,
         rbac_fga_api_url="http://rbac-fga:8080",
+        rbac_cache_ttl=0,
     )
     app = app_module.create_app(settings)
 
     with TestClient(app):
         state = app.state
         assert "apply_schema" not in events
+        # REL3-10: with DDL off, boot checks and warns about pending migrations.
+        assert "pending_migrations" in events
+        assert state.rbac_authz._engine.cache is None
+        assert "py-authz db migrate" in caplog.text
+        assert "0010_audit_logs_filter_indexes" in caplog.text
         assert patched == []
         assert isinstance(state.service_account_rate_limiter, InMemoryRateLimiter)
         assert isinstance(state.tenant_manager.lock_manager, InProcessLockManager)
@@ -161,3 +183,65 @@ def test_startup_failure_still_closes_what_was_opened(patched, events, monkeypat
 
     assert "close:PostgresTenantStore" in events
     assert "close:PostgresAuditLogger" in events
+
+
+def test_prometheus_metrics_endpoint_off_by_default(patched, events):
+    app = app_module.create_app(_settings())
+
+    with TestClient(app) as client:
+        assert client.get("/metrics").status_code == 404
+
+
+def test_prometheus_metrics_endpoint_serves_text_format(patched, events):
+    """REL3-24."""
+    from py_authz.core.prometheus import PrometheusMetrics
+
+    app = app_module.create_app(_settings(prometheus_metrics=True))
+
+    with TestClient(app) as client:
+        assert isinstance(app.state.metrics, PrometheusMetrics)
+        client.get("/livez")
+        resp = client.get("/metrics")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert "py_authz_control_plane_requests_total" in resp.text
+    assert "py_authz_control_plane_request_duration_ms_bucket" in resp.text
+
+
+def test_prometheus_metrics_endpoint_checks_the_token(patched, events):
+    app = app_module.create_app(_settings(prometheus_metrics=True, metrics_token="s3cret"))  # noqa: S106
+
+    with TestClient(app) as client:
+        assert client.get("/metrics").status_code == 401
+        bad = client.get("/metrics", headers={"Authorization": "Bearer nope"})
+        good = client.get("/metrics", headers={"Authorization": "Bearer s3cret"})
+
+    assert bad.status_code == 401
+    assert bad.headers["www-authenticate"] == "Bearer"
+    assert good.status_code == 200
+
+
+def test_clean_boot_logs_no_schema_or_interrupted_job_warnings(
+    patched, events, monkeypatch, caplog
+):
+    """With DDL off, an up-to-date schema and no orphaned jobs, boot is
+    quiet — neither warning fires."""
+
+    async def no_pending(dsn):
+        events.append("pending_migrations")
+        return []
+
+    async def none_interrupted(self):
+        return 0
+
+    monkeypatch.setattr(app_module, "pending_migrations", no_pending)
+    monkeypatch.setattr(app_module.JobStore, "fail_interrupted", none_interrupted)
+    app = app_module.create_app(_settings(apply_schema_on_startup=False))
+
+    with caplog.at_level("WARNING"), TestClient(app):
+        assert "pending_migrations" in events
+        assert app.state.job_runner is not None
+
+    assert "pending migration" not in caplog.text
+    assert "interrupted control-plane job" not in caplog.text

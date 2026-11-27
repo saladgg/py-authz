@@ -197,3 +197,53 @@ async def test_openfga_client_explain_forwards_contextual_tuples_and_returns_non
     assert await client.explain("user:alice", "viewer", "document:x", contextual_tuples=ctx) is None
     assert http.payloads[0]["contextual_tuples"] == {"tuple_keys": ctx}
     assert await client.expand("viewer", "document:x") == {}
+
+
+@pytest.mark.asyncio
+async def test_malformed_usersets_are_skipped_without_an_expand_call():
+    """A userset missing its object or relation half (`doc:1#`,
+    `#member`) can't be expanded; it must be skipped, not sent upstream."""
+    expand = fake_expand(
+        {
+            "doc:1#viewer": _union(
+                _users("#member", "team:core#"),
+                _computed("doc:1#"),
+                _users("user:alice"),
+            ),
+        }
+    )
+
+    assert await find_path(expand, "user:alice", "viewer", "doc:1") == [
+        "doc:1#viewer",
+        "user:alice",
+    ]
+    assert expand.calls == ["doc:1#viewer"]
+
+
+@pytest.mark.asyncio
+async def test_tuple_to_userset_tries_each_parent_until_one_grants():
+    expand = fake_expand(
+        {
+            "doc:1#viewer": {
+                "leaf": {
+                    "tupleToUserset": {
+                        "tupleset": "parent",
+                        "computed": [
+                            {},  # no userset: skipped
+                            {"userset": "folder:a#viewer"},  # no match
+                            {"userset": "folder:b#viewer"},
+                        ],
+                    }
+                }
+            },
+            "folder:a#viewer": _users("user:bob"),
+            "folder:b#viewer": _users("user:alice"),
+        }
+    )
+
+    assert await find_path(expand, "user:alice", "viewer", "doc:1") == [
+        "doc:1#viewer",
+        "folder:b#viewer",
+        "user:alice",
+    ]
+    assert await find_path(expand, "user:carol", "viewer", "doc:1") is None

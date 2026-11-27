@@ -93,6 +93,7 @@ class OpenFGAClient:
         http_client: httpx.AsyncClient | None = None,
         idempotent_writes: bool = True,
         list_objects_timeout: float = 10.0,
+        list_objects_max_results: int | None = 1000,
     ):
         """
         Initialize the OpenFGA client.
@@ -132,6 +133,15 @@ class OpenFGAClient:
                 own server-side deadline (3s by default) exceeds the
                 general `timeout`; it is also never retried on a read
                 timeout, since repeating a slow query just multiplies load.
+
+            list_objects_max_results (Optional[int]):
+                The server's ListObjects result cap
+                (`OPENFGA_LIST_OBJECTS_MAX_RESULTS`, 1000 by default).
+                OpenFGA cuts the result at this many objects without saying
+                so; `AuthzEngine.list_objects()` treats a result this long
+                as possibly truncated and logs and counts it (REL3-17).
+                Match it to your server's setting; `None` disables the
+                check.
         """
         self.api_url = api_url.rstrip("/")
         self.store_id = store_id
@@ -140,6 +150,7 @@ class OpenFGAClient:
         self.max_retries = max_retries
         self.idempotent_writes = idempotent_writes
         self.list_objects_timeout = list_objects_timeout
+        self.list_objects_max_results = list_objects_max_results
 
         self._client = http_client or httpx.AsyncClient(
             base_url=self.api_url,

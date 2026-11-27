@@ -63,3 +63,31 @@ def test_from_env_optional_fields_default_sensibly(monkeypatch):
     assert settings.break_glass_subject is None
     assert settings.max_cached_tenants == 1000
     assert settings.migration_concurrency == 10
+
+
+def test_rbac_cache_and_login_interval_settings(monkeypatch):
+    """REL3-19."""
+    _set_env(monkeypatch)
+    defaults = ControlPlaneSettings.from_env()
+    assert (defaults.rbac_cache_ttl, defaults.operator_login_interval) == (5, 300)
+
+    _set_env(
+        monkeypatch,
+        {"CONTROL_PLANE_RBAC_CACHE_TTL": "0", "CONTROL_PLANE_OPERATOR_LOGIN_INTERVAL": "60"},
+    )
+    settings = ControlPlaneSettings.from_env()
+    assert (settings.rbac_cache_ttl, settings.operator_login_interval) == (0, 60)
+
+
+def test_prometheus_settings(monkeypatch):
+    """REL3-24."""
+    _set_env(monkeypatch)
+    defaults = ControlPlaneSettings.from_env()
+    assert (defaults.prometheus_metrics, defaults.metrics_token) == (False, None)
+
+    _set_env(
+        monkeypatch,
+        {"CONTROL_PLANE_PROMETHEUS_METRICS": "true", "CONTROL_PLANE_METRICS_TOKEN": "tok"},
+    )
+    settings = ControlPlaneSettings.from_env()
+    assert (settings.prometheus_metrics, settings.metrics_token) == (True, "tok")

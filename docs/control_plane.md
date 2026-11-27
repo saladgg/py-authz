@@ -97,10 +97,15 @@ export CONTROL_PLANE_OIDC_ISSUER=http://localhost:8081/realms/py-authz
 export CONTROL_PLANE_OIDC_AUDIENCE=py-authz-demo
 ```
 
-`CONTROL_PLANE_POSTGRES_DSN` is applied automatically on startup
-(`apply_schema()` — every table this library needs, tenant/model/audit
-plus the new operators/service_accounts/model_versions/control_plane_jobs
-ones, `CREATE TABLE IF NOT EXISTS`, safe to run repeatedly). See
+By default the control plane applies pending schema migrations to
+`CONTROL_PLANE_POSTGRES_DSN` on startup (`apply_schema()`: every table this
+library needs, tenant/model/audit plus operators/service_accounts/
+model_versions/control_plane_jobs). Each migration runs once and is
+recorded in `schema_migrations`, under a Postgres advisory lock, so
+replicas booting together don't race. In production, set
+`CONTROL_PLANE_APPLY_SCHEMA=false` and run `py-authz db migrate --dsn ...`
+as a deploy step instead; boot then only logs a warning if migrations are
+pending. See
 [`ControlPlaneSettings`](../py_authz/control_plane/settings.py)'s own
 docstrings for every var's exact meaning/default (Redis is optional —
 cache stats/invalidate routes 503 without it; `CONTROL_PLANE_MODEL_MODULE`

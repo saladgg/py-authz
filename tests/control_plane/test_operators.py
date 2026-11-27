@@ -72,7 +72,7 @@ async def test_record_login_creates_a_new_operator(patched_asyncpg):
 
 @pytest.mark.asyncio
 async def test_record_login_is_idempotent_for_the_same_subject(patched_asyncpg):
-    store = OperatorStore(dsn="postgres://fake")
+    store = OperatorStore(dsn="postgres://fake", login_interval=0)
     await store.connect()
 
     first = await store.record_login(subject="alice", email="alice@example.com")
@@ -84,13 +84,42 @@ async def test_record_login_is_idempotent_for_the_same_subject(patched_asyncpg):
 
 @pytest.mark.asyncio
 async def test_record_login_keeps_existing_email_when_new_one_is_none(patched_asyncpg):
-    store = OperatorStore(dsn="postgres://fake")
+    store = OperatorStore(dsn="postgres://fake", login_interval=0)
     await store.connect()
 
     await store.record_login(subject="alice", email="alice@example.com")
     updated = await store.record_login(subject="alice", email=None)
 
     assert updated.email == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_record_login_is_throttled_per_subject_and_email(patched_asyncpg):
+    """REL3-19: `/auth/me` runs on every page load; don't upsert each time."""
+    now = [1000.0]
+    store = OperatorStore(dsn="postgres://fake", login_interval=60, clock=lambda: now[0])
+    await store.connect()
+
+    assert await store.record_login(subject="alice", email="a@x") is not None
+    assert await store.record_login(subject="alice", email="a@x") is None
+    # A changed email is written straight away; so is another subject.
+    assert await store.record_login(subject="alice", email="new@x") is not None
+    assert await store.record_login(subject="bob", email=None) is not None
+    now[0] += 61
+    assert await store.record_login(subject="alice", email="new@x") is not None
+
+
+@pytest.mark.asyncio
+async def test_recent_login_memory_is_bounded(patched_asyncpg, monkeypatch):
+    from py_authz.control_plane import operators as operators_module
+
+    monkeypatch.setattr(operators_module, "_RECENT_LOGINS_MAX", 2)
+    store = OperatorStore(dsn="postgres://fake")
+    await store.connect()
+    for name in ("a", "b", "c"):
+        await store.record_login(subject=name, email=None)
+
+    assert list(store._recent_logins) == ["b", "c"]
 
 
 # -------------------------------------------------------------------
