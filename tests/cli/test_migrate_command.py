@@ -251,6 +251,73 @@ async def test_migrate_command_reports_partial_failures_and_raises(capsys, monke
     assert "t2: FAILED - openfga unreachable" in captured.err
 
 
+@pytest.mark.asyncio
+async def test_migrate_command_no_tenants_on_a_real_backend_skips_the_memory_warning(
+    capsys, monkeypatch
+):
+    async def fake_build_backends(backend, conn):
+        from py_authz.core.model_registry import InMemoryModelRegistry
+
+        return InMemoryTenantStore(), InMemoryModelRegistry()
+
+    monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
+
+    with pytest.raises(ConfigurationError, match="found no tenants"):
+        await migrate_command(api_url="http://fake", backend="postgres")
+
+    captured = capsys.readouterr()
+    assert "No tenants found" in captured.out
+    assert "--backend memory" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_migrate_command_json_output_reports_abort_on_decline(capsys, monkeypatch):
+    tenants = InMemoryTenantStore()
+    await tenants.set("t1", "store-1")
+
+    async def fake_build_backends(backend, conn):
+        from py_authz.core.model_registry import InMemoryModelRegistry
+
+        return tenants, InMemoryModelRegistry()
+
+    monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
+    monkeypatch.setattr(migrate_module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+
+    await migrate_command(api_url="http://fake", backend="memory", json_output=True)
+
+    assert FakeMigrationManager.instances == []
+    assert json.loads(capsys.readouterr().out) == {"aborted": True}
+
+
+@pytest.mark.asyncio
+async def test_migrate_command_dry_run_reports_unchecked_tenants_and_raises(capsys, monkeypatch):
+    async def fake_build_backends(backend, conn):
+        from py_authz.core.model_registry import InMemoryModelRegistry
+
+        return InMemoryTenantStore(), InMemoryModelRegistry()
+
+    monkeypatch.setattr(migrate_module, "_build_backends", fake_build_backends)
+
+    original_init = FakeMigrationManager.__init__
+
+    def init_with_failure(self, **kwargs):
+        original_init(self, **kwargs)
+        self.failures = {"t3": RuntimeError("openfga unreachable")}
+        self.dry_run_results = {"t2": False}
+
+    monkeypatch.setattr(FakeMigrationManager, "__init__", init_with_failure)
+
+    with pytest.raises(ExternalServiceError, match="1 of 3 tenant\\(s\\) could not be checked"):
+        await migrate_command(api_url="http://fake", tenant_ids=["t1", "t2", "t3"], dry_run=True)
+
+    assert FakeMigrationManager.instances[0].migrate_all_calls == []
+    out = capsys.readouterr().out
+    assert "t1: would migrate" in out
+    assert "t2: no change" in out
+    assert "t3: could not check (openfga unreachable)" in out
+
+
 # ----------------------------------------------------------------------
 # Regression coverage for REL2-8: backend connections must be released,
 # even when the command raises.

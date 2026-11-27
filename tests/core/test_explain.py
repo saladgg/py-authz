@@ -154,3 +154,47 @@ async def test_explain_falls_back_when_client_explain_predates_new_kwargs(authz_
     result = await engine.explain(authz_request)
 
     assert result.details == {"old": True}
+
+
+@pytest.mark.asyncio
+async def test_explain_swallows_a_failure_of_the_legacy_signature_fallback_too(authz_request):
+    """If the old-signature retry (after a `TypeError`) also fails, the
+    explanation still comes back — just without details or a path."""
+    calls = []
+
+    class BrokenOldStyleClient(MockOpenFGAClient):
+        def __getattr__(self, name):
+            if name == "explain":
+
+                async def _old_explain(user, relation, object):
+                    calls.append((user, relation, object))
+                    raise RuntimeError("expand endpoint down")
+
+                return _old_explain
+            return super().__getattr__(name)
+
+    engine = AuthzEngine(fga_client=BrokenOldStyleClient(allowed=True), cache=None)
+
+    result = await engine.explain(authz_request)
+
+    assert result.allowed is True
+    assert result.details is None
+    assert result.path is None
+    assert len(calls) == 1  # the fallback was attempted
+
+
+@pytest.mark.asyncio
+async def test_explain_path_is_none_when_details_cannot_be_rendered(authz_request):
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    details = Unprintable()
+    client = MockOpenFGAClient(allowed=True, has_explain=True, explain_data=details)
+    engine = AuthzEngine(fga_client=client, cache=None)
+
+    result = await engine.explain(authz_request)
+
+    assert result.allowed is True
+    assert result.path is None
+    assert result.details is details

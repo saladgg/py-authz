@@ -18,7 +18,9 @@ from fastapi import FastAPI
 
 from py_authz.adapters.oidc import OIDCJWTValidator
 from py_authz.api import Authz, MultiTenantAuthz
+from py_authz.audit.batching import BatchingAuditLogger
 from py_authz.audit.postgres import PostgresAuditLogger, PostgresAuditQuery
+from py_authz.cache.memory import InMemoryCache
 from py_authz.cache.redis import RedisCache
 from py_authz.clients.openfga import OpenFGAClient
 from py_authz.control_plane import rbac_model
@@ -51,7 +53,7 @@ from py_authz.core.model_sync import ModelSync
 from py_authz.core.tenant_manager import TenantManager
 from py_authz.core.tenant_resolver import StoreBackedResolver
 from py_authz.storage.postgres import PostgresModelRegistry, PostgresTenantStore
-from py_authz.storage.schema import apply_schema
+from py_authz.storage.schema import apply_schema, pending_migrations
 from py_authz.utils.deps import redis_from_url
 from py_authz.utils.modules import load_module
 
@@ -94,13 +96,27 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings, stack: AsyncExitSt
     if settings.model_module:
         load_module(settings.model_module)
 
-    app.state.metrics = Metrics()
+    if settings.prometheus_metrics:
+        from py_authz.core.prometheus import PrometheusMetrics
+
+        app.state.metrics = PrometheusMetrics()
+    else:
+        app.state.metrics = Metrics()
 
     # One Postgres DSN for everything (existing tenants/tenant_models/
-    # audit_logs tables plus the new control-plane ones) — `apply_schema()`
-    # covers both (see storage/schema.py's SCHEMA_FILES).
+    # audit_logs tables plus the control-plane ones). In production, set
+    # CONTROL_PLANE_APPLY_SCHEMA=false and run `py-authz db migrate` as a
+    # deploy step (REL3-10); boot then only warns about pending migrations.
     if settings.apply_schema_on_startup:
         await apply_schema(settings.postgres_dsn)
+    else:
+        pending = await pending_migrations(settings.postgres_dsn)
+        if pending:
+            logger.warning(
+                "database schema has %d pending migration(s) (%s); run `py-authz db migrate`",
+                len(pending),
+                ", ".join(pending),
+            )
 
     pool = {
         "pool_min_size": settings.postgres_pool_min_size,
@@ -110,7 +126,12 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings, stack: AsyncExitSt
     app.state.model_registry = PostgresModelRegistry(settings.postgres_dsn, **pool)
     app.state.audit_query = PostgresAuditQuery(settings.postgres_dsn, **pool)
     app.state.service_account_store = ServiceAccountStore(settings.postgres_dsn, **pool)
-    app.state.operator_store = OperatorStore(settings.postgres_dsn, **pool)
+    app.state.operator_store = OperatorStore(
+        settings.postgres_dsn,
+        login_interval=settings.operator_login_interval,
+        pool_min_size=settings.postgres_pool_min_size,
+        pool_max_size=settings.postgres_pool_max_size,
+    )
     app.state.model_version_store = ModelVersionStore(settings.postgres_dsn, **pool)
     app.state.job_store = JobStore(settings.postgres_dsn, **pool)
     for name in _STORE_STATE_NAMES:
@@ -118,7 +139,10 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings, stack: AsyncExitSt
         await store.connect()
         stack.push_async_callback(store.close)
 
-    audit_logger = PostgresAuditLogger(settings.postgres_dsn, **pool)
+    # Batched (REL3-16): `log()` only enqueues; a worker COPYs batches.
+    audit_logger = BatchingAuditLogger(
+        PostgresAuditLogger(settings.postgres_dsn, **pool), metrics=app.state.metrics
+    )
     await audit_logger.connect()
     # Registered before every audit-producing engine below, so it closes
     # only after they've flushed (REL3-8).
@@ -211,9 +235,18 @@ async def _wire(app: FastAPI, settings: ControlPlaneSettings, stack: AsyncExitSt
     rbac_syncer = ModelSync(rbac_fga_client, model_factory=rbac_model.generate_rbac_model)
     rbac_fga_client.model_id = await rbac_syncer.sync()
 
+    # REL3-19: a short-TTL decision cache. Every request runs at least one
+    # role check, and `/auth/me` up to five. Writes drop the principal's
+    # whole cached set (a new `owner` grant makes a cached `viewer: false`
+    # stale), not just the exact relation written.
     rbac_authz = Authz(
         AuthzEngine(
-            fga_client=rbac_fga_client, audit_logger=audit_logger, metrics=app.state.metrics
+            fga_client=rbac_fga_client,
+            audit_logger=audit_logger,
+            metrics=app.state.metrics,
+            cache=InMemoryCache(max_size=10_000) if settings.rbac_cache_ttl > 0 else None,
+            cache_ttl=settings.rbac_cache_ttl,
+            invalidate_identity_on_write=True,
         )
     )
     app.state.rbac_authz = rbac_authz
@@ -316,6 +349,8 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     # balancer/orchestrator probe has no operator session or
     # service-account credential to present.
     app.include_router(health_routes.health_router)
+    if settings.prometheus_metrics:
+        app.include_router(health_routes.prometheus_router)
 
     for router in API_ROUTERS:
         app.include_router(router, prefix=API_PREFIX)

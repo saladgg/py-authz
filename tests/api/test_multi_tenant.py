@@ -258,6 +258,9 @@ async def test_for_tenant_namespaces_cache_by_resolved_store_id():
     authz_t2 = await mt.for_tenant("t2")
 
     assert authz_t1._engine.cache_namespace == "store-1"
+    # ARCH3-16: audit events carry the tenant id, not just the store id.
+    assert authz_t1._engine.tenant_id == "t1"
+    assert authz_t2._engine.tenant_id == "t2"
     assert authz_t2._engine.cache_namespace == "store-2"
 
 
@@ -421,3 +424,78 @@ async def test_authz_aclose_flushes_in_flight_audit_writes_first():
     await authz.aclose()
 
     assert len(landed) == 1
+
+
+@pytest.mark.asyncio
+async def test_authz_aclose_with_zero_flush_timeout_skips_waiting_for_audit_writes():
+    """`flush_audit_timeout=0` is the documented "don't wait" switch: the
+    client is closed immediately, without awaiting a pending audit write."""
+    from py_authz.api import Authz
+    from py_authz.core.enforcement import AuthzEngine
+    from py_authz.core.types import Identity, Resource
+
+    landed = []
+    gate = asyncio.Event()
+
+    class SlowAuditLogger:
+        async def log(self, event):
+            await gate.wait()
+            landed.append(event)
+
+    client = FakeFGAClient(api_url="http://fake", store_id="s", model_id=None)
+
+    async def check(**kwargs):
+        return True
+
+    client.check = check
+    authz = Authz(AuthzEngine(fga_client=client, audit_logger=SlowAuditLogger()))
+    await authz.can("viewer", Identity(id="user:1"), Resource(type="doc", id="1"))
+
+    await authz.aclose(flush_audit_timeout=0)
+
+    assert client.closed is True
+    assert landed == []  # the audit write was not awaited
+    gate.set()
+    await authz._engine.flush_audit_logs()  # let the background write finish cleanly
+    assert len(landed) == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_waits_for_in_flight_lru_eviction_closes():
+    """An eviction close scheduled in the background (see `for_tenant()`)
+    must have finished by the time `aclose()` returns."""
+    resolver = FakeResolver({"t1": "store-1", "t2": "store-2"})
+    mt = MultiTenantAuthz(
+        api_url="http://fake", model_id=None, tenant_resolver=resolver, max_cached_tenants=1
+    )
+
+    await mt.for_tenant("t1")
+    await mt.for_tenant("t2")  # evicts t1; its close is only scheduled, not yet run
+    t1_client = FakeFGAClient.instances[0]
+    assert t1_client.closed is False
+
+    await mt.aclose()
+
+    assert t1_client.closed is True
+    assert all(c.closed for c in FakeFGAClient.instances)
+
+
+@pytest.mark.asyncio
+async def test_for_tenant_waiter_reuses_the_instance_resolved_while_it_waited_for_the_lock():
+    """ARCH2-9's re-check under the lock: a caller that misses the cache,
+    then waits on the lock while another caller is mid-resolution, must
+    reuse that caller's result rather than resolving the tenant again."""
+
+    class SlowResolver(FakeResolver):
+        async def resolve(self, tenant_id: str) -> str:
+            await asyncio.sleep(0)  # yield while holding the resolution lock
+            return await super().resolve(tenant_id)
+
+    resolver = SlowResolver({"t1": "store-1"})
+    mt = MultiTenantAuthz(api_url="http://fake", model_id=None, tenant_resolver=resolver)
+
+    first, second = await asyncio.gather(mt.for_tenant("t1"), mt.for_tenant("t1"))
+
+    assert first is second
+    assert resolver.calls == ["t1"]
+    assert len(FakeFGAClient.instances) == 1

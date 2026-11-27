@@ -87,3 +87,15 @@ async def test_cache_unbounded_when_max_size_is_none():
         await cache.set(f"k{i}", True)
 
     assert len(cache._store) == 50
+
+
+@pytest.mark.asyncio
+async def test_delete_by_prefix_removes_only_matching_keys():
+    from py_authz.cache.memory import InMemoryCache
+
+    cache = InMemoryCache()
+    for key in ("ns:a|1", "ns:a|2", "ns:b|1"):
+        await cache.set(key, True)
+
+    assert await cache.delete_by_prefix("ns:a|") == 2
+    assert list(cache._store) == ["ns:b|1"]

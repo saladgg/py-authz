@@ -4,14 +4,13 @@ Execution checklist for
 [`12_reliability_performance_and_operations.md`](12_reliability_performance_and_operations.md).
 IDs match that file.
 
-> **Status (2026-11-25):** Tier 0 shipped (REL3-1, REL3-11, REL3-20,
+> **Status (2026-11-27):** Tier 0 shipped (REL3-1, REL3-11, REL3-20,
 > REL3-21), plus REL3-22 (CI hygiene) pulled forward since it touched
 > the same workflow. Second batch (2026-11-24): REL3-2, REL3-4, REL3-5 and
-> REL3-18, then Tiers 1–2 in full and REL3-15/17 (partly). **Still open:**
-> REL3-10 (schema migrations), REL3-16 (batched audit writes), REL3-19,
-> REL3-23 (images/compose), REL3-24 (metrics; batch 3 shipped the deque
-> and request ids, the Prometheus exporter is left), plus the noted
-> remainders of REL3-14/15/17.
+> REL3-18, then Tiers 1–2 in full and REL3-15/17 (partly). Batch 4
+> (2026-11-26/27) shipped REL3-10, REL3-16, REL3-19, REL3-24 and the
+> rest of REL3-15 and REL3-17. **Still open:** REL3-23 (images/compose)
+> and REL3-14's shared pool.
 
 ---
 
@@ -131,9 +130,22 @@ IDs match that file.
 
 ## Tier 3 — Schema management and data-path scale
 
-- [ ] **REL3-10 — `schema_migrations` table + advisory lock +
+- [x] **REL3-10 — `schema_migrations` table + advisory lock +
   `CONCURRENTLY` indexes + `CONTROL_PLANE_APPLY_SCHEMA` + a
   `py-authz db migrate` command.**
+  Shipped (batch 4): `apply_schema()` records each file in
+  `schema_migrations` and runs it once. The advisory lock is taken with
+  `pg_try_advisory_lock` in a poll loop (a blocked `pg_advisory_lock`
+  would hold a snapshot that `CREATE INDEX CONCURRENTLY` waits on), with
+  a timeout. Files marked `-- py-authz: no-transaction` (0008, now
+  `CONCURRENTLY`, and 0010) run statement by statement outside a
+  transaction, and an INVALID index left by a failed build is dropped
+  and rebuilt; every other file runs in one transaction with its
+  `schema_migrations` row. New `py-authz db migrate` and
+  `py-authz db status [--check]`. With `CONTROL_PLANE_APPLY_SCHEMA=false`
+  the control plane warns about pending migrations at boot. Live tests:
+  four concurrent runners on a fresh database, an unversioned database
+  upgraded in place, and invalid-index recovery.
 - [x] **REL3-15 — Bounded `limit`/`offset` on every list route; keyset
   audit pagination; user/resource indexes.**
   Partly shipped: every list endpoint bounds `limit` (1..500) and
@@ -142,19 +154,48 @@ IDs match that file.
   `user_id`/`resource` indexes, which wait on REL3-10's migration story
   (a plain `CREATE INDEX` at boot would block audit writes on a large
   table).
-- [ ] **REL3-16 — Batched audit writer plus a dropped-events metric.**
+  Remainder shipped (batch 4): keyset pagination (`cursor`/`next_cursor`
+  on `GET /audit-logs`, `before=` on `PostgresAuditQuery`) and
+  `CONCURRENTLY`-built `(user_id, timestamp, id)` and
+  `(resource, timestamp, id)` indexes (migration `0010`). The panel still
+  pages by offset (DX3-14).
+- [x] **REL3-16 — Batched audit writer plus a dropped-events metric.**
+  Shipped (batch 4): `BatchingAuditLogger` (bounded queue, flush every
+  500 events or 200 ms) in front of `PostgresAuditLogger`, whose writes
+  now go through `COPY` (`log_many()`). The control plane uses it.
+  `audit_events_dropped_total` counts queue-full and engine-backpressure
+  drops, `audit_events_failed_total` failed writes.
+  `AuthzEngine.flush_audit_logs()` flushes the batcher too, so the live
+  control-plane test still reads its audit rows back.
 - [x] **REL3-17 — list-objects timeout and truncation; `page_size=1`;
   429/503 retry with jitter.**
   Shipped: 429/502/503/504 are retried for idempotent calls, backoff is
   jittered, `list_objects` has its own 10 s timeout with no read-timeout
-  retry, and `get_latest_model` uses `page_size=1`. Not done: surfacing
-  list-objects truncation.
+  retry, and `get_latest_model` uses `page_size=1`.
+  Truncation (batch 4): `OpenFGAClient(list_objects_max_results=1000)`
+  mirrors the server cap; `AuthzEngine.list_objects()` logs
+  `authz_list_objects_possibly_truncated` and counts
+  `authz_list_objects_truncated_total` when a result reaches it. A cut-off
+  at OpenFGA's own deadline, below the cap, isn't detectable and is
+  documented.
 - [x] **REL3-18 — `SCAN COUNT 1000` plus pipelined `UNLINK`.**
   `RedisCache._delete_matching()` scans with `COUNT 1000` and UNLINKs
   in batches of 500. Used by `clear()`, `delete_by_fragment()` and
   `delete_by_prefix()`; `count_keys()` uses the large count too. Tested.
-- [ ] **REL3-19 — Throttled operator upsert; concurrent or batched role
+- [x] **REL3-19 — Throttled operator upsert; concurrent or batched role
   checks; RBAC cache.**
+  Shipped (batch 4): `OperatorStore.record_login` (called by
+  `GET /auth/me` on every panel page load) skips the upsert for a subject
+  and email it recorded within `CONTROL_PLANE_OPERATOR_LOGIN_INTERVAL`
+  (300 s). `effective_system_role` runs its five checks concurrently. The
+  RBAC engine has an in-memory decision cache
+  (`CONTROL_PLANE_RBAC_CACHE_TTL`, 5 s, 0 disables) with the new
+  `AuthzEngine(invalidate_identity_on_write=True)`: a grant or revoke
+  drops every cached decision for that principal, since a new `owner`
+  grant makes a cached `viewer: false` stale. Other replicas converge
+  within the TTL. `AuthzEngine(cache_ttl=)` and
+  `InMemoryCache.delete_by_prefix` are new. A `BatchCheck` waits on
+  `13`'s DX3-19.
 
 ## Tier 4 — Operability
 
@@ -167,12 +208,20 @@ IDs match that file.
   SEC3-15), and `uv.lock` was refreshed (it was stale at 1.5.0).
 - [ ] **REL3-23 — Persistent OpenFGA datastore, Postgres volume, pinned
   Keycloak; reference Dockerfiles (API + panel) with compose services.**
-- [ ] **REL3-24 — `deque` metrics, an optional Prometheus exporter,
+- [x] **REL3-24 — `deque` metrics, an optional Prometheus exporter,
   request id in logs.**
   Partly shipped (batch 3): `Metrics.observe()` uses `deque(maxlen)`;
   control-plane request logs carry `request_id` (a safe caller
-  `X-Request-ID` is reused) and echo it as a response header. Still open:
-  the optional Prometheus exporter and a control-plane request-duration
-  metric.
+  `X-Request-ID` is reused) and echo it as a response header.
+  Batch 4: a `prometheus` extra with `py_authz.core.prometheus.
+  PrometheusMetrics`, a `Metrics` that also records into a private
+  `prometheus_client` registry (counters, histograms in ms). With
+  `CONTROL_PLANE_PROMETHEUS_METRICS=true` the control plane serves it at
+  `/metrics` (unversioned; optional `CONTROL_PLANE_METRICS_TOKEN` bearer
+  check). The request middleware records `control_plane_requests_total`,
+  `control_plane_request_errors_total` and
+  `control_plane_request_duration_ms`. Not done: labels (relation, type,
+  decision); the `incr`/`observe` protocol has none, and adding them
+  would break custom metrics sinks.
 - [x] **REL3-25 — See `10`'s SEC3-9.**
   Shipped with `10`'s SEC3-9.

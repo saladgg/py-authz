@@ -528,3 +528,60 @@ async def test_fail_open_never_applies_when_openfga_rejects_the_check():
         await dep(_Req())
 
     assert exc_info.value.status_code == 500
+
+
+def _bare_request(user=None):
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+    if user is not None:
+        request.state.user = user
+    return request
+
+
+@pytest.mark.asyncio
+async def test_require_fastapi_decorator_finds_a_positional_request():
+    """The wrapper accepts the `Request` positionally too (e.g. a handler
+    called directly), skipping non-Request args to find it."""
+    seen = {}
+
+    def resource_getter(request, **kwargs):
+        seen["kwargs"] = kwargs
+        return Doc(kwargs["doc_id"])
+
+    @require_fastapi(AllowAuthz(), Doc.view, resource_getter=resource_getter)
+    async def handler(marker, request, doc_id):
+        return {"marker": marker, "doc_id": doc_id, "user": request.state.user.id}
+
+    request = _bare_request(Identity(id="user:1"))
+
+    result = await handler("first", request, doc_id="42")
+
+    assert result == {"marker": "first", "doc_id": "42", "user": "user:1"}
+    assert seen["kwargs"] == {"doc_id": "42"}
+
+
+@pytest.mark.asyncio
+async def test_require_fastapi_decorator_denies_with_a_positional_request():
+    @require_fastapi(DenyAuthz(), Doc.view, resource_getter=lambda request: Doc("1"))
+    async def handler(request):
+        raise AssertionError("handler must not run when denied")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await handler(_bare_request(Identity(id="user:1")))
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_fastapi_decorator_without_a_request_raises():
+    """A handler that doesn't take a `Request` can't be checked — fail
+    loudly rather than skip enforcement."""
+    called = []
+
+    @require_fastapi(AllowAuthz(), Doc.view, resource_getter=lambda request: Doc("1"))
+    async def handler(doc_id):
+        called.append(doc_id)
+
+    with pytest.raises(RuntimeError, match="Request object not found"):
+        await handler("42")
+
+    assert called == []

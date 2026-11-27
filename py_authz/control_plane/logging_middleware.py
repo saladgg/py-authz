@@ -52,11 +52,24 @@ def install_request_logging(app: FastAPI) -> None:
             response = await call_next(request)
         except Exception:
             _log(request, status_code=None, start=start, failed=True)
+            _record(request, start=start, failed=True)
             raise
 
         _log(request, status_code=response.status_code, start=start, failed=False)
+        _record(request, start=start, failed=response.status_code >= 500)
         response.headers["X-Request-ID"] = get_request_id() or ""
         return response
+
+
+def _record(request: Request, *, start: float, failed: bool) -> None:
+    """Request count, 5xx count and duration (REL3-24) into `app.state.metrics`."""
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics is None:
+        return
+    metrics.incr("control_plane_requests_total")
+    if failed:
+        metrics.incr("control_plane_request_errors_total")
+    metrics.observe("control_plane_request_duration_ms", (time.monotonic() - start) * 1000)
 
 
 def _log(request: Request, *, status_code: int | None, start: float, failed: bool) -> None:

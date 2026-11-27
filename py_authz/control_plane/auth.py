@@ -19,6 +19,7 @@ Nothing here reimplements authorization — it's the same `Authz.can()`
 surface as every other route in this API's underlying library.
 """
 
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -473,7 +474,7 @@ async def effective_system_role(rbac_authz, identity: Identity) -> str | None:
     to issue one check per role name themselves.
     """
     resource = Resource(type=System.type, id=SYSTEM_OBJECT_ID)
-    for role in ROLE_CHAIN:
-        if await rbac_authz.can(role, identity, resource):
-            return role
-    return None
+    # Concurrently (REL3-19): these used to be up to five sequential
+    # OpenFGA round trips on every panel page load.
+    held = await asyncio.gather(*(rbac_authz.can(role, identity, resource) for role in ROLE_CHAIN))
+    return next((role for role, ok in zip(ROLE_CHAIN, held, strict=True) if ok), None)

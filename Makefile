@@ -178,6 +178,21 @@ install-all: ## Install py-authz with every extra
 	pip install "py-authz[all]"
 
 # ----------------------------------------------------------
+# Database schema (py_authz/storage/sql/) — `py-authz db` (REL3-10).
+# Defaults to the docker-compose Postgres; override with
+# `make db-migrate POSTGRES_DSN=postgres://...`.
+# ----------------------------------------------------------
+
+POSTGRES_DSN ?= postgres://py_authz:py_authz@localhost:5433/py_authz
+
+.PHONY: db-migrate db-status
+db-migrate: ## Apply pending Postgres schema migrations (advisory-locked; safe to rerun)
+	uv run py-authz db migrate --dsn "$(POSTGRES_DSN)"
+
+db-status: ## List schema migrations and exit 1 if any are pending
+	uv run py-authz db status --dsn "$(POSTGRES_DSN)" --check
+
+# ----------------------------------------------------------
 # Control-Plane API (py_authz/control_plane/) — see docs/control_plane.md
 # ----------------------------------------------------------
 

@@ -1,10 +1,11 @@
 """GET /livez, /readyz, /health (probes) and GET /metrics (CP-10)."""
 
 import asyncio
+import hmac
 import logging
 
-from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, Response
 
 from py_authz.control_plane.auth import require_system_role
 from py_authz.control_plane.deps import get_metrics, get_readiness_checks
@@ -99,3 +100,25 @@ async def get_metrics_endpoint(metrics=Depends(get_metrics)) -> dict:
             "avg": (sum(values) / len(values)) if values else 0.0,
         }
     return {"counters": dict(metrics.counters), "durations": duration_summaries}
+
+
+#: Mounted at the app root only when `prometheus_metrics` is on (REL3-24).
+prometheus_router = APIRouter(tags=["health"])
+
+
+@prometheus_router.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request) -> Response:
+    """
+    Prometheus text exposition of `app.state.metrics` (a
+    `PrometheusMetrics`). With `metrics_token` set, the scraper must send
+    `Authorization: Bearer <token>`; otherwise this is unauthenticated,
+    like the probes, and belongs behind a network restriction.
+    """
+    token = request.app.state.settings.metrics_token
+    if token:
+        scheme, _, supplied = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(supplied, token):
+            return Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+    from py_authz.core.prometheus import CONTENT_TYPE
+
+    return Response(request.app.state.metrics.render(), media_type=CONTENT_TYPE)

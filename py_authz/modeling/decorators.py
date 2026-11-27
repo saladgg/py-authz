@@ -78,8 +78,7 @@ _runners_lock = threading.Lock()
 def _runner_for(authz):
     from py_authz.sync import SyncAuthz
 
-    if isinstance(authz, SyncAuthz):
-        return authz
+    # A `SyncAuthz` never reaches here: `_run_check_sync` calls it directly.
     with _runners_lock:
         runner = _runners.get(authz)
         if runner is None:

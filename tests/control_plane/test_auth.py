@@ -9,6 +9,8 @@ drives it with `TestClient` so the dependencies run exactly as they would
 in the real app.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from fastapi import Depends, FastAPI
 from starlette.testclient import TestClient
@@ -712,3 +714,74 @@ async def test_a_verified_secret_skips_argon2_until_the_hash_changes(client, app
     )
     assert client.get("/me", headers=_bearer(secret)).status_code == 401
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_verified_secret_cache_is_a_bounded_lru(monkeypatch):
+    """REL3-13: the cache of successful verifications evicts the least
+    recently used entry once it's full, and a failed verify is never
+    cached."""
+    from py_authz.control_plane import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_VERIFIED", auth_module.OrderedDict())
+    monkeypatch.setattr(auth_module, "_VERIFIED_MAX", 2)
+    calls = []
+
+    def fake_verify(token, secret_hash):
+        calls.append(token)
+        return token != "bad"  # noqa: S105 — test token, not a secret
+
+    monkeypatch.setattr(auth_module, "verify_secret", fake_verify)
+
+    assert await auth_module._verify_cached("bad", "h") is False
+    assert await auth_module._verify_cached("bad", "h") is False
+    assert calls == ["bad", "bad"]  # failures are re-verified every time
+
+    for token in ("a", "b"):
+        assert await auth_module._verify_cached(token, "h") is True
+    assert await auth_module._verify_cached("a", "h") is True  # hit: "a" is now most recent
+    assert await auth_module._verify_cached("c", "h") is True  # evicts "b", the LRU entry
+    assert len(auth_module._VERIFIED) == 2
+
+    calls.clear()
+    assert await auth_module._verify_cached("a", "h") is True
+    assert calls == []  # still cached
+    assert await auth_module._verify_cached("b", "h") is True
+    assert calls == ["b"]  # was evicted, so verified again
+
+
+class _TouchRecorder:
+    def __init__(self):
+        self.touched: list[str] = []
+
+    async def touch_last_used(self, account_id):
+        self.touched.append(account_id)
+
+
+class _Record:
+    def __init__(self, last_used_at):
+        self.id = "sa_1"
+        self.last_used_at = last_used_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aware", [True, False], ids=["tz-aware", "naive"])
+@pytest.mark.parametrize(
+    ("age", "expect_touch"),
+    [(timedelta(seconds=5), False), (timedelta(minutes=5), True)],
+    ids=["recent", "stale"],
+)
+async def test_last_used_is_only_written_once_per_interval(aware, age, expect_touch):
+    """REL3-13: `last_used_at` is written at most once a minute, whether
+    the store hands back a tz-aware or a naive timestamp."""
+    from py_authz.control_plane.auth import _touch_last_used_throttled
+
+    now = datetime.now(UTC)
+    last_used = now - age
+    if not aware:
+        last_used = last_used.replace(tzinfo=None)
+    store = _TouchRecorder()
+
+    await _touch_last_used_throttled(store, _Record(last_used))
+
+    assert store.touched == (["sa_1"] if expect_touch else [])

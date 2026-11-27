@@ -488,3 +488,129 @@ async def test_non_strict_mode_stays_permissive_for_backwards_compatibility(doc_
 
     await authz.grant(Identity(id="service:anything"), "owner", Document(id="d1"))
     await authz.grant(Identity(id="service:anything"), "owner", Document(id="d1"))
+
+
+@pytest.mark.asyncio
+async def test_strict_validates_contextual_tuples_on_check(strict_authz):
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    authz, Document = strict_authz
+    alice = Identity(id="user:alice")
+    doc = Document(id="d1")
+
+    ok = ContextualTuple(user="user:alice", relation="owner", object="document:d1")
+    assert await authz.can("viewer", alice, doc, contextual_tuples=[ok]) is True
+
+    bad = ContextualTuple(user="user:alice", relation="approver", object="document:d1")
+    with pytest.raises(UpstreamRequestRejected, match="approver"):
+        await authz.can("viewer", alice, doc, contextual_tuples=[bad])
+
+
+@pytest.mark.asyncio
+async def test_strict_validates_list_objects_queries(strict_authz):
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    authz, Document = strict_authz
+    alice = Identity(id="user:alice")
+    await authz.grant(alice, "owner", Document(id="d1"))
+
+    assert await authz.list_objects("viewer", alice, "document") == ["document:d1"]
+    with pytest.raises(UpstreamRequestRejected, match="approver"):
+        await authz.list_objects("approver", alice, "document")
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_a_user_without_a_type_prefix(strict_authz):
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    authz, Document = strict_authz
+    with pytest.raises(UpstreamRequestRejected, match="must be of the form 'type:id'"):
+        await authz.grant(Identity(id="alice"), "owner", Document(id="d1"))
+
+
+@pytest.mark.asyncio
+async def test_strict_accepts_wildcard_and_userset_subjects_the_relation_declares():
+    from py_authz.core.exceptions import UpstreamRequestRejected
+
+    class Team(ResourceModel):
+        type = "team"
+        member = Relation("member")
+
+    class Doc(ResourceModel):
+        type = "doc"
+        viewer = Relation("viewer", subjects=["user", "user:*", "team#member"])
+        owner = Relation("owner")  # subjects default to ["user"]
+
+    reg = ResourceModelRegistry()
+    reg.register(Team)
+    reg.register(Doc)
+    client = InMemoryFGAClient(model_registry=reg, strict=True)
+
+    await client.write_tuples(
+        [
+            {"user": "user:*", "relation": "viewer", "object": "doc:public"},
+            {"user": "team:core#member", "relation": "viewer", "object": "doc:1"},
+        ]
+    )
+    assert len((await client.read_tuples(relation="viewer"))["tuples"]) == 2
+    # The wildcard grants every user (as real OpenFGA does), but not a
+    # userset subject or the wildcard "user" itself.
+    assert await client.check("user:anyone", "viewer", "doc:public") is True
+    assert await client.check("team:core#member", "viewer", "doc:public") is False
+    assert await client.check("user:*", "viewer", "doc:2") is False
+    assert await client.check("user:anyone", "viewer", "doc:1") is False
+
+    with pytest.raises(UpstreamRequestRejected, match="'user:\\*' is not an allowed subject"):
+        await client.write_tuples([{"user": "user:*", "relation": "owner", "object": "doc:1"}])
+    with pytest.raises(UpstreamRequestRejected, match="'team#member' is not an allowed subject"):
+        await client.write_tuples(
+            [{"user": "team:core#member", "relation": "owner", "object": "doc:1"}]
+        )
+
+
+@pytest.mark.asyncio
+async def test_relations_inherited_from_a_base_model_class_are_resolved():
+    class Shared(ResourceModel):
+        type = "shared"
+        owner = Relation("owner")
+        viewer = Relation("viewer", union=["owner"])
+
+    class Report(Shared):
+        type = "report"
+
+    reg = ResourceModelRegistry()
+    reg.register(Report)
+    authz = make_fake_authz(model_registry=reg)
+    alice = Identity(id="user:alice")
+
+    await authz.grant(alice, "owner", Report(id="r1"))
+
+    assert await authz.can("viewer", alice, Report(id="r1")) is True
+
+
+@pytest.mark.asyncio
+async def test_cyclic_relation_definitions_terminate_as_denied():
+    """A model whose relations imply each other in a loop (which the real
+    validator would reject) must not recurse forever in the fake."""
+
+    class Loop(ResourceModel):
+        type = "loop"
+        a = Relation("a", union=["b"])
+        b = Relation("b", union=["a"])
+
+    reg = ResourceModelRegistry()
+    reg.register(Loop)
+    authz = make_fake_authz(model_registry=reg)
+
+    assert await authz.can("a", Identity(id="user:alice"), Loop(id="1")) is False
+
+
+@pytest.mark.asyncio
+async def test_contextual_wildcard_tuple_grants_every_user_of_the_type():
+    client = InMemoryFGAClient()
+    wildcard = [{"user": "user:*", "relation": "viewer", "object": "doc:x"}]
+
+    assert await client.check("user:a", "viewer", "doc:x", contextual_tuples=wildcard) is True
+    assert await client.check("user:a", "viewer", "doc:x") is False
+    # Only users of the wildcard's type match.
+    assert await client.check("bot:a", "viewer", "doc:x", contextual_tuples=wildcard) is False

@@ -31,6 +31,12 @@ class FakeConnection:
         self.pool.fetches.append((query, args))
         return self.pool._apply_fetch_all(query, args)
 
+    async def fetchval(self, query, *args):
+        self.pool.fetches.append((query, args))
+        if self.pool.fetchval_error is not None:
+            raise self.pool.fetchval_error
+        return 1
+
 
 class FakePool:
     def __init__(self):
@@ -40,6 +46,7 @@ class FakePool:
         self.tenant_models: dict[str, str] = {}
         self.closed = False
         self.acquire_timeouts: list[float | None] = []
+        self.fetchval_error: Exception | None = None
 
     @asynccontextmanager
     async def acquire(self, timeout=None):
@@ -317,3 +324,39 @@ async def test_model_registry_delete_removes_mapping(patched_asyncpg):
     await registry.delete("t1")
 
     assert await registry.get("t1") is None
+
+
+# ----------------------------------------------------------------------
+# REL3-7: `PostgresTenantStore.ping()` readiness check
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_ping_runs_select_1_with_the_command_timeout(patched_asyncpg):
+    store = PostgresTenantStore(dsn="postgres://fake", command_timeout=2.5)
+    await store.connect()
+
+    await store.ping()
+
+    assert patched_asyncpg.fetches == [("SELECT 1", ())]
+    assert patched_asyncpg.acquire_timeouts == [2.5]
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_ping_before_connect_raises(patched_asyncpg):
+    store = PostgresTenantStore(dsn="postgres://fake")
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await store.ping()
+
+    assert patched_asyncpg.fetches == []
+
+
+@pytest.mark.asyncio
+async def test_tenant_store_ping_propagates_database_errors(patched_asyncpg):
+    store = PostgresTenantStore(dsn="postgres://fake")
+    await store.connect()
+    patched_asyncpg.fetchval_error = ConnectionError("postgres is down")
+
+    with pytest.raises(ConnectionError, match="postgres is down"):
+        await store.ping()

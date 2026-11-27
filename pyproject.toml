@@ -85,8 +85,13 @@ keycloak = [
   "pyjwt[crypto]>=2.15.0,<3"
 ]
 
+# Optional Prometheus exporter (REL3-24): `py_authz.core.prometheus`.
+prometheus = [
+  "prometheus-client>=0.21.0"
+]
+
 all = [
-  "py-authz[fastapi,redis,postgres,keycloak]",
+  "py-authz[fastapi,redis,postgres,keycloak,prometheus]",
 ]
 
 control-plane = [
@@ -206,9 +211,10 @@ source = ["py_authz"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-# DX3-4: a floor, so a module can't quietly sit at 47% again (as
-# control_plane/app.py did). `make test` fails below it.
-fail_under = 95
+# Every line and branch of py_authz/ is covered by the unit suite;
+# `make test` (and CI) fail on any regression. Code that genuinely can't be
+# reached in a test gets an explicit `# pragma: no cover` with a reason.
+fail_under = 100
 
 [tool.mypy]
 plugins = "pydantic.mypy"

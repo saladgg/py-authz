@@ -14,13 +14,13 @@ class FakeConnection:
     def __init__(self, pool):
         self.pool = pool
 
-    async def execute(self, query, *args):
-        self.pool.executes.append((query, args))
+    async def copy_records_to_table(self, table, *, columns, records, timeout=None):
+        self.pool.copies.append((table, tuple(columns), list(records), timeout))
 
 
 class FakePool:
     def __init__(self):
-        self.executes: list[tuple[str, tuple]] = []
+        self.copies: list[tuple[str, tuple, list, float | None]] = []
         self.closed = False
         self.acquire_timeouts: list[float | None] = []
 
@@ -84,6 +84,7 @@ async def test_connect_passes_command_timeout_to_pool(patched_asyncpg):
     await logger.log(event)
 
     assert patched_asyncpg.acquire_timeouts == [3.5]
+    assert patched_asyncpg.copies[0][3] == 3.5
 
 
 @pytest.mark.asyncio
@@ -102,27 +103,53 @@ async def test_log_executes_insert_with_event_fields(patched_asyncpg):
         reason="allowed via relation 'view'",
         reason_data={"cache_hit": False},
         request_id="req-1",
+        store_id="store-1",
     )
 
     await logger.log(event)
 
-    assert len(patched_asyncpg.executes) == 1
-    query, args = patched_asyncpg.executes[0]
-    assert "INSERT INTO audit_logs" in query
+    assert len(patched_asyncpg.copies) == 1
+    table, columns, records, _ = patched_asyncpg.copies[0]
+    assert table == "audit_logs"
     # `reason_data` must be JSON-serialized before binding — the
     # `audit_logs.reason_data` column is `jsonb` and asyncpg does not
     # auto-encode a Python dict into JSON on its own (REL-4).
-    assert args == (
-        ts,
-        "tenant-1",
-        "user:1",
-        "view",
-        "document:1",
-        True,
-        "allowed via relation 'view'",
-        json.dumps({"cache_hit": False}),
-        "req-1",
-    )
+    assert dict(zip(columns, records[0], strict=True)) == {
+        "timestamp": ts,
+        "tenant_id": "tenant-1",
+        "store_id": "store-1",
+        "user_id": "user:1",
+        "action": "view",
+        "resource": "document:1",
+        "allowed": True,
+        "reason": "allowed via relation 'view'",
+        "reason_data": json.dumps({"cache_hit": False}),
+        "request_id": "req-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_log_many_writes_one_copy_for_the_whole_batch(patched_asyncpg):
+    """REL3-16: a batch is one round trip, not one INSERT per event."""
+    logger = PostgresAuditLogger(dsn="postgres://fake")
+    await logger.connect()
+    events = [
+        AuditEvent(
+            timestamp=datetime(2026, 4, 18, 12, 0, i),
+            tenant_id="t",
+            user_id=f"user:{i}",
+            action="view",
+            resource="document:1",
+            allowed=True,
+        )
+        for i in range(3)
+    ]
+
+    await logger.log_many(events)
+    await logger.log_many([])
+
+    assert len(patched_asyncpg.copies) == 1
+    assert [r[3] for r in patched_asyncpg.copies[0][2]] == ["user:0", "user:1", "user:2"]
 
 
 @pytest.mark.asyncio
@@ -144,9 +171,9 @@ async def test_log_preserves_none_reason_data(patched_asyncpg):
 
     await logger.log(event)
 
-    _, args = patched_asyncpg.executes[0]
+    _, columns, records, _ = patched_asyncpg.copies[0]
     # `None` stays `None` (a genuinely absent value), not the string "null".
-    assert args[7] is None
+    assert records[0][columns.index("reason_data")] is None
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 import anyio
 
+from py_authz.cli.commands.db import db_migrate_command, db_status_command
 from py_authz.cli.commands.generate import generate_command
 from py_authz.cli.commands.migrate import migrate_command
 from py_authz.cli.commands.sync import sync_command
@@ -32,7 +33,6 @@ _EXIT_CODES: list[tuple[type[AuthzError], int]] = [
     (InvalidAuthzRequest, 3),
     (TenantNotFoundError, 3),  # a bad --tenant argument is an invalid-request shape too
     (ExternalServiceError, 4),
-    (AuthzError, 1),  # fallback for any other AuthzError subclass
 ]
 
 
@@ -40,7 +40,7 @@ def _exit_code_for(exc: AuthzError) -> int:
     for exc_type, code in _EXIT_CODES:
         if isinstance(exc, exc_type):
             return code
-    return 1
+    return 1  # any other AuthzError
 
 
 def _package_version() -> str:
@@ -67,6 +67,7 @@ Environment variables (used as fallbacks — see "Config precedence" below):
   FGA_MODEL_ID        OpenFGA authorization model ID    (sync)
   TENANT_STORE_BACKEND  postgres | redis | memory        (migrate --backend)
   TENANT_STORE_CONN   Postgres DSN / Redis URL          (migrate --backend postgres|redis)
+  POSTGRES_DSN        Postgres DSN                      (db migrate, db status)
 """
 
 _EPILOG = f"""\
@@ -84,6 +85,9 @@ Examples:
   # Migrate just one tenant, with a machine-readable summary for CI
   py-authz migrate --backend postgres --tenant acme-corp --api-url http://localhost:8082 --json
 
+  # Apply pending database migrations (a deploy step; see docs/upgrading.md)
+  py-authz db migrate --dsn $POSTGRES_DSN
+
 {_ENV_VARS}
 Config precedence: an explicit CLI flag always wins over its matching env
 var above (e.g. `--api-url` overrides $FGA_API_URL); a required value
@@ -94,7 +98,8 @@ missing from both raises a ConfigurationError (exit code 2).
 def main():
     parser = argparse.ArgumentParser(
         prog="py-authz",
-        description="CLI tooling for py-authz: generate, sync, and migrate OpenFGA models.",
+        description="CLI tooling for py-authz: generate, sync, and migrate OpenFGA models, "
+        "and migrate its Postgres schema.",
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -275,6 +280,45 @@ def main():
         help="Print a machine-readable JSON summary instead of human-readable lines",
     )
 
+    # -------------------------------------------------
+    # db migrate / db status
+    # -------------------------------------------------
+
+    db_parser = subparsers.add_parser(
+        "db",
+        help="Apply or inspect py-authz's Postgres schema migrations",
+        description="Apply or inspect the bundled Postgres schema migrations (tenants, "
+        "audit logs and the control-plane tables).",
+        epilog="Examples:\n  py-authz db status --dsn $POSTGRES_DSN --check\n"
+        "  py-authz db migrate --dsn $POSTGRES_DSN\n\n" + _ENV_VARS,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    db_sub = db_parser.add_subparsers(dest="db_command", required=True)
+    db_migrate = db_sub.add_parser(
+        "migrate",
+        help="Apply every pending migration (takes an advisory lock; safe to run concurrently)",
+    )
+    db_status = db_sub.add_parser("status", help="List migrations and whether each is applied")
+    for sub in (db_migrate, db_status):
+        sub.add_argument("--dsn", required=False, help="Postgres DSN (env: POSTGRES_DSN)")
+        sub.add_argument(
+            "--json",
+            action="store_true",
+            dest="json_output",
+            help="Print a machine-readable JSON summary",
+        )
+    db_migrate.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=300.0,
+        help="Seconds to wait for another process's migration lock (default: 300)",
+    )
+    db_status.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit 1 if any migration is pending (for CI and deploy gates)",
+    )
+
     args = parser.parse_args()
 
     # `TenantManager`/`MigrationManager` (used by `migrate`) emit progress
@@ -339,6 +383,28 @@ def main():
                     json_output=args.json_output,
                 )
             )
+
+        elif args.command == "db":
+            if args.db_command == "migrate":
+                anyio.run(
+                    functools.partial(
+                        db_migrate_command,
+                        dsn=args.dsn,
+                        lock_timeout=args.lock_timeout,
+                        json_output=args.json_output,
+                    )
+                )
+            else:
+                code = anyio.run(
+                    functools.partial(
+                        db_status_command,
+                        dsn=args.dsn,
+                        json_output=args.json_output,
+                        check=args.check,
+                    )
+                )
+                if code:
+                    raise SystemExit(code)
 
         else:
             parser.print_help()

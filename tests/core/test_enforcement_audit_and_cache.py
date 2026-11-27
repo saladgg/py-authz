@@ -432,3 +432,173 @@ async def test_invalid_request_variants_all_raise():
     for req in cases:
         with pytest.raises(InvalidAuthzRequest):
             await engine.enforce(req)
+
+
+@pytest.mark.asyncio
+async def test_audit_event_records_tenant_id_and_store_id_separately():
+    """ARCH3-16: `tenant_id` used to hold the store id."""
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(
+        fga_client=MockOpenFGAClient(allowed=True, store_id="store-9"),
+        audit_logger=audit,
+        tenant_id="acme",
+    )
+
+    await engine.enforce(_request())
+    engine.record_write(
+        identity=Identity(id="user:1"),
+        relation="viewer",
+        resource_object="doc:1",
+        operation="grant",
+    )
+    await engine.flush_audit_logs()
+
+    assert [(e.tenant_id, e.store_id) for e in audit.events] == [("acme", "store-9")] * 2
+
+
+@pytest.mark.asyncio
+async def test_standalone_engine_records_no_tenant_id():
+    audit = RecordingAuditLogger()
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(store_id="store-9"), audit_logger=audit)
+
+    await engine.enforce(_request())
+    await engine.flush_audit_logs()
+
+    assert (audit.events[0].tenant_id, audit.events[0].store_id) == (None, "store-9")
+
+
+@pytest.mark.asyncio
+async def test_backpressure_drop_is_counted_in_metrics():
+    from py_authz.core.metrics import Metrics
+
+    class HangingAuditLogger:
+        async def log(self, event):
+            await asyncio.sleep(3600)
+
+    metrics = Metrics()
+    engine = AuthzEngine(
+        fga_client=MockOpenFGAClient(allowed=True),
+        audit_logger=HangingAuditLogger(),
+        metrics=metrics,
+        max_background_audit_tasks=1,
+    )
+
+    for i in range(3):
+        await engine.enforce(_request(allowed_user=f"user:{i}"))
+
+    assert metrics.counters["audit_events_dropped_total"] == 2
+    for task in list(engine._background_audit_tasks):
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_flush_audit_logs_also_flushes_a_buffering_logger():
+    class BufferingLogger:
+        def __init__(self):
+            self.buffer, self.written = [], []
+
+        async def log(self, event):
+            self.buffer.append(event)
+
+        async def flush(self):
+            self.written += self.buffer
+            self.buffer = []
+
+    audit = BufferingLogger()
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(), audit_logger=audit)
+
+    await engine.enforce(_request())
+    await engine.flush_audit_logs()
+
+    assert len(audit.written) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audit_logs_accepts_a_synchronous_flush():
+    """A buffering logger's `flush()` may be a plain function; it must be
+    called, not awaited."""
+
+    class SyncFlushLogger:
+        def __init__(self):
+            self.buffer, self.written = [], []
+
+        async def log(self, event):
+            self.buffer.append(event)
+
+        def flush(self):
+            self.written += self.buffer
+            self.buffer = []
+
+    audit = SyncFlushLogger()
+    engine = AuthzEngine(fga_client=MockOpenFGAClient(), audit_logger=audit)
+
+    await engine.enforce(_request())
+    await engine.flush_audit_logs()
+
+    assert len(audit.written) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_shared_upstream_check_is_not_reused_by_later_calls():
+    """If the shared in-flight check itself is cancelled (e.g. the loop
+    cancelling outstanding tasks on shutdown), its waiters see the
+    cancellation and the next call starts a fresh upstream check instead
+    of coalescing onto the dead task."""
+    gate = asyncio.Event()
+
+    class GatedCheckClient(MockOpenFGAClient):
+        async def check(self, *args, **kwargs):
+            await gate.wait()
+            return await super().check(*args, **kwargs)
+
+    fga = GatedCheckClient(allowed=True)
+    engine = AuthzEngine(fga_client=fga, cache=InMemoryCache())
+    req = _request()
+
+    caller = asyncio.create_task(engine.enforce(req))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)  # the shared check is now parked on the gate
+
+    shared = [
+        t
+        for t in asyncio.all_tasks()
+        if getattr(t.get_coro(), "__qualname__", "") == "AuthzEngine._check_and_cache"
+    ]
+    assert len(shared) == 1
+    shared[0].cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    gate.set()
+    assert await engine.enforce(req) is True
+    assert len(fga.calls) == 1  # only the fresh check reached the client
+
+
+@pytest.mark.asyncio
+async def test_a_finished_check_does_not_evict_a_newer_inflight_entry():
+    """`_forget` removes an in-flight entry only if it is still its own."""
+
+    class SlowClient(MockOpenFGAClient):
+        def __init__(self):
+            super().__init__(allowed=True)
+            self.release = asyncio.Event()
+
+        async def check(self, *args, **kwargs):
+            await self.release.wait()
+            return await super().check(*args, **kwargs)
+
+    client = SlowClient()
+    engine = AuthzEngine(fga_client=client, cache=InMemoryCache())
+    pending = asyncio.ensure_future(engine.enforce(_request()))
+    await asyncio.sleep(0)
+    (key,) = engine._inflight_checks
+    newer = asyncio.get_running_loop().create_future()
+    engine._inflight_checks[key] = newer  # stand-in for a newer in-flight check
+
+    client.release.set()
+    assert await pending is True
+    await asyncio.sleep(0)
+
+    assert engine._inflight_checks[key] is newer
+    newer.cancel()

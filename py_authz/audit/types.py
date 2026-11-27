@@ -7,6 +7,11 @@ from typing import Any
 class AuditEvent:
     """
     Represents a single audit log event.
+
+    `tenant_id` is the tenant the deciding engine serves (set by
+    `MultiTenantAuthz`; `None` for a standalone engine). `store_id` is the
+    OpenFGA store the decision ran against. Before ARCH3-16, `tenant_id`
+    held the store id and there was no `store_id`.
     """
 
     timestamp: datetime
@@ -19,3 +24,4 @@ class AuditEvent:
 
     reason: str | None = None
     reason_data: Any | None = None
+    store_id: str | None = None

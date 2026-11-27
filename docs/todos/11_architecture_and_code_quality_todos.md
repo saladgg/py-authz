@@ -4,12 +4,12 @@ Execution checklist for
 [`11_architecture_and_code_quality.md`](11_architecture_and_code_quality.md).
 IDs match that file.
 
-> **Status (2026-11-25):** Tier 0 shipped (ARCH3-1, ARCH3-14), plus
+> **Status (2026-11-26):** Tier 0 shipped (ARCH3-1, ARCH3-14), plus
 > ARCH3-9 from Tier 2, pulled forward to back `10`'s service-account fix.
 > Tier 1 (ARCH3-2/3/4/5) shipped in the second batch (2026-11-24), along
 > with ARCH3-7, ARCH3-10 and ARCH3-15. Batch 3 (2026-11-25) shipped
-> ARCH3-6, ARCH3-8 and ARCH3-17. **Still open:** the Tier 3 refactors
-> (ARCH3-11/12/13), ARCH3-16 and ARCH3-18.
+> ARCH3-6, ARCH3-8 and ARCH3-17. Batch 4 (2026-11-26) shipped ARCH3-16.
+> **Still open:** the Tier 3 refactors (ARCH3-11/12/13) and ARCH3-18.
 
 ---
 
@@ -162,8 +162,17 @@ IDs match that file.
 
 ## Tier 4 — Polish
 
-- [ ] **ARCH3-16 — Record both `tenant_id` and `store_id` on audit
+- [x] **ARCH3-16 — Record both `tenant_id` and `store_id` on audit
   events** (migration `0009`).
+  Shipped (batch 4): `AuthzEngine(tenant_id=...)`, set by
+  `MultiTenantAuthz`; `AuditEvent.tenant_id` is the tenant and the new
+  `AuditEvent.store_id` the store. Migration `0009` adds the nullable
+  column (catalog-only, 5 s `lock_timeout`). Pre-0009 rows keep the
+  store id in `tenant_id`: `PostgresAuditQuery(legacy_store_id=)`
+  matches them, and `audit_logs_backfill_0009.example.sql` rewrites them
+  on request. `GET /audit-logs?tenant_id=` no longer 404s for an unknown
+  tenant, so a deprovisioned tenant's history stays readable. Live test
+  covers an unversioned pre-0009 database upgraded in place.
 - [x] **ARCH3-17 — Boundary cleanups** (public
   `write_authorization_model`, move `load_module`, drop `TupleRef`
   duck-typing, `reason`/`actor` on bulk operations, richer `__init__`
