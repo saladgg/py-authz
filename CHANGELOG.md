@@ -5,6 +5,15 @@ Breaking changes and upgrade steps for each release are collected in
 
 <!-- version list -->
 
+## v2.2.0 (2026-11-27)
+
+### Features
+
+- Schema migrations, audit store_id and batching, RBAC cache, Prometheus, 100% coverage (audit round
+  3 batch 4) ([#29](https://github.com/saladgg/py-authz/pull/29),
+  [`5bb473f`](https://github.com/saladgg/py-authz/commit/5bb473f7577bd548d073f006a1219ca5d4f93670))
+
+
 ## v2.1.0 (2026-11-25)
 
 ### Bug Fixes
